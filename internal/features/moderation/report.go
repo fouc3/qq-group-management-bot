@@ -59,18 +59,13 @@ func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID,
 			"in the window", ErrUnjudged)
 	}
 
-	// The group's own list of what it accepts is a veto, and it is applied before
-	// the model is asked anything. That is deliberate: a group's official site must
-	// not become an advertisement because a model was having a bad day, or because
-	// somebody wrote a convincing sentence into the same window.
-	if matched, allowed := h.cfg.allowedIn(groupOpenID, quotedText); allowed {
-		return feature.ModerationVerdict{
-			SubjectOpenID:    subject,
-			QuotedMessageID:  quotedID,
-			JudgedMessageIDs: judged,
-			Reason:           "该群合法内容：" + matched,
-		}, nil
-	}
+	// The group's list of what it considers legitimate is deliberately **not** a
+	// veto here any more. It was one, and it was unsound: a rule about text is
+	// satisfied by the text, so the advertisement that carried an allowed word as
+	// a shield was never judged at all. Both attempts are written down in
+	// allowedIn. The list is moving into the prompt as trusted context, which is
+	// where the judgement it needs can actually be made.
+	_ = quotedText
 
 	verdict, err := h.Judge(ctx, chain)
 	if err != nil {

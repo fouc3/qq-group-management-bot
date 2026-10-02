@@ -223,34 +223,32 @@ func groupSection(t *testing.T, body string) string {
 	return "groups:\n  \"G-" + t.Name() + "\":\n" + body
 }
 
-// TestTheAllowListIsAVeto covers the group's own list of what it accepts: a
-// report about something on it is answered without asking the model at all.
+// TestTheAllowListDoesNotExemptAnything records why the content exemption was
+// removed instead of repaired.
 //
-// Asking anyway would be the weaker design. The model's answer cannot be relied
-// on to respect the list -- it may not even be shown it -- so the veto belongs to
-// the code, before the message goes anywhere.
-func TestTheAllowListIsAVeto(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
-		`"reason":"看起来像广告","confidence":0.99}`}
-	h, group := reportHarness(t, stub,
-		groupSection(t, "    allow: [\"our-site.example\"]\n"))
-	quoted := cacheChain(t, h, group, "正常聊天",
-		"这是我们自己的官网 our-site.example 的介绍")
-
-	report, err := h.JudgeQuoted(context.Background(), group, quoted)
-	if err != nil {
-		t.Fatalf("JudgeQuoted: %v", err)
+// Both of these were reported as working, and both did work. The second is the
+// first with one character inserted, which is all it takes when the rule is about
+// text: an exemption keyed on what a message says is satisfied by what the message
+// says.
+func TestTheAllowListDoesNotExemptAnything(t *testing.T) {
+	cases := map[string]string{
+		"the allowed word carried as a shield": "deepseek0.01x https://q1.1110103.xyz/（意思是ds模型中转站0.01倍率）\n防屏蔽：api.mcapple.top",
+		"the same, with the advertisement's own domain broken up so the " +
+			"extractor cannot see it": "deepseek0.01x https://q1删.1110103删.删xyz/\n防屏蔽：api.mcapple.top",
 	}
-	if report.Category != "" {
-		t.Errorf("report = %+v, want nothing to act on", report)
+	cfg := Config{
+		Categories: map[string]Category{"ad": {Label: "广告", Mute: "10m"}},
+		Groups: map[string]GroupOverride{
+			"G-1": {Allow: []string{"api.mcapple.top"}},
+		},
 	}
-	if len(stub.requests) != 0 {
-		t.Error("the model was asked about a message the group had already accepted")
-	}
-	// The reason names the entry that matched, and it is for the administrators:
-	// the group itself is told that nothing was found.
-	if !strings.Contains(report.Reason, "our-site.example") {
-		t.Errorf("reason = %q, want it to name the entry that matched", report.Reason)
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			if matched, allowed := cfg.allowedIn("G-1", text); allowed {
+				t.Errorf("exempted by %q, which is how an advertisement gets past "+
+					"the judge:\n%s", matched, text)
+			}
+		})
 	}
 }
 

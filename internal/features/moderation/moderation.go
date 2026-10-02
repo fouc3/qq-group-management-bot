@@ -146,22 +146,30 @@ func (c *Config) judgingEnabledFor(groupOpenID string) bool {
 	return true
 }
 
-// allowedIn reports whether a message is on one group's list of what it accepts,
-// and which entry matched.
+// allowedIn reports whether a message is one this group has declared legitimate.
+//
+// It always says no, and that is deliberate: the content exemption it used to
+// provide has been removed rather than repaired, because every version of it was
+// unsound for the same reason -- it was a rule about text, applied to text the
+// person being judged writes.
+//
+// Two versions, both defeated by the obvious trick:
+//
+//   - matching a word anywhere in the message. The advertisement that carries a
+//     whitelisted word as a shield -- "deepseek0.01x https://q1.1110103.xyz/
+//     防屏蔽：api.mcapple.top" -- was never sent to the judge at all;
+//   - matching domains, and exempting only when every domain in the message is
+//     allowed. Write the advertisement's own domain so the extractor cannot see
+//     it, by breaking it up the way spammers already do, and the only domain left
+//     visible is the allowed one: exempt again.
+//
+// The lesson is not that the matching needed to be better. It is that an
+// exemption keyed on what a message says can always be satisfied by what the
+// message says. What a group means by "legitimate" is a judgement, and judgements
+// belong to the judge: the group's list is handed to the model as trusted context
+// instead. Where the code must decide, it decides on identity -- who sent it --
+// and never on content.
 func (c *Config) allowedIn(groupOpenID, text string) (string, bool) {
-	if strings.TrimSpace(text) == "" {
-		return "", false
-	}
-	lowered := strings.ToLower(text)
-	for _, entry := range c.groupFor(groupOpenID).Allow {
-		needle := strings.ToLower(strings.TrimSpace(entry))
-		if needle == "" {
-			continue
-		}
-		if strings.Contains(lowered, needle) {
-			return entry, true
-		}
-	}
 	return "", false
 }
 
