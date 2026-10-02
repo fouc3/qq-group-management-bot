@@ -75,6 +75,15 @@ onebot:
 # ───────────────────────────────────────────────────────────────────
 #  日志
 # ───────────────────────────────────────────────────────────────────
+# 数据层：持久化「待验证扣留」与「禁止加群名单」。
+# 默认 sqlite，文件落在 $XDG_STATE_HOME/qq-group-management-bot/bot.db
+# （缺省 ~/.local/state/...）。换 postgres 只改这一段：代码一套、两种方言。
+# 注意 sqlite 是单写者，max_open_conns 保持 1；postgres 可调高。
+database:
+  driver: sqlite        # sqlite | postgres
+  dsn: ""               # sqlite 是文件路径；postgres 是连接串。留空用上面的默认值
+  max_open_conns: 1
+
 log:
   level: info    # debug | info | warn | error
   format: text   # text | json
@@ -176,6 +185,10 @@ features:
 
     # 无论 action 是什么，都拒绝被平台标记为机器人的申请
     decline_bots: false
+    # 名单里的人来申请加群时：decline（默认，直接拒绝）或 ignore（留给人处理）。
+    # 只有这两个取值 —— 在名单上不等于被批准。它只影响审批：绝不踢人，
+    # 也不追溯已经在群里的人。名单由群内命令 /黑名单 管理。
+    barred: decline
 
     # ── 黑名单（已预留，当前为空实现）─────────────────────────────
     # 每个申请到达时，**第一步**就是查黑名单；在黑名单里的人会被拒绝，
