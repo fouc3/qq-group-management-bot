@@ -89,6 +89,25 @@ func quotedReport(quotedIndex string) *qqbotsdk.GroupMessageCreateData {
 	return data
 }
 
+// TestAnyMemberMayReport covers the gate the report command has to sit above.
+//
+// It used to sit below it, so an ordinary member was answered "你没有权限使用管理
+// 命令。" -- and none of the report tests caught that, because every one of them
+// reported as an administrator. What a member who forgot the quote should get is the
+// instruction to quote, which is what this asserts.
+func TestAnyMemberMayReport(t *testing.T) {
+	h := reportHarness(t, &stubJudge{})
+	h.send("/违规举报", "MEMBER-OPENID", testGroupOpenID)
+
+	reply := h.lastReply()
+	if strings.Contains(reply, "没有权限") {
+		t.Errorf("an ordinary member was refused: %q", reply)
+	}
+	if !strings.Contains(reply, "引用") {
+		t.Errorf("reply = %q, want the instruction to quote a message", reply)
+	}
+}
+
 // waitForReply waits for a reply that mentions something, because the judgement
 // runs on its own goroutine and the test must not race it.
 func waitForReply(t *testing.T, h *harness, contains string) string {

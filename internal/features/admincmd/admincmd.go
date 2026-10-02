@@ -410,6 +410,17 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		// already see when an administrator mistypes a command.
 		h.reply(ctx, data, usage(h.cfg.Prefix))
 		return nil
+	case "违规举报", "违规反馈", "report":
+		// Reporting is for every member, which is the point of it: the people who
+		// see an advertisement are not only the administrators. What follows a
+		// report is decided by the judgement and the configuration, never by who
+		// raised it, so nothing about managing the group is reachable this way.
+		//
+		// Dispatched here, above the administrator check, and the placement is the
+		// fix for a real bug: the report used to be handled inside the switch behind
+		// that gate, so every ordinary member was answered "你没有权限使用管理命令。"
+		// The tests missed it because every one of them reported as an administrator.
+		return h.reportCommand(ctx, data, command)
 	}
 
 	if !isAdmin {
@@ -616,8 +627,6 @@ func (h *handler) run(ctx context.Context, data *qqbotsdk.GroupMessageCreateData
 			return nil
 		}
 		return h.resendVerification(ctx, data, target)
-	case "违规举报", "违规反馈", "report":
-		return h.reportCommand(ctx, data, command)
 	case "黑名单", "blacklist":
 		return h.blacklistCommand(ctx, data, command)
 	case "debug":
