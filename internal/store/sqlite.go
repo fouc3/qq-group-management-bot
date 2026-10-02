@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	// Registers the "sqlite" driver. The pure-Go implementation is deliberate: the
@@ -19,6 +21,12 @@ func init() { openSQLite = openSQLiteStore }
 func openSQLiteStore(ctx context.Context, path string, connections int) (*sqlStore, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("store: sqlite needs a file path")
+	}
+	// SQLite creates the file but not the directory, and a machine that has never
+	// run this bot has no state directory yet. Doing it here means every caller
+	// gets it, rather than each one remembering.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

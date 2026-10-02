@@ -598,6 +598,93 @@ notify_members: ["ADMIN-OPENID"]
 	}
 }
 
+// TestTheLegacyFileIsImportedOnce covers the changeover and the trap inside it.
+//
+// The marker decides whether to import, not an empty table: the table empties
+// again once the last member verifies, and a check based on it would read the
+// stale file a second time and bring holds that are long over back to life.
+func TestTheLegacyFileIsImportedOnce(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "bot.db")
+	legacy := filepath.Join(t.TempDir(), "pending.json")
+	now := time.Now()
+	payload, err := json.Marshal(storedState{
+		Version: stateFileVersion,
+		Pending: []storedEntry{{
+			Token:        "LEGACY-1",
+			GroupOpenID:  testGroupOpenID,
+			MemberOpenID: "LEGACY-MEMBER",
+			JoinedAt:     now.Unix(),
+			Deadline:     now.Add(time.Hour),
+			HeldUntil:    now.Add(24 * time.Hour),
+			Settings: Settings{
+				MuteMinutes:   1440,
+				DeadlineHours: 1,
+				OnDeadline:    OnDeadlineNotify,
+				NotifyMembers: []string{"ADMIN-OPENID"},
+				Prompt:        "{at} 请验证",
+				ButtonLabel:   "✅ 我是真人",
+				VisitedLabel:  "已验证",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encoding the older file: %v", err)
+	}
+	if err := os.WriteFile(legacy, payload, 0o600); err != nil {
+		t.Fatalf("writing the older file: %v", err)
+	}
+	section := `
+enabled: true
+on_deadline: notify
+notify_members: ["ADMIN-OPENID"]
+state_file: ` + legacy + `
+`
+
+	first := newHarnessWithStore(t, section, databasePath)
+	imported, found := first.verifier.lookup("LEGACY-1")
+	if !found {
+		t.Fatal("the record in the older file was not imported")
+	}
+	// The settings travel with it: a member who is already muted must keep the
+	// rules they were held under, not pick up the current defaults.
+	if imported.settings.MuteMinutes != 1440 || imported.settings.ButtonLabel != "✅ 我是真人" {
+		t.Errorf("imported settings = %+v, want the ones from the file", imported.settings)
+	}
+
+	// The member verifies and the hold is forgotten, which empties the table.
+	first.verifier.forget("LEGACY-1")
+
+	// A restart must not read the file again.
+	second := newHarnessWithStore(t, section, databasePath)
+	if _, found := second.verifier.lookup("LEGACY-1"); found {
+		t.Error("the older file was imported a second time, reviving a hold that is over")
+	}
+}
+
+// TestACorruptLegacyFileDoesNotStopTheBot covers the choice to carry on rather
+// than refuse to start: the file is no longer the source of truth, and taking the
+// bot down over it would leave the whole group unmanaged.
+func TestACorruptLegacyFileDoesNotStopTheBot(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "bot.db")
+	legacy := filepath.Join(t.TempDir(), "pending.json")
+	if err := os.WriteFile(legacy, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarnessWithStore(t, `
+enabled: true
+on_deadline: notify
+notify_members: ["ADMIN-OPENID"]
+state_file: `+legacy+`
+`, databasePath)
+
+	// Still able to hold somebody, which is what "did not stop" means.
+	h.join()
+	if h.tokenFromPrompt() == "" {
+		t.Error("the bot did not hold a new member after a corrupt older file")
+	}
+}
+
 // deadlineEntry builds a pending entry the way production carries it, with the
 // group's settings already resolved, because the handlers read the rules off
 // the entry rather than from the configuration.
