@@ -458,6 +458,19 @@ func (h *handler) Register(ctx context.Context) error {
 			"addr", h.deps.Redis.Addr, "retention_hours", h.cfg.CacheHours)
 	}
 
+	// Said out loud because these are what decide whether a judgement can hurt
+	// somebody. An operator reading the log should be able to see whether the bot
+	// is armed without opening the configuration file -- and "is it still in
+	// dry_run" is the first question anybody asks when something goes wrong.
+	h.deps.Logger.Info("the judge is configured",
+		"dry_run", h.DryRun(),
+		"model", h.cfg.Model.Name,
+		"categories", len(h.cfg.Categories),
+		"default_mute", h.cfg.DefaultMute,
+		"report_penalty_seconds", h.ReportPenaltySeconds(),
+		"context", fmt.Sprintf("%d before, %d after, %d minutes",
+			h.cfg.ContextBefore, h.cfg.ContextAfter, h.cfg.ChainMinutes))
+
 	// The receive setting decides whether this feature can work at all, so it is
 	// read and reported rather than assumed. A group that delivers only mentions
 	// gives the cache nothing but the messages that mention the bot, and a report
