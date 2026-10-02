@@ -45,20 +45,11 @@ func (h *handler) reportCommand(ctx context.Context,
 		return nil
 	}
 
-	// Some quotes cannot be resolved at all, and waiting will not change that.
-	//
-	// A forwarded or merged message is named by a temporary index -- TMP_..., seen
-	// in the wild -- which never appears in an ordinary message event, so the cache
-	// can never hold it. The wait below would only leave the reporter standing there
-	// for twelve seconds before saying no. Saying so at once, with what to do
-	// instead, is the honest answer.
-	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(quotedIndex)), "TMP_") {
-		h.deps.Logger.Info("a report quoted a message whose index is temporary",
-			"group", data.GroupOpenID, "ref_msg_idx", quotedIndex)
-		h.reply(ctx, data, "这条引用机器人拿不到原始消息（对方那条本身是转发或引用别人的"+
-			"复合消息），既撤回不了也禁言不了。请直接引用对方发的那条普通消息再举报。")
-		return nil
-	}
+	// Some quotes carry an index the cache can never hold -- a quote of a message that
+	// is itself a quote comes with a temporary one -- and the judgement finds the
+	// message by the quoted text instead. That happens behind this call: what is
+	// passed in is a locator, never evidence, and the message it locates is judged as
+	// its author's own words.
 
 	// Written down because the platform's identifiers here are not what they
 	// looked like: a quote names the message it points at, and that name turned out
@@ -85,17 +76,24 @@ func (h *handler) reportCommand(ctx context.Context,
 	// On its own goroutine, with a context that outlives this handler: the handler
 	// runs on the path that delivers every event, and a model call of several
 	// seconds would stall every group behind it.
-	go h.judgeReport(context.WithoutCancel(ctx), data.GroupOpenID, quotedIndex, reporter)
+	go h.judgeReport(context.WithoutCancel(ctx), data.GroupOpenID, quotedIndex,
+		message, reporter)
 	return nil
 }
 
 // judgeReport runs one judgement and carries out whatever it asks for.
+//
+// quotedText is what the quote showed of the message it points at: a locator, never
+// evidence. It exists because the platform names such a message twice -- the quote
+// carries an index, and for a message that is itself a quote that index is temporary
+// and useless, while the text it showed is what the message actually said.
 func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
-	reporter string) {
+	quotedText, reporter string) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
-	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quotedIndex, reporter)
+	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quotedIndex,
+		quotedText, reporter)
 	if err != nil {
 		// No judgement is not a clean verdict: nobody is touched, and the group is
 		// told why rather than left wondering.

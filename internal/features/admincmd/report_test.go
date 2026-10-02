@@ -27,20 +27,22 @@ type stubJudge struct {
 	// nothing, zero when it does not ask for that.
 	penalty int64
 	// reporter, outcome and outcomeMute are what the command told the stub, so a
-	// test can see the two halves of a judgement line up.
+	// test can see the two halves of a judgement line up. quotedText is the locator
+	// the quote carried, which must reach the judgement and must never be judged.
 	reporter    string
+	quotedText  string
 	outcome     string
 	outcomeMute int64
 }
 
 func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
-	quotedIndex, reporter string) (feature.ModerationVerdict, error) {
+	quotedIndex, quotedText, reporter string) (feature.ModerationVerdict, error) {
 	if s.release != nil {
 		<-s.release
 	}
 	s.judged++
 	s.lastGroup, s.lastQuoted = groupOpenID, quotedIndex
-	s.reporter = reporter
+	s.quotedText, s.reporter = quotedText, reporter
 	if s.err != nil {
 		return feature.ModerationVerdict{}, s.err
 	}
@@ -108,15 +110,19 @@ func TestAnyMemberMayReport(t *testing.T) {
 	}
 }
 
-// TestAForwardedQuoteIsAnsweredAtOnce covers the quote that can never resolve.
+// TestATemporaryQuoteReachesTheJudgement covers the quote whose index the cache can
+// never hold.
 //
-// A forwarded or merged message carries a temporary index, which never appears in
-// an ordinary message event and so is never in the cache. Waiting for it would
-// leave the reporter standing there for the whole retry budget before saying no; the
-// useful answer names the problem and says what to do instead.
-func TestAForwardedQuoteIsAnsweredAtOnce(t *testing.T) {
-	h := reportHarness(t, &stubJudge{})
-	start := time.Now()
+// A quote of a message that is itself a quote comes with a temporary index, and no
+// ordinary message event ever carries one, so the judgement has to find the message by
+// the text the quote showed instead. The report must therefore reach the judgement --
+// an earlier version refused it outright with an explanation, which left the reporter
+// unable to report anything that had been quoted before.
+func TestATemporaryQuoteReachesTheJudgement(t *testing.T) {
+	judge := &stubJudge{verdict: feature.ModerationVerdict{
+		Category: "ad", Label: "广告", MuteSeconds: 600, SubjectOpenID: "SUBJECT-1",
+	}}
+	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(),
 		quotedReport("TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4"),
@@ -124,15 +130,13 @@ func TestAForwardedQuoteIsAnsweredAtOnce(t *testing.T) {
 		t.Fatalf("reportCommand: %v", err)
 	}
 
-	reply := h.lastReply()
-	if !strings.Contains(reply, "转发") && !strings.Contains(reply, "合并") {
-		t.Errorf("reply = %q, want it to name what kind of message this is", reply)
+	// The judgement runs on its own goroutine, so the verdict is the reply to wait for.
+	reply := waitForReply(t, h, "广告")
+	if judge.judged != 1 {
+		t.Errorf("the judgement was asked for %d times, want once", judge.judged)
 	}
-	if strings.Contains(reply, "送检失败") {
-		t.Errorf("reply = %q, want an explanation rather than a judgement failure", reply)
-	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("the answer took %s: nothing was ever going to arrive", elapsed)
+	if !strings.Contains(reply, "已撤回") && !strings.Contains(reply, "已禁言") {
+		t.Errorf("reply = %q, want what was done about it", reply)
 	}
 }
 

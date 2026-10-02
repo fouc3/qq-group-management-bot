@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/redis/go-redis/v9"
 
@@ -82,6 +84,96 @@ func (c *Cache) Close() error { return c.client.Close() }
 // points at would mean reading the whole set and looking for it.
 func (c *Cache) keys(groupOpenID string) (set, index string) {
 	return c.prefix + ":msg:" + groupOpenID + ":z", c.prefix + ":msg:" + groupOpenID + ":i"
+}
+
+// quoteCandidates pulls the readable lines out of a quote's rendering.
+//
+// The platform hands a quoted message over as a small report about itself -- "===
+// 消息 1 ===", "[消息内容] …", a nested "--- 第1条 ---" -- and all of that is
+// scaffolding. What is left is what the message actually said, and that is the only
+// thing worth matching against the cache.
+func quoteCandidates(text string) []string {
+	var candidates []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if marker := "[消息内容]"; strings.Contains(line, marker) {
+			line = strings.TrimSpace(line[strings.Index(line, marker)+len(marker):])
+		} else if strings.HasPrefix(line, "===") || strings.HasPrefix(line, "---") ||
+			strings.HasPrefix(line, "[") {
+			// A heading, a type line, an attachment line: none of it is something a
+			// member wrote, and matching on it would match almost everything.
+			continue
+		}
+		// Short lines are not evidence of anything: every group has people saying "?"
+		// and "好", and matching one of those would point at the wrong message.
+		if utf8.RuneCountInString(line) >= 4 {
+			candidates = append(candidates, line)
+		}
+	}
+	return candidates
+}
+
+// Locate finds the message a quote points at when its index cannot be used.
+//
+// A quote of a message that is itself a quote carries a temporary index, which no
+// ordinary message event ever has, so the cache cannot be asked about it directly.
+// The quoted text can be asked about: what the quote shows is what some cached
+// message said, and within a few minutes of a report there is normally exactly one
+// such message.
+//
+// Exactly one, or nothing. Two messages saying the same thing is not a reason to
+// pick either -- the wrong pick would silence the wrong member -- so that is
+// reported as a miss, and the caller is expected to treat it as no judgement rather
+// than as a guess.
+func (c *Cache) Locate(ctx context.Context, groupOpenID, quotedText string,
+	within time.Duration) (CachedMessage, error) {
+	candidates := quoteCandidates(quotedText)
+	if groupOpenID == "" || len(candidates) == 0 {
+		return CachedMessage{}, ErrNotCached
+	}
+	if c.paused() {
+		return CachedMessage{}, ErrUnavailable
+	}
+	set, _ := c.keys(groupOpenID)
+
+	raws, err := c.client.ZRangeByScore(ctx, set, &redis.ZRangeBy{
+		Min: strconv.FormatInt(time.Now().Add(-within).UnixMilli(), 10),
+		Max: "+inf",
+	}).Result()
+	if err != nil {
+		c.failed(err)
+		return CachedMessage{}, fmt.Errorf("searching the cache for a quoted message: %w", err)
+	}
+
+	var found []CachedMessage
+	for _, raw := range raws {
+		var decoded CachedMessage
+		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+			continue
+		}
+		if decoded.Text == "" {
+			continue
+		}
+		for _, candidate := range candidates {
+			if strings.Contains(decoded.Text, candidate) {
+				found = append(found, decoded)
+				break
+			}
+		}
+	}
+	switch len(found) {
+	case 1:
+		c.succeeded()
+		return found[0], nil
+	case 0:
+		return CachedMessage{}, ErrNotCached
+	default:
+		return CachedMessage{}, fmt.Errorf("%w: %d cached messages match the quoted text",
+			ErrNotCached, len(found))
+	}
 }
 
 // paused reports whether the cache is inside its back-off window.

@@ -17,16 +17,35 @@ import (
 const (
 	cacheRetryAttempts = 12
 	cacheRetryDelay    = time.Second
+	// locateWithin is how far back a quote's text is searched for. A quote points at
+	// something the reporter just saw, so the message is normally seconds old: this is
+	// wide enough to survive a busy group and narrow enough that two people saying the
+	// same thing stays unlikely.
+	locateWithin = 30 * time.Minute
 )
 
-// contextWithRetry looks the window up, waiting a moment for a message that is
-// still on its way.
+// resolveWindow finds the messages to judge.
 //
-// Only a miss is retried. A cache that is down, or a window that was found but
-// does not contain the quoted message, are not things that improve by waiting.
-func (h *handler) contextWithRetry(ctx context.Context, groupOpenID,
-	quotedIndex string) ([]CachedMessage, error) {
+// Two ways in, because the platform gives two kinds of index. An ordinary quote
+// carries the message's own index, which the cache holds -- and a miss there is worth
+// waiting on, because the mention that carries the command can be delivered before
+// the message it quotes. A quote of a message that is itself a quote carries a
+// temporary index instead, which no ordinary event ever has and the cache can never
+// hold, so waiting for it is waiting for nothing, and the quoted text is the only way
+// in.
+//
+// The text is a locator and never evidence: it chooses which cached message is meant,
+// and that message is then judged as its author's own words.
+func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
+	quotedText string) ([]CachedMessage, error) {
 	span := time.Duration(h.cfg.ChainMinutes) * time.Minute
+
+	if temporaryIndex(quotedIndex) {
+		if window, err := h.locateWindow(ctx, groupOpenID, quotedText, span); err == nil {
+			return window, nil
+		}
+	}
+
 	var err error
 	for attempt := 1; attempt <= cacheRetryAttempts; attempt++ {
 		var chain []CachedMessage
@@ -39,7 +58,15 @@ func (h *handler) contextWithRetry(ctx context.Context, groupOpenID,
 			}
 			return chain, nil
 		}
-		if !errors.Is(err, ErrNotCached) || attempt == cacheRetryAttempts {
+		if !errors.Is(err, ErrNotCached) {
+			return nil, err
+		}
+		if window, locateErr := h.locateWindow(ctx, groupOpenID, quotedText, span); locateErr == nil {
+			h.deps.Logger.Info("the quoted message was found by its text",
+				"attempt", attempt)
+			return window, nil
+		}
+		if attempt == cacheRetryAttempts {
 			return nil, err
 		}
 		// Waited out rather than asked again immediately, and abandoned the moment
@@ -53,6 +80,26 @@ func (h *handler) contextWithRetry(ctx context.Context, groupOpenID,
 	return nil, err
 }
 
+// locateWindow finds a quoted message by what the quote showed of it, then reads the
+// window around it by the index that message really has.
+func (h *handler) locateWindow(ctx context.Context, groupOpenID, quotedText string,
+	span time.Duration) ([]CachedMessage, error) {
+	if strings.TrimSpace(quotedText) == "" {
+		return nil, ErrNotCached
+	}
+	located, err := h.cache.Locate(ctx, groupOpenID, quotedText, locateWithin)
+	if err != nil {
+		return nil, err
+	}
+	return h.cache.Context(ctx, groupOpenID, located.Idx,
+		h.cfg.ContextBefore, h.cfg.ContextAfter, span)
+}
+
+// temporaryIndex reports whether an index is one the cache can never hold.
+func temporaryIndex(index string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(index)), "TMP_")
+}
+
 // JudgeQuoted is the seam's entry point: it judges one quoted message and writes
 // the judgement down.
 //
@@ -61,8 +108,8 @@ func (h *handler) contextWithRetry(ctx context.Context, groupOpenID,
 // looked" are different facts, and a record that only held the first would answer
 // the wrong question afterwards.
 func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
-	reporterOpenID string) (feature.ModerationVerdict, error) {
-	report, err := h.judgeQuoted(ctx, groupOpenID, quotedIndex)
+	quotedText, reporterOpenID string) (feature.ModerationVerdict, error) {
+	report, err := h.judgeQuoted(ctx, groupOpenID, quotedIndex, quotedText)
 	return h.recordJudgement(ctx, groupOpenID, reporterOpenID, report, err), err
 }
 
@@ -72,8 +119,8 @@ func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 // Everything that is not a judgement is an error. A cache miss and an unreadable
 // answer both mean nobody knows whether the message is acceptable, and a caller
 // that confused that with acceptable would quietly drop a real report.
-func (h *handler) judgeQuoted(ctx context.Context, groupOpenID,
-	quotedIndex string) (feature.ModerationVerdict, error) {
+func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
+	quotedText string) (feature.ModerationVerdict, error) {
 	if strings.TrimSpace(quotedIndex) == "" {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: the report does not say "+
 			"which message it is about", ErrUnjudged)
@@ -92,7 +139,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID,
 	// that came just before it, which was measured the hard way: the same report
 	// failed when it followed the message by four seconds and worked when it
 	// followed it by ten. A miss is therefore waited on rather than believed.
-	chain, err := h.contextWithRetry(ctx, groupOpenID, quotedIndex)
+	chain, err := h.resolveWindow(ctx, groupOpenID, quotedIndex, quotedText)
 	if err != nil {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 	}

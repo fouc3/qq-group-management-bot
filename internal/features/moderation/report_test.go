@@ -93,7 +93,7 @@ func TestAReportBecomesAVerdict(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我", "谁在发广告")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestACategoryWithoutItsOwnDurationFallsBack(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "先交押金")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestACleanVerdictHasNoPunishment(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "这条没问题")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestNoJudgementIsAnError(t *testing.T) {
 			if testCase.noModel {
 				h.cfg.Model.Name = ""
 			}
-			_, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+			_, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 			if !errors.Is(err, ErrUnjudged) {
 				t.Fatalf("err = %v, want ErrUnjudged", err)
 			}
@@ -259,7 +259,7 @@ func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
 	h, group := reportHarness(t, stub, groupSection(t, "    enabled: false\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")
 
-	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1"); !errors.Is(err, ErrUnjudged) {
+	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1"); !errors.Is(err, ErrUnjudged) {
 		t.Fatalf("err = %v, want ErrUnjudged", err)
 	}
 	if len(stub.requests) != 0 {
@@ -276,7 +276,7 @@ func TestAGroupCanHaveItsOwnDurations(t *testing.T) {
 		groupSection(t, "    categories:\n      ad: \"30m\"\n"))
 	quoted := cacheChain(t, h, group, "加群送皮肤 私聊我")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestASenderTheGroupTrustsIsNotJudged(t *testing.T) {
 	// group declared.
 	quoted := cacheChain(t, h, group, "本群公告", "官方说明")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestTheGroupsOwnListGoesIntoTheInstructions(t *testing.T) {
 		groupSection(t, "    allow: [\"api.mcapple.top\"]\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")
 
-	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1"); err != nil {
+	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1"); err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
 	request := stub.lastRequest(t)

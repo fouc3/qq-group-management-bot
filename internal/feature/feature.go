@@ -222,10 +222,16 @@ func InjectAdminDirectory(features []Feature) {
 type Moderation interface {
 	// JudgeQuoted judges the window of messages around one quoted message.
 	//
+	// quotedText is what the quote showed of the message it points at. It is a
+	// **locator and nothing else**: a quote of a message that is itself a quote comes
+	// with a temporary index the cache can never hold, so the text is how that
+	// message gets found. It is never sent for judging -- what is judged is the
+	// message that was found, and it is judged as its author's own words.
+	//
 	// An error means no judgement was reached: the message is not in the cache,
 	// the cache is down, or the model could not be read. None of those is a
 	// violation, and a caller must never treat one as a violation.
-	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
+	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex, quotedText,
 		reporterOpenID string) (ModerationVerdict, error)
 	// DryRun reports whether judgements are only to be recorded and reported.
 	//

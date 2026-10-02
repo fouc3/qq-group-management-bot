@@ -82,7 +82,7 @@ func TestAJudgementIsWrittenDown(t *testing.T) {
 	h, group, judgements := auditedHarness(t, stub)
 	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestAJudgementThatWasNotReachedIsRecordedAsSuch(t *testing.T) {
 	h, group, judgements := auditedHarness(t, stub)
 	quoted := cacheChain(t, h, group, "正常聊天")
 
-	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1"); err == nil {
+	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1"); err == nil {
 		t.Fatal("an unreadable answer must not be a judgement")
 	}
 
