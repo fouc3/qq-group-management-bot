@@ -59,6 +59,13 @@ type Config struct {
 	Debug bool `yaml:"debug"`
 	// Prefix is the character a command must start with.
 	Prefix string `yaml:"prefix"`
+	// RegisterCommands publishes the command list as the group instruction
+	// panel, which is the menu the platform shows a member.
+	//
+	// On by default: without it the commands are discovered only by being told
+	// about them. Turn it off for a deployment that maintains its own panel, or
+	// whose token is not allowed to create one. /debug is never published.
+	RegisterCommands *bool `yaml:"register_commands"`
 	// WhoisAdminOnly restricts /whois to the administrators of a group.
 	//
 	// It is on by default. The rule is deliberately relaxed for a group that
@@ -114,6 +121,10 @@ func (c *Config) applyDefaults() error {
 	if c.WhoisAdminOnly == nil {
 		restricted := true
 		c.WhoisAdminOnly = &restricted
+	}
+	if c.RegisterCommands == nil {
+		published := true
+		c.RegisterCommands = &published
 	}
 	for openID, group := range c.Groups {
 		if strings.TrimSpace(openID) == "" {
@@ -247,6 +258,12 @@ func (h *handler) Register(_ context.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	h.botOpenID = h.readBotOpenID(ctx)
 	cancel()
+
+	// The command list is published here, before any event can arrive, so the
+	// panel a member opens is never a version behind what the bot answers.
+	panelCtx, panelCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	h.publishCommands(panelCtx)
+	panelCancel()
 	// Both event types are always read, and require_mention is enforced on the
 	// message itself instead.
 	//
@@ -1062,20 +1079,4 @@ func contains(list []string, value string) bool {
 		}
 	}
 	return false
-}
-
-// usage is the help text a reply carries.
-func usage(prefix string) string {
-	return strings.Join([]string{
-		"可用命令：",
-		prefix + "菜单 —— 显示这份列表",
-		prefix + "whois —— 查看本群与成员的 openid（用于填配置）",
-		prefix + "禁言 <时长> [@目标]，顺序随意（30s / 10m / 2h / 1d，或 30秒 / 10分 / 2小时 / 1天）",
-		"（@ 取不到目标时，可改为回复引用目标的消息）",
-		prefix + "解禁 [@目标] —— 解除禁言；正在验证中的成员不受此命令影响",
-		prefix + "重新发送验证 [@目标] —— 给正在验证中的成员重发验证通知",
-		prefix + "重新验证 [@目标]",
-		prefix + "黑名单 add|remove|list —— 管理禁止加群名单（只影响加群申请，不踢人）",
-		prefix + "debug 超时测试 [@目标]（需开启调试）",
-	}, "\n")
 }

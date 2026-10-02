@@ -179,7 +179,24 @@ func (e jsonError) Error() string { return string(e) }
 
 // newHarness builds the feature with one administrator in one group.
 func newHarness(t *testing.T, section string) *harness {
+	return newHarnessWith(t, section, false)
+}
+
+// newHarnessWithRegistering builds a harness that publishes the instruction
+// panel.
+//
+// Every other test leaves it off, so the calls it records are only the ones it
+// is actually about -- a panel published on every start would otherwise sit at
+// the front of the list for all of them.
+func newHarnessWithRegistering(t *testing.T, section string) *harness {
+	return newHarnessWith(t, section, true)
+}
+
+func newHarnessWith(t *testing.T, section string, registering bool) *harness {
 	t.Helper()
+	if !registering && !strings.Contains(section, "register_commands") {
+		section += "\nregister_commands: false\n"
+	}
 	h := &harness{t: t, verifier: &stubVerifier{}}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
