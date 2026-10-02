@@ -55,8 +55,8 @@ func (h *handler) reportCommand(ctx context.Context,
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(quotedIndex)), "TMP_") {
 		h.deps.Logger.Info("a report quoted a message whose index is temporary",
 			"group", data.GroupOpenID, "ref_msg_idx", quotedIndex)
-		h.reply(ctx, data, "这条引用机器人拿不到原始消息（看起来是转发或合并消息），"+
-			"既撤回不了也禁言不了。请直接引用对方发的那条普通消息再举报。")
+		h.reply(ctx, data, "这条引用机器人拿不到原始消息（对方那条本身是转发或引用别人的"+
+			"复合消息），既撤回不了也禁言不了。请直接引用对方发的那条普通消息再举报。")
 		return nil
 	}
 
