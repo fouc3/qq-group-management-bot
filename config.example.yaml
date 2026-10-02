@@ -123,9 +123,6 @@ features:
     #   official —— 调官方接口（本应用实测被拒 40012010，仅当你申请到权限才有用）
     remove_backend: onebot
 
-    # 通过后在群里说的话，留空则不发
-    pass_message: "验证通过，欢迎你！"
-
     # 管理员点他人按钮跳过验证时发的话。{target} 渲染成对被跳过者的 @
     skip_message: "管理员已跳过 {target} 的验证"
 
