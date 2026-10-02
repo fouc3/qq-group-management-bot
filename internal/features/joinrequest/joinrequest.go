@@ -255,6 +255,25 @@ func (h *handler) onJoinRequest(ctx context.Context, event *qqbotsdk.Event) erro
 	if !ok {
 		return fmt.Errorf("join request handling got %T", value)
 	}
+
+	// Every identity the platform sent, logged before any decision is made.
+	//
+	// The point is the question this event otherwise leaves open: an applicant is
+	// identified by an OpenID, never by a QQ number, and the blacklist compares
+	// that OpenID with one recorded from a message in the group. Whether those
+	// two are the same value is not something the documentation settles, so the
+	// first real request here answers it -- compare this member_openid with what
+	// /whois reports for the same person once they are in.
+	h.deps.Logger.Info("a join request arrived",
+		"group", data.GroupOpenID,
+		"member_openid", data.MemberOpenID,
+		"union_openid", data.UnionOpenID,
+		"username", data.Username,
+		"bot", data.Bot,
+		"apply_source", data.ApplySource,
+		"invited_by", data.InvitedBy,
+		"request", data.JoinRequestID)
+
 	if !h.deps.InGroup(data.GroupOpenID) {
 		h.deps.Logger.Debug("ignoring a request outside the configured groups",
 			"group", data.GroupOpenID)
