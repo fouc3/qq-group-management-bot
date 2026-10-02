@@ -15,6 +15,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // stopTimeout bounds how long shutdown may take.
@@ -64,6 +65,25 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 		return err
 	}
 
+	// The data layer is opened before the features, and a failure stops the bot.
+	// A bot that cannot record what it is holding would silence members and then
+	// forget them, which is the outcome the store exists to prevent.
+	database, err := store.Open(ctx, store.Config{
+		Driver:       cfg.Database.Driver,
+		DSN:          cfg.Database.DSN,
+		MaxOpenConns: cfg.Database.MaxOpenConns,
+	})
+	if err != nil {
+		return fmt.Errorf("app: opening the database: %w", err)
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			logger.Warn("the database did not close cleanly", "error", err)
+		}
+	}()
+	logger.Info("the data layer is open",
+		"driver", cfg.Database.Driver, "dsn", cfg.Database.DSN)
+
 	features, err := registry.Build(cfg, feature.Deps{
 		Client:        client,
 		OneBot:        oneBot,
@@ -71,6 +91,7 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 		Groups:        cfg.Bot.Groups,
 		BotQQ:         cfg.Bot.QQ,
 		JoinTolerance: cfg.OneBot.Tolerance(),
+		Store:         database,
 	})
 	if err != nil {
 		return err

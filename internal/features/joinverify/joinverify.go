@@ -26,6 +26,7 @@ import (
 
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // Name is the feature's name: its configuration key and its log field.
@@ -411,9 +412,16 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		stopping:  make(chan struct{}),
 		stopped:   make(chan struct{}),
 	}
+	if deps.Store != nil {
+		instance.pending = deps.Store.Pending()
+		instance.meta = deps.Store.Meta()
+	}
 	// Holds that outlived an earlier process are restored here, before anything
-	// can answer a button or sweep a deadline for them.
-	instance.restore(time.Now())
+	// can answer a button or sweep a deadline for them. The older JSON file is
+	// imported first, so the changeover does not forget anybody.
+	restoreCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	instance.restore(restoreCtx, time.Now())
+	cancel()
 	return instance, nil
 }
 
@@ -460,6 +468,16 @@ type verifier struct {
 	// stateFile is where the pending list is written, empty when persistence is
 	// off.
 	stateFile string
+
+	// pending and meta are the data layer. They are narrow slices of it rather
+	// than the whole store: this feature keeps the members it is holding, and
+	// nothing else.
+	//
+	// Both are nil when the app passes no store. The feature then runs with
+	// nothing written down, which is what the tests want and what a deployment
+	// without a database would get.
+	pending store.PendingStore
+	meta    store.MetaStore
 
 	registrations []*qqbotsdk.Registration
 	stopping      chan struct{}
@@ -621,7 +639,12 @@ func (v *verifier) takeDueDeadlines(now time.Time) (due, renew []*pending) {
 			entry.reported = true
 			// Recorded before the work is attempted, so a restart in the middle
 			// does not report the same member to the administrators twice.
-			v.saveStateLocked()
+			if v.pending != nil {
+				if err := v.pending.MarkReported(context.Background(), token, now); err != nil {
+					v.deps.Logger.Error("could not record a report in the data layer",
+						"token", token, "error", err)
+				}
+			}
 			copied := *entry
 			due = append(due, &copied)
 		}
@@ -658,8 +681,15 @@ func (v *verifier) renew(ctx context.Context, entry *pending) {
 		v.mu.Lock()
 		if live, ok := v.byToken[entry.token]; ok {
 			live.deadline = retryAt
+			if v.pending != nil {
+				// Only the deadline moves here; the hold is left as it was, since
+				// the mute that failed is the one that may still be in force.
+				if err := v.pending.MoveDeadline(context.Background(), entry.token,
+					retryAt, live.heldUntil); err != nil {
+					log.Error("could not record the retry in the data layer", "error", err)
+				}
+			}
 		}
-		v.saveStateLocked()
 		v.mu.Unlock()
 		log.Error("could not hold a member again, so they are no longer muted",
 			"error", err, "retry_at", retryAt.Format(time.RFC3339))
@@ -674,8 +704,13 @@ func (v *verifier) renew(ctx context.Context, entry *pending) {
 	if live, ok := v.byToken[entry.token]; ok {
 		live.heldUntil = heldUntil
 		live.deadline = deadline
+		if v.pending != nil {
+			if err := v.pending.MoveDeadline(context.Background(), entry.token,
+				deadline, heldUntil); err != nil {
+				log.Error("could not record the renewal in the data layer", "error", err)
+			}
+		}
 	}
-	v.saveStateLocked()
 	v.mu.Unlock()
 	log.Info("held a member again and pushed their deadline forward, "+
 		"because they have not verified",
@@ -951,7 +986,7 @@ func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, 
 	heldUntil := now.Add(time.Duration(settings.MuteMinutes) * time.Minute)
 	deadline := now.Add(time.Duration(settings.DeadlineHours) * time.Hour)
 
-	token, err := v.hold(groupOpenID, memberOpenID, joinedAt, deadline, heldUntil, settings)
+	token, err := v.hold(ctx, groupOpenID, memberOpenID, joinedAt, deadline, heldUntil, settings)
 	if err != nil {
 		return err
 	}
@@ -1187,7 +1222,7 @@ func (v *verifier) mentionTags(members []string) string {
 
 // hold records a member waiting to verify, replacing any earlier entry for the
 // same member, and returns the token its button will carry.
-func (v *verifier) hold(groupOpenID, memberOpenID string, joinedAt int64, deadline, heldUntil time.Time, settings Settings) (string, error) {
+func (v *verifier) hold(ctx context.Context, groupOpenID, memberOpenID string, joinedAt int64, deadline, heldUntil time.Time, settings Settings) (string, error) {
 	token, err := newToken()
 	if err != nil {
 		return "", err
@@ -1202,6 +1237,28 @@ func (v *verifier) hold(groupOpenID, memberOpenID string, joinedAt int64, deadli
 		settings:     settings,
 	}
 
+	// Written before the member is silenced, and a failure stops the hold: a mute
+	// the data layer never recorded is the one outcome that leaves somebody muted
+	// with nobody able to find out why. The caller already treats an error here as
+	// "do not mute".
+	if v.pending != nil {
+		encoded, err := encodeSettings(settings)
+		if err != nil {
+			return "", err
+		}
+		if err := v.pending.Put(ctx, store.Pending{
+			Token:        token,
+			GroupOpenID:  groupOpenID,
+			MemberOpenID: memberOpenID,
+			JoinedAt:     joinedAt,
+			Deadline:     deadline.Unix(),
+			HeldUntil:    heldUntil.Unix(),
+			Settings:     encoded,
+		}); err != nil {
+			return "", fmt.Errorf("recording the hold: %w", err)
+		}
+	}
+
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	key := memberKey(groupOpenID, memberOpenID)
@@ -1210,9 +1267,6 @@ func (v *verifier) hold(groupOpenID, memberOpenID string, joinedAt int64, deadli
 	}
 	v.byToken[token] = entry
 	v.byMember[key] = entry
-	// Written now rather than on shutdown: a hold that reaches the platform but
-	// not the disk is exactly the record that must not be lost.
-	v.saveStateLocked()
 	return token, nil
 }
 
@@ -1250,7 +1304,16 @@ func (v *verifier) forgetLocked(token string) {
 	if current, ok := v.byMember[key]; ok && current.token == token {
 		delete(v.byMember, key)
 	}
-	v.saveStateLocked()
+	if v.pending != nil {
+		// A background context, because this runs under the lock and without one
+		// of its own -- from a button press or from the sweep. A failure is
+		// reported and swallowed: the hold is over either way, and the leftover
+		// row is at worst loaded again on the next start.
+		if err := v.pending.Delete(context.Background(), token); err != nil {
+			v.deps.Logger.Error("could not forget a hold in the data layer",
+				"group", entry.groupOpenID, "member", entry.memberOpenID, "error", err)
+		}
+	}
 }
 
 // memberKey identifies one member inside one group.

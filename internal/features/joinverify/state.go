@@ -1,32 +1,39 @@
 package joinverify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"time"
+
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
-// The pending list is written to disk because a restart must not lose it.
+// The pending list lives in the data layer. What is left here is the JSON file
+// the earlier build wrote, read exactly once so that changing over does not
+// forget members who are already muted.
 //
-// A hold is a real mute on a real person, and the platform applies it for as
-// long as twenty nine days. Losing the record means the member stays muted with
-// nobody knowing why, no deadline ever acted on, and a button that answers
-// 操作失败 for the rest of the mute. Restarting is routine here, so the record
-// has to outlive the process.
+// A hold is a real mute on a real person, applied for as long as twenty nine
+// days. Losing the record means they stay muted with nobody knowing why, no
+// deadline acted on, and a button that answers 操作失败 for the rest of the mute.
 
-// stateFileVersion marks the layout of the state file, so a later change can
-// refuse to misread an older file instead of silently dropping holds.
+// A hold that reaches the platform but not the data layer is exactly the record
+// that must not be lost, so every mutation is written as it happens rather than
+// on shutdown.
+
+// stateFileVersion marks the layout of the JSON file, so an older or newer file
+// is refused instead of being misread.
 const stateFileVersion = 1
 
-// storedEntry is one pending entry as the state file holds it.
-//
-// It is deliberately separate from pending: the file outlives a release, so a
-// field renamed in memory must not quietly lose its data on disk, and the file
-// has to stay readable by an older binary.
+// importMarker records that the JSON file has been imported. It is a marker and
+// not "the table is empty" because the table empties again once the last member
+// verifies: without it, that day would read the stale file and bring dead holds
+// back to life.
+const importMarker = "pending_json_imported"
+
+// storedEntry is one record as the JSON file holds it.
 type storedEntry struct {
 	Token        string    `json:"token"`
 	GroupOpenID  string    `json:"group_openid"`
@@ -38,113 +45,19 @@ type storedEntry struct {
 	Settings     Settings  `json:"settings"`
 }
 
-// storedState is the state file as a whole.
+// storedState is the JSON file as a whole.
 type storedState struct {
 	Version int           `json:"version"`
 	Pending []storedEntry `json:"pending"`
 }
 
-// snapshotLocked renders the pending list for the state file.
+// readState loads the records written by the earlier build.
 //
-// The caller holds the lock. The result is ordered so the file stays readable
-// and a save does not reshuffle it for no reason.
-func (v *verifier) snapshotLocked() []storedEntry {
-	entries := make([]storedEntry, 0, len(v.byToken))
-	for _, entry := range v.byToken {
-		entries = append(entries, storedEntry{
-			Token:        entry.token,
-			GroupOpenID:  entry.groupOpenID,
-			MemberOpenID: entry.memberOpenID,
-			JoinedAt:     entry.joinedAt,
-			Deadline:     entry.deadline,
-			HeldUntil:    entry.heldUntil,
-			Reported:     entry.reported,
-			Settings:     entry.settings,
-		})
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Token < entries[j].Token })
-	return entries
-}
-
-// saveStateLocked writes the pending list out.
-//
-// The caller holds the lock, which is what keeps the snapshot from changing
-// underneath it; the file is small and replaced atomically, so the write is
-// short. A failure is reported and swallowed: the hold itself is the platform's
-// and is still in force, and taking the bot down over a failed write would be
-// worse than the write being stale.
-func (v *verifier) saveStateLocked() {
-	if v.stateFile == "" {
-		return
-	}
-	if err := writeState(v.stateFile, v.snapshotLocked()); err != nil {
-		v.deps.Logger.Error("could not save the pending verifications",
-			"file", v.stateFile, "error", err)
-	}
-}
-
-// writeState replaces the state file atomically.
-//
-// The replacement is a rename, so a crash midway leaves either the old file or
-// the new one, never a half written list: a truncated file would read as an
-// empty list and would strand every member it named.
-func writeState(path string, entries []storedEntry) error {
-	payload, err := json.MarshalIndent(storedState{
-		Version: stateFileVersion,
-		Pending: entries,
-	}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding the pending list: %w", err)
-	}
-	payload = append(payload, '\n')
-
-	dir := filepath.Dir(path)
-	temporary, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
-	if err != nil {
-		return fmt.Errorf("creating a temporary state file in %s: %w", dir, err)
-	}
-	name := temporary.Name()
-	// A failure past this point must not leave the temporary file behind.
-	defer func() {
-		if _, statErr := os.Stat(name); statErr == nil {
-			_ = os.Remove(name)
-		}
-	}()
-
-	if _, err := temporary.Write(payload); err != nil {
-		temporary.Close()
-		return fmt.Errorf("writing %s: %w", name, err)
-	}
-	// The data has to reach the disk before the rename, or a power loss can
-	// leave the new name pointing at an empty file.
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return fmt.Errorf("flushing %s: %w", name, err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", name, err)
-	}
-	if err := os.Chmod(name, 0o600); err != nil {
-		return fmt.Errorf("restricting %s: %w", name, err)
-	}
-	if err := os.Rename(name, path); err != nil {
-		return fmt.Errorf("replacing %s: %w", path, err)
-	}
-	return nil
-}
-
-// readState loads the pending list written by an earlier run.
-//
-// Entries whose hold the platform has already released are dropped rather than
-// returned: their mute is over, so there is nothing to answer and nothing to
-// act on, and keeping them would mean reporting a member as "still waiting"
-// long after they were free to talk. The deadline is left to the ordinary sweep,
-// which is what makes a deadline that passed while the bot was down still get
-// acted on.
-func readState(path string, now time.Time) ([]*pending, error) {
+// Records whose hold the platform has already released are dropped: their mute
+// is over, so there is nothing to answer and nothing to act on.
+func readState(path string, now time.Time) ([]storedEntry, error) {
 	payload, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// A first run has nothing to restore, and that is not a failure.
 		return nil, nil
 	}
 	if err != nil {
@@ -156,11 +69,11 @@ func readState(path string, now time.Time) ([]*pending, error) {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	if stored.Version != stateFileVersion {
-		return nil, fmt.Errorf("%s has version %d, but this build writes version %d",
+		return nil, fmt.Errorf("%s has version %d, but this build reads version %d",
 			path, stored.Version, stateFileVersion)
 	}
 
-	restored := make([]*pending, 0, len(stored.Pending))
+	kept := make([]storedEntry, 0, len(stored.Pending))
 	for _, entry := range stored.Pending {
 		if entry.Token == "" || entry.GroupOpenID == "" || entry.MemberOpenID == "" {
 			return nil, fmt.Errorf("%s has an entry without a token, group or member", path)
@@ -168,46 +81,145 @@ func readState(path string, now time.Time) ([]*pending, error) {
 		if !now.Before(entry.HeldUntil) {
 			continue
 		}
-		restored = append(restored, &pending{
+		kept = append(kept, entry)
+	}
+	return kept, nil
+}
+
+// encodeSettings renders a group's settings for the data layer.
+//
+// Encoded by field name, so a field renamed in Settings would stop being read
+// back. That is deliberate: a silent default would apply different rules to
+// somebody who is already muted, which is worse than a visible failure.
+func encodeSettings(settings Settings) (string, error) {
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		return "", fmt.Errorf("encoding the settings: %w", err)
+	}
+	return string(payload), nil
+}
+
+// decodeSettings reads settings back out of the data layer.
+func decodeSettings(raw string) (Settings, error) {
+	var settings Settings
+	if raw == "" {
+		return settings, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return settings, fmt.Errorf("reading the settings back: %w", err)
+	}
+	return settings, nil
+}
+
+// restore loads the members who were already held, importing the JSON file the
+// earlier build wrote the first time this runs.
+func (v *verifier) restore(ctx context.Context, now time.Time) {
+	v.importLegacyState(ctx, now)
+
+	if v.pending == nil {
+		// No data layer: nothing was ever written down, so there is nothing to
+		// restore. The feature still works, it just forgets on a restart -- which
+		// is worth saying out loud, because the members it forgets stay muted.
+		v.deps.Logger.Warn("no data layer is configured, so a restart would forget " +
+			"every member who is still being held and leave them muted")
+		return
+	}
+
+	entries, err := v.pending.Load(ctx, now)
+	if err != nil {
+		// Starting with none would leave every held member unaccounted for while
+		// their mute stays in force, which is the one outcome worth shouting
+		// about.
+		v.deps.Logger.Error("could not load the pending verifications, so nobody "+
+			"who is already held is accounted for", "error", err)
+		return
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, entry := range entries {
+		settings, err := decodeSettings(entry.Settings)
+		if err != nil {
+			// Kept with no settings rather than dropped: the member is muted, and
+			// forgetting them would leave the button dead and the deadline
+			// unattended.
+			v.deps.Logger.Error("could not read back the settings of a hold",
+				"group", entry.GroupOpenID, "member", entry.MemberOpenID, "error", err)
+		}
+		held := &pending{
 			token:        entry.Token,
 			groupOpenID:  entry.GroupOpenID,
 			memberOpenID: entry.MemberOpenID,
 			joinedAt:     entry.JoinedAt,
-			deadline:     entry.Deadline,
-			heldUntil:    entry.HeldUntil,
+			deadline:     time.Unix(entry.Deadline, 0),
+			heldUntil:    time.Unix(entry.HeldUntil, 0),
 			reported:     entry.Reported,
-			settings:     entry.Settings,
-		})
+			settings:     settings,
+		}
+		v.byToken[held.token] = held
+		v.byMember[memberKey(held.groupOpenID, held.memberOpenID)] = held
 	}
-	return restored, nil
+	if len(entries) > 0 {
+		v.deps.Logger.Info("restored members who were still waiting to verify",
+			"count", len(entries))
+	}
 }
 
-// restore loads the state file into the verifier.
+// importLegacyState copies the JSON file into the data layer, once.
 //
-// A file that cannot be read is reported and treated as empty rather than
-// stopping the bot: refusing to start would leave the groups unmanaged
-// altogether, which is worse than losing records that are already suspect.
-func (v *verifier) restore(now time.Time) {
-	if v.stateFile == "" {
-		v.deps.Logger.Warn("no state_file is configured: a restart would forget " +
-			"every member who is still waiting to verify, leaving them muted " +
-			"with nothing to answer")
+// Failures are reported and swallowed: the file is not the source of truth any
+// more, and refusing to start over a file that may already have been imported
+// would take the whole bot down for nothing.
+func (v *verifier) importLegacyState(ctx context.Context, now time.Time) {
+	if v.cfg.StateFile == "" || v.pending == nil || v.meta == nil {
 		return
 	}
-	restored, err := readState(v.stateFile, now)
+	if _, done, err := v.meta.Get(ctx, importMarker); err != nil {
+		v.deps.Logger.Error("could not read the import marker, so the older file "+
+			"is left untouched", "error", err)
+		return
+	} else if done {
+		return
+	}
+
+	entries, err := readState(v.cfg.StateFile, now)
 	if err != nil {
-		v.deps.Logger.Error("could not restore the pending verifications, "+
-			"starting with none", "file", v.stateFile, "error", err)
+		v.deps.Logger.Error("could not read the file the earlier build wrote, "+
+			"so its records are not imported", "file", v.cfg.StateFile, "error", err)
 		return
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for _, entry := range restored {
-		v.byToken[entry.token] = entry
-		v.byMember[memberKey(entry.groupOpenID, entry.memberOpenID)] = entry
+	imported := 0
+	for _, entry := range entries {
+		settings, err := encodeSettings(entry.Settings)
+		if err != nil {
+			v.deps.Logger.Error("could not import a record from the older file",
+				"token", entry.Token, "error", err)
+			return
+		}
+		if err := v.pending.Put(ctx, store.Pending{
+			Token:        entry.Token,
+			GroupOpenID:  entry.GroupOpenID,
+			MemberOpenID: entry.MemberOpenID,
+			JoinedAt:     entry.JoinedAt,
+			Deadline:     entry.Deadline.Unix(),
+			HeldUntil:    entry.HeldUntil.Unix(),
+			Reported:     entry.Reported,
+			Settings:     settings,
+		}); err != nil {
+			v.deps.Logger.Error("could not import a record from the older file",
+				"token", entry.Token, "error", err)
+			return
+		}
+		imported++
 	}
-	if len(restored) > 0 {
-		v.deps.Logger.Info("restored members who were still waiting to verify",
-			"count", len(restored))
+
+	// The marker is written even when nothing was imported, so an absent or empty
+	// file is not read again on every start.
+	if err := v.meta.Set(ctx, importMarker, now.Format(time.RFC3339)); err != nil {
+		v.deps.Logger.Error("could not record that the older file was imported, "+
+			"so it may be imported again", "error", err)
+		return
 	}
+	v.deps.Logger.Info("imported the records the earlier build left in a file",
+		"file", v.cfg.StateFile, "count", imported)
 }

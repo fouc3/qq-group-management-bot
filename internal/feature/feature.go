@@ -18,6 +18,7 @@ import (
 
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // Deps is what a feature is handed to do its work.
@@ -39,6 +40,13 @@ type Deps struct {
 	// JoinTolerance is how many seconds a join match may differ between the
 	// official event timestamp and OneBot's recorded join time.
 	JoinTolerance int64
+	// Store is the data layer: what has to outlive a restart.
+	//
+	// A feature takes the part it needs rather than this package declaring a
+	// narrow contract for each operation. A feature that needs its own seam
+	// already declares one -- the join-request feature's blacklist is the
+	// example, and it is what lets that feature be tested without a database.
+	Store store.Store
 }
 
 // InGroup reports whether the feature should act on a group.

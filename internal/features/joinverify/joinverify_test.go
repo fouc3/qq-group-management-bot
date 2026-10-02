@@ -20,6 +20,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // Constants used across the tests.
@@ -65,6 +66,14 @@ type kick struct {
 // newHarness builds a verifier whose official calls and OneBot calls both land
 // on stubs, so a test can assert on either side.
 func newHarness(t *testing.T, section string) *harness {
+	return newHarnessWithStore(t, section, "")
+}
+
+// newHarnessWithStore builds the feature with a data layer on a file of its own.
+//
+// Handing the same file to two harnesses is what a restart looks like, and it is
+// the only way to check that a hold survives one.
+func newHarnessWithStore(t *testing.T, section, databasePath string) *harness {
 	t.Helper()
 	h := &harness{t: t, members: []onebot.Member{
 		{UserID: 3884506253, Nickname: "btrfs", JoinTime: testJoinTime, Role: "member"},
@@ -90,14 +99,27 @@ func newHarness(t *testing.T, section string) *harness {
 		t.Fatalf("building the onebot client: %v", err)
 	}
 
-	instance, err := New(sectionNode(t, section), feature.Deps{
+	deps := feature.Deps{
 		Client:        client,
 		OneBot:        oneBotClient,
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Groups:        config.Groups{{OpenID: testGroupOpenID, QQGroupID: testQQGroupID}},
 		BotQQ:         testBotQQ,
 		JoinTolerance: 15,
-	})
+	}
+	if databasePath != "" {
+		opened, err := store.Open(context.Background(), store.Config{
+			Driver: "sqlite",
+			DSN:    databasePath,
+		})
+		if err != nil {
+			t.Fatalf("opening the store: %v", err)
+		}
+		t.Cleanup(func() { opened.Close() })
+		deps.Store = opened
+	}
+
+	instance, err := New(sectionNode(t, section), deps)
 	if err != nil {
 		t.Fatalf("building the feature: %v", err)
 	}
@@ -229,21 +251,22 @@ func (h *harness) kickCount() int {
 // is waiting. Losing the record leaves the member muted with a button that can
 // only answer 操作失败.
 func TestAHoldSurvivesARestart(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "bot.db")
 	section := `
 enabled: true
 on_deadline: notify
 notify_members: ["ADMIN-OPENID"]
 state_file: ` + filepath.Join(t.TempDir(), "pending.json") + `
 `
-	first := newHarness(t, section)
+	first := newHarnessWithStore(t, section, databasePath)
 	first.join()
 	token := first.tokenFromPrompt()
 	if token == "" {
 		t.Fatal("no token in the prompt")
 	}
 
-	// A second verifier over the same file is what a restart produces.
-	second := newHarness(t, section)
+	// A second verifier over the same database is what a restart produces.
+	second := newHarnessWithStore(t, section, databasePath)
 	second.press("INTERACTION-RESTORED", token, testMemberOpenID,
 		qqbotsdk.InteractionSceneGroup)
 
@@ -259,22 +282,31 @@ state_file: ` + filepath.Join(t.TempDir(), "pending.json") + `
 
 // TestAReleasedHoldIsNotRestored covers a hold the platform has already lifted:
 // it has nothing left to answer or act on, so it must not come back.
+//
+// It is written in the JSON layout the earlier build used, because reading that
+// file is the only thing the layout is still for.
 func TestAReleasedHoldIsNotRestored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pending.json")
-	err := writeState(path, []storedEntry{
-		{
-			Token: "released", GroupOpenID: testGroupOpenID,
-			MemberOpenID: testMemberOpenID,
-			HeldUntil:    time.Now().Add(-time.Minute),
-		},
-		{
-			Token: "held", GroupOpenID: testGroupOpenID,
-			MemberOpenID: "ANOTHER-MEMBER",
-			Deadline:     time.Now().Add(time.Hour),
-			HeldUntil:    time.Now().Add(time.Hour),
+	payload, err := json.Marshal(storedState{
+		Version: stateFileVersion,
+		Pending: []storedEntry{
+			{
+				Token: "released", GroupOpenID: testGroupOpenID,
+				MemberOpenID: testMemberOpenID,
+				HeldUntil:    time.Now().Add(-time.Minute),
+			},
+			{
+				Token: "held", GroupOpenID: testGroupOpenID,
+				MemberOpenID: "ANOTHER-MEMBER",
+				Deadline:     time.Now().Add(time.Hour),
+				HeldUntil:    time.Now().Add(time.Hour),
+			},
 		},
 	})
 	if err != nil {
+		t.Fatalf("encoding the state: %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatalf("writing the state: %v", err)
 	}
 
@@ -285,8 +317,8 @@ func TestAReleasedHoldIsNotRestored(t *testing.T) {
 	if len(restored) != 1 {
 		t.Fatalf("restored %d entries, want only the one still held", len(restored))
 	}
-	if restored[0].token != "held" {
-		t.Errorf("restored %q, want the entry that is still held", restored[0].token)
+	if restored[0].Token != "held" {
+		t.Errorf("restored %q, want the entry that is still held", restored[0].Token)
 	}
 }
 
