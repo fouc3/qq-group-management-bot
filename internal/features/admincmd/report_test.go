@@ -150,8 +150,12 @@ func TestAViolationIsChangedAndSaid(t *testing.T) {
 			MuteSeconds:     600,
 			SubjectOpenID:   "SUBJECT-OPENID",
 			QuotedMessageID: "QUOTED-MESSAGE",
-			Reason:          "卖号广告", // the model's words, which must not be published
-			Model:           "stub-model",
+			// The judge names the messages to take back, and the group is told which
+			// ones they were by the numbers the judge was shown.
+			RecallMessageIDs: []string{"QUOTED-MESSAGE", "SECOND-MESSAGE"},
+			RecallNumbers:    []int{2, 5},
+			Reason:           "卖号广告", // the model's words, which must not be published
+			Model:            "stub-model",
 		},
 	}
 	h := reportHarness(t, judge)

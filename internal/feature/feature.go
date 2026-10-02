@@ -271,6 +271,16 @@ type ModerationVerdict struct {
 	SubjectOpenID string
 	// QuotedMessageID is the reported message itself: the one a recall takes back.
 	QuotedMessageID string
+	// RecallMessageIDs are the messages to take back.
+	//
+	// The judge names them, and the feature that owns the cache turns the names
+	// into messages: only ones that exist in the window and belong to the member
+	// being judged survive that, because a model can name a message that is not
+	// there, or one that is somebody else's.
+	RecallMessageIDs []string
+	// RecallNumbers are the same messages by the numbers the judge was shown, so
+	// that the group can be told which ones were taken back.
+	RecallNumbers []int
 	// JudgedMessageIDs is everything that was sent for judgement, for the record.
 	JudgedMessageIDs []string
 	// Reason is the model's own explanation, for the administrators and the audit

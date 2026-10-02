@@ -144,6 +144,8 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID,
 	report.Category = verdict.Category
 	report.Reason = verdict.Reason
 	report.Model = verdict.Model
+	report.RecallMessageIDs, report.RecallNumbers =
+		resolveRecall(chain, subject, verdict.Recall, quotedID, quotedIndex)
 	if !verdict.Violation() {
 		return report, nil
 	}

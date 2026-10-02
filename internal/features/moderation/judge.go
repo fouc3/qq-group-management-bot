@@ -40,13 +40,22 @@ const judgeSystemPrompt = `你是 QQ 群的自动审核助手，只做一件事�
 2. 只有明显属于上述类型、且绝大多数群都不会接受的内容才算违规。正常聊天、提问、求助、讨论、正常的链接分享都不算违规。
 3. 只要拿不准，就判 ok。宁可漏过，不可误伤。
 4. 只输出一个 JSON 对象，前后不要有任何其他文字：
-{"verdict":"ok" 或 "violation","category":"类型名，ok 时留空","reason":"一句话理由","confidence":0 到 1 之间的数}`
+{"verdict":"ok" 或 "violation","category":"类型名，ok 时留空","recall":[],"reason":"一句话理由","confidence":0 到 1 之间的数}
+
+其中 recall 是**应当撤回的消息编号**数组，用消息前面方括号里的数字，例如 [2,5]。判定为
+违规时，把属于该违规者、应当撤回的消息编号都列出来（通常不止一条，比如连续刷的几条广
+告）；判定为 ok 时留空数组。不要列别人的消息。`
 
 // Verdict is what the judge decided, in the terms the code acts on.
 type Verdict struct {
 	// Category is a key from the configuration, or empty when nothing was found.
 	// It is the only field an action is ever chosen from.
 	Category string
+	// Recall lists the messages the judge says should be taken back, as the
+	// numbers it was shown. They are numbers until somebody checks them against
+	// the window: a model can name a message that is not there, or one that is
+	// somebody else's, and neither is a reason to take anything down.
+	Recall []int
 	// Reason is the model's own explanation. It is for the administrators and the
 	// audit table, and never for the group: it is the one piece of the answer
 	// that is free text.
@@ -155,6 +164,7 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 	var payload struct {
 		Verdict    string  `json:"verdict"`
 		Category   string  `json:"category"`
+		Recall     []int   `json:"recall"`
 		Reason     string  `json:"reason"`
 		Confidence float64 `json:"confidence"`
 	}
@@ -180,6 +190,7 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 	}
 	return Verdict{
 		Category:   category,
+		Recall:     payload.Recall,
 		Reason:     payload.Reason,
 		Confidence: payload.Confidence,
 		Model:      h.cfg.Model.Name,
@@ -268,4 +279,46 @@ func isCategory(categories []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// resolveRecall turns the numbers a judge named into messages that may be taken
+// back, and into the numbers worth saying out loud.
+//
+// A number is only a pointer, and it is checked against the window before anything
+// happens. A number the judge invented points at nothing; a number that points at
+// somebody else's message is not a reason to take that message down -- the report
+// is about one sender, and what follows follows the message that was reported, not
+// whoever else happened to be talking nearby.
+//
+// When nothing usable was named, the reported message stands. A violation with
+// nothing taken back would leave the advertisement exactly where it was.
+func resolveRecall(chain []CachedMessage, subject string, numbers []int,
+	quotedID, quotedIndex string) ([]string, []int) {
+	seen := map[string]bool{}
+	var ids []string
+	var kept []int
+	for _, number := range numbers {
+		if number < 1 || number > len(chain) {
+			continue
+		}
+		message := chain[number-1]
+		if message.User != subject || message.ID == "" || seen[message.ID] {
+			continue
+		}
+		seen[message.ID] = true
+		ids = append(ids, message.ID)
+		kept = append(kept, number)
+	}
+	if len(ids) > 0 {
+		return ids, kept
+	}
+	if quotedID == "" {
+		return nil, nil
+	}
+	for index, message := range chain {
+		if message.Idx == quotedIndex && message.ID == quotedID {
+			return []string{quotedID}, []int{index + 1}
+		}
+	}
+	return []string{quotedID}, nil
 }

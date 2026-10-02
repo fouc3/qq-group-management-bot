@@ -3,6 +3,7 @@ package admincmd
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,15 +147,23 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	// want of an administrator must not cost the mute, and the mute is the part
 	// that stops the next message.
 	var notes []string
-	if verdict.QuotedMessageID != "" {
-		if err := h.deps.Client.RecallGroupMessage(ctx, groupOpenID,
-			verdict.QuotedMessageID); err != nil {
-			h.deps.Logger.Warn("could not recall a reported message",
-				"group", groupOpenID, "message", verdict.QuotedMessageID, "error", err)
-			notes = append(notes, "撤回失败（"+shortReason(err)+"）")
-		} else {
-			notes = append(notes, "已撤回消息")
+	var recalled []string
+	for index, messageID := range verdict.RecallMessageIDs {
+		number := 0
+		if index < len(verdict.RecallNumbers) {
+			number = verdict.RecallNumbers[index]
 		}
+		if err := h.deps.Client.RecallGroupMessage(ctx, groupOpenID, messageID); err != nil {
+			h.deps.Logger.Warn("could not recall a message that was judged",
+				"group", groupOpenID, "message", messageID, "number", number,
+				"error", err)
+			notes = append(notes, "第 "+numberText(number)+" 条撤回失败（"+shortReason(err)+"）")
+			continue
+		}
+		recalled = append(recalled, numberText(number))
+	}
+	if len(recalled) > 0 {
+		notes = append(notes, "已撤回第 "+strings.Join(recalled, "、")+" 条")
 	}
 	if verdict.MuteSeconds > 0 && verdict.SubjectOpenID != "" {
 		duration := time.Duration(verdict.MuteSeconds) * time.Second
@@ -237,6 +246,15 @@ func (h *handler) allowReport(reporter string) bool {
 	}
 	h.reports[reporter] = kept
 	return allowed
+}
+
+// numberText is how one message is named in the reply: by the number the judge was
+// shown, so that what the group reads matches what the judgement was about.
+func numberText(number int) string {
+	if number <= 0 {
+		return "引用的那条"
+	}
+	return strconv.Itoa(number)
 }
 
 // shortReason is an error message fit to put in a group: the platform's wording
