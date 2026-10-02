@@ -45,6 +45,26 @@ func (h *handler) reportCommand(ctx context.Context,
 		return nil
 	}
 
+	// Written down because the platform's identifiers here are not what they
+	// looked like: a quote names the message it points at, and that name turned out
+	// not to be the one the same message carried when it arrived, so a lookup by it
+	// found nothing even though the message was in the cache. What the quote
+	// actually carries -- the ref_msg_idx, and the quoted author and text that come
+	// with it -- is the only way to see the difference.
+	message := ""
+	author := ""
+	if len(data.MsgElements) > 0 {
+		message = data.MsgElements[0].Content
+		if data.MsgElements[0].Author != nil {
+			author = data.MsgElements[0].Author.MemberOpenID
+		}
+	}
+	h.deps.Logger.Info("a report quoted a message",
+		"group", data.GroupOpenID,
+		"ref_msg_idx", quotedIndex,
+		"quoted_author", author,
+		"quoted_text", message)
+
 	h.reply(ctx, data, reportWaiting)
 
 	// On its own goroutine, with a context that outlives this handler: the handler

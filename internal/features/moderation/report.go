@@ -2,12 +2,56 @@ package moderation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
+
+// What a miss is waited on with: long enough to cover the delay measured in
+// production (an ordinary message arriving more than four seconds after the
+// mention that quoted it), and short enough that a report about something that
+// will never arrive is still answered.
+const (
+	cacheRetryAttempts = 12
+	cacheRetryDelay    = time.Second
+)
+
+// contextWithRetry looks the window up, waiting a moment for a message that is
+// still on its way.
+//
+// Only a miss is retried. A cache that is down, or a window that was found but
+// does not contain the quoted message, are not things that improve by waiting.
+func (h *handler) contextWithRetry(ctx context.Context, groupOpenID,
+	quotedIndex string) ([]CachedMessage, error) {
+	span := time.Duration(h.cfg.ChainMinutes) * time.Minute
+	var err error
+	for attempt := 1; attempt <= cacheRetryAttempts; attempt++ {
+		var chain []CachedMessage
+		chain, err = h.cache.Context(ctx, groupOpenID, quotedIndex,
+			h.cfg.ContextBefore, h.cfg.ContextAfter, span)
+		if err == nil {
+			if attempt > 1 {
+				h.deps.Logger.Info("the quoted message arrived while waiting for it",
+					"attempt", attempt)
+			}
+			return chain, nil
+		}
+		if !errors.Is(err, ErrNotCached) || attempt == cacheRetryAttempts {
+			return nil, err
+		}
+		// Waited out rather than asked again immediately, and abandoned the moment
+		// the caller's context ends: a shutdown should not be held up by this.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(cacheRetryDelay):
+		}
+	}
+	return nil, err
+}
 
 // JudgeQuoted is the seam's entry point: it judges one quoted message and writes
 // the judgement down.
@@ -43,9 +87,12 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID,
 			"for this group", ErrUnjudged)
 	}
 
-	chain, err := h.cache.Context(ctx, groupOpenID, quotedIndex,
-		h.cfg.ContextBefore, h.cfg.ContextAfter,
-		time.Duration(h.cfg.ChainMinutes)*time.Minute)
+	// A report can be delivered before the message it quotes is. The platform
+	// pushes the mention that carries the command ahead of the ordinary messages
+	// that came just before it, which was measured the hard way: the same report
+	// failed when it followed the message by four seconds and worked when it
+	// followed it by ten. A miss is therefore waited on rather than believed.
+	chain, err := h.contextWithRetry(ctx, groupOpenID, quotedIndex)
 	if err != nil {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 	}
