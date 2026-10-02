@@ -15,6 +15,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -114,6 +115,14 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 			SetBlacklist(joinrequest.Blacklist)
 		}); ok {
 			aware.SetBlacklist(barredFromJoining{blacklist: database.Blacklist()})
+		}
+		// The command feature takes the list itself, with no adapter: it manages
+		// entries rather than asking a question about an applicant, and the two
+		// shapes already match.
+		if aware, ok := instance.(interface {
+			SetBlacklist(admincmd.Blacklist)
+		}); ok {
+			aware.SetBlacklist(database.Blacklist())
 		}
 	}
 	for _, instance := range features {

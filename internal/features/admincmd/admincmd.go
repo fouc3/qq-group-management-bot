@@ -18,6 +18,8 @@ package admincmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -30,6 +32,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // Name is the feature's name: its configuration key and its log field.
@@ -41,6 +44,11 @@ const DefaultPrefix = "/"
 // DefaultMaxMute is the longest mute a command may ask for: the platform's
 // ceiling is thirty days, so this stays just inside it.
 const DefaultMaxMute = 29 * 24 * time.Hour
+
+// blacklistListLimit caps how much of the list one command prints. A list long
+// enough to be worth searching is a list long enough not to be pasted whole into
+// a group.
+const blacklistListLimit = 50
 
 // Config is this feature's section in the configuration file.
 type Config struct {
@@ -174,6 +182,45 @@ type handler struct {
 	// report the same message as both a mention event and an ordinary one, and
 	// acting twice would mute twice and answer twice.
 	seen map[string]time.Time
+
+	// blacklist is the list of applicants barred from joining, or nil when there
+	// is no data layer behind the command.
+	blacklist Blacklist
+}
+
+// Blacklist is the part of the data layer the /黑名单 command uses.
+//
+// A narrow interface rather than the whole store: this command adds, removes and
+// lists entries and has no business reading a pending hold. The store's own
+// blacklist satisfies it without an adapter, because the shapes already match.
+type Blacklist interface {
+	// Add records an entry, replacing one with the same key.
+	Add(ctx context.Context, entry store.Barred) error
+	// Remove forgets an entry by ID, member openid or union openid.
+	Remove(ctx context.Context, key string) error
+	// List returns entries, newest first.
+	List(ctx context.Context, limit int) ([]store.Barred, error)
+}
+
+// SetBlacklist hands over the list the command manages.
+//
+// The app calls it before anything is registered, so the command is never
+// reachable while it still has no list to work on.
+func (h *handler) SetBlacklist(blacklist Blacklist) {
+	h.blacklist = blacklist
+}
+
+// newBlacklistID returns the key an entry is stored under.
+//
+// Random rather than derived from the applicant: an entry may name only a union
+// openid, so there is no member openid to build a key from, and a key that could
+// be guessed would let one entry silently overwrite another.
+func newBlacklistID() (string, error) {
+	buffer := make([]byte, 8)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generating a blacklist id: %w", err)
+	}
+	return hex.EncodeToString(buffer), nil
 }
 
 // Name implements feature.Feature.
@@ -535,6 +582,8 @@ func (h *handler) run(ctx context.Context, data *qqbotsdk.GroupMessageCreateData
 			return nil
 		}
 		return h.resendVerification(ctx, data, target)
+	case "黑名单", "blacklist":
+		return h.blacklistCommand(ctx, data, command)
 	case "debug":
 		return h.debug(ctx, data, command)
 	default:
@@ -670,6 +719,155 @@ func (h *handler) resendVerification(ctx context.Context,
 	}
 	h.reply(ctx, data, "已重新发送验证通知。")
 	return nil
+}
+
+// blacklistTarget returns the identity a command is about, and its reason.
+//
+// The identity may be written as a mention or as a bare openid. Both are
+// accepted because the two cases are genuinely different: somebody in the group
+// can be mentioned, while an entry for somebody who never applied here has an
+// openid from somewhere else and no way to be mentioned at all.
+func blacklistTarget(command parsedCommand) (string, string, error) {
+	if len(command.args) < 2 {
+		return "", "", errors.New("请 @ 目标成员，或直接给出 openid：" +
+			command.name + " <@目标|openid> [原因]")
+	}
+	key := command.args[1]
+	if match := mentionInText.FindStringSubmatch(key); match != nil {
+		key = match[1]
+	}
+	if strings.TrimSpace(key) == "" {
+		return "", "", errors.New("没有识别出 openid")
+	}
+	return key, strings.Join(command.args[2:], " "), nil
+}
+
+// blacklistCommand manages the list of applicants barred from joining.
+//
+// It manages a list; it does not police a group. Nothing here removes anybody
+// who is already in one, and nothing here undoes anything by itself: the list
+// only decides how a join request is answered.
+func (h *handler) blacklistCommand(ctx context.Context,
+	data *qqbotsdk.GroupMessageCreateData, command parsedCommand) error {
+	if h.blacklist == nil {
+		h.reply(ctx, data, "本机器人没有可用的数据层，黑名单命令不可用。")
+		return nil
+	}
+	prefix := h.cfg.Prefix
+	if len(command.args) == 0 {
+		h.reply(ctx, data, "用法：\n"+prefix+"黑名单 add <@目标|openid> [原因]\n"+
+			prefix+"黑名单 remove <@目标|openid>\n"+prefix+"黑名单 list")
+		return nil
+	}
+
+	switch command.args[0] {
+	case "add", "添加", "加":
+		key, reason, err := blacklistTarget(command)
+		if err != nil {
+			h.reply(ctx, data, err.Error())
+			return nil
+		}
+		id, err := newBlacklistID()
+		if err != nil {
+			h.reply(ctx, data, "生成条目编号失败："+err.Error())
+			return nil
+		}
+		if err := h.blacklist.Add(ctx, store.Barred{
+			ID:           id,
+			MemberOpenID: key,
+			Reason:       reason,
+			AddedAt:      time.Now().Unix(),
+			AddedBy:      senderOpenID(data),
+		}); err != nil {
+			h.deps.Logger.Error("could not add a blacklist entry", "error", err)
+			h.reply(ctx, data, "加入黑名单失败："+err.Error())
+			return nil
+		}
+		h.deps.Logger.Info("an administrator added a blacklist entry",
+			"group", data.GroupOpenID, "subject", key)
+		answer := "已加入黑名单：`" + key + "`"
+		if reason != "" {
+			answer += "（" + reason + "）"
+		}
+		h.reply(ctx, data, answer)
+		return nil
+
+	case "remove", "移除", "删除", "del":
+		key, _, err := blacklistTarget(command)
+		if err != nil {
+			h.reply(ctx, data, err.Error())
+			return nil
+		}
+		// Checked first, because removing something that was not there and
+		// reporting success would leave an administrator believing a list had
+		// been changed when it had not.
+		entries, err := h.blacklist.List(ctx, blacklistListLimit)
+		if err != nil {
+			h.reply(ctx, data, "读取黑名单失败："+err.Error())
+			return nil
+		}
+		if !blacklistHas(entries, key) {
+			h.reply(ctx, data, "黑名单里没有 `"+key+"`")
+			return nil
+		}
+		if err := h.blacklist.Remove(ctx, key); err != nil {
+			h.deps.Logger.Error("could not remove a blacklist entry", "error", err)
+			h.reply(ctx, data, "移除失败："+err.Error())
+			return nil
+		}
+		h.deps.Logger.Info("an administrator removed a blacklist entry",
+			"group", data.GroupOpenID, "subject", key)
+		h.reply(ctx, data, "已从黑名单移除：`"+key+"`")
+		return nil
+
+	case "list", "列表", "列出":
+		entries, err := h.blacklist.List(ctx, blacklistListLimit)
+		if err != nil {
+			h.reply(ctx, data, "读取黑名单失败："+err.Error())
+			return nil
+		}
+		if len(entries) == 0 {
+			h.reply(ctx, data, "黑名单是空的。")
+			return nil
+		}
+		now := time.Now().Unix()
+		lines := []string{"**黑名单**（" + strconv.Itoa(len(entries)) + " 条）"}
+		for _, entry := range entries {
+			subject := entry.MemberOpenID
+			if subject == "" {
+				subject = "union:" + entry.UnionOpenID
+			}
+			line := "- `" + subject + "`"
+			if entry.Reason != "" {
+				line += " —— " + entry.Reason
+			}
+			if entry.ExpiresAt != 0 {
+				if entry.ExpiresAt <= now {
+					line += "（已过期）"
+				} else {
+					line += "（至 " + time.Unix(entry.ExpiresAt, 0).Format("2006-01-02") + "）"
+				}
+			}
+			lines = append(lines, line)
+		}
+		h.reply(ctx, data, strings.Join(lines, "\n"))
+		return nil
+
+	default:
+		h.reply(ctx, data, "未知的黑名单子命令："+command.args[0]+
+			"。可用：add / remove / list")
+		return nil
+	}
+}
+
+// blacklistHas reports whether the list names an identity.
+func blacklistHas(entries []store.Barred, key string) bool {
+	for _, entry := range entries {
+		if entry.ID == key || entry.MemberOpenID == key || entry.UnionOpenID == key {
+			return true
+		}
+	}
+	return false
 }
 
 // mute applies a command mute to the target.
@@ -877,6 +1075,7 @@ func usage(prefix string) string {
 		prefix + "解禁 [@目标] —— 解除禁言；正在验证中的成员不受此命令影响",
 		prefix + "重新发送验证 [@目标] —— 给正在验证中的成员重发验证通知",
 		prefix + "重新验证 [@目标]",
+		prefix + "黑名单 add|remove|list —— 管理禁止加群名单（只影响加群申请，不踢人）",
 		prefix + "debug 超时测试 [@目标]（需开启调试）",
 	}, "\n")
 }
