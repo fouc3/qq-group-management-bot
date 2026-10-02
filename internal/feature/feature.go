@@ -304,6 +304,38 @@ func InjectVerifier(features []Feature) error {
 	return nil
 }
 
+// ModerationAware is implemented by a feature that reports content for judging.
+type ModerationAware interface {
+	SetModeration(Moderation)
+}
+
+// InjectModeration hands the moderation feature to whatever reports to it.
+//
+// A missing provider is not an error: it leaves every reporting feature with a
+// nil judgement source, which is how a deployment without moderation tells a
+// member that the command has nothing behind it, rather than pretending to judge
+// and answering nothing.
+func InjectModeration(features []Feature) error {
+	var moderation Moderation
+	var providers []string
+	for _, instance := range features {
+		if candidate, ok := instance.(Moderation); ok {
+			moderation = candidate
+			providers = append(providers, instance.Name())
+		}
+	}
+	if len(providers) > 1 {
+		return fmt.Errorf("feature: %s both provide moderation",
+			strings.Join(providers, " and "))
+	}
+	for _, instance := range features {
+		if aware, ok := instance.(ModerationAware); ok {
+			aware.SetModeration(moderation)
+		}
+	}
+	return nil
+}
+
 // Intents unions what every feature asked for, which is what the websocket
 // connection subscribes to.
 func Intents(features []Feature) qqbotsdk.Intent {

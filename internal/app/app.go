@@ -109,6 +109,13 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 		return err
 	}
 	feature.InjectAdminDirectory(features)
+	// The judge is handed over before registration, for the same reason: the
+	// command that reports content must never be reachable while it still has
+	// nothing behind it.
+	if err := feature.InjectModeration(features); err != nil {
+		closeFeatures(ctx, features, logger)
+		return err
+	}
 	// The blacklist is handed over here as well, before anything is registered,
 	// so no request can arrive while the feature is still on its empty default.
 	for _, instance := range features {

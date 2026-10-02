@@ -197,6 +197,10 @@ type handler struct {
 	// blacklist is the list of applicants barred from joining, or nil when there
 	// is no data layer behind the command.
 	blacklist Blacklist
+
+	// moderation judges reported content, or nil when no such feature is
+	// configured. The command says so rather than pretending to judge.
+	moderation feature.Moderation
 }
 
 // Blacklist is the part of the data layer the /黑名单 command uses.
@@ -219,6 +223,15 @@ type Blacklist interface {
 // reachable while it still has no list to work on.
 func (h *handler) SetBlacklist(blacklist Blacklist) {
 	h.blacklist = blacklist
+}
+
+// SetModeration hands over what judges reported content.
+//
+// It may be nil, and it is called whatever the answer is: a feature that reports
+// content has to be able to say "there is nothing behind this command" instead of
+// being absent, which is indistinguishable from being broken.
+func (h *handler) SetModeration(moderation feature.Moderation) {
+	h.moderation = moderation
 }
 
 // newBlacklistID returns the key an entry is stored under.
