@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -49,6 +50,8 @@ type Config struct {
 	Bot Bot `yaml:"bot"`
 	// OneBot holds the fallback used for what the official bot may not do.
 	OneBot OneBot `yaml:"onebot"`
+	// Database says where what has to outlive a restart is kept.
+	Database Database `yaml:"database"`
 	// Log holds logging settings.
 	Log Log `yaml:"log"`
 	// Features holds one raw node per feature, keyed by the feature name.
@@ -56,6 +59,47 @@ type Config struct {
 	// It is deliberately untyped: each feature decodes its own section, so a
 	// new feature does not touch this package.
 	Features map[string]yaml.Node `yaml:"features"`
+}
+
+// Database is where the bot keeps what must survive a restart: the members held
+// until they verify, and the applicants barred from joining.
+//
+// It is not where the settings live. The configuration stays a file a person
+// edits, and its credentials have no business in a database.
+type Database struct {
+	// Driver is sqlite or postgres. Empty means sqlite, the default.
+	Driver string `yaml:"driver"`
+	// DSN is a file path for sqlite and a connection string for postgres.
+	//
+	// Empty means the default file, so a deployment that does not care where it
+	// lives does not have to name a place.
+	DSN string `yaml:"dsn"`
+	// MaxOpenConns caps the pool. SQLite has a single writer and wants one;
+	// leaving it out means one.
+	MaxOpenConns int `yaml:"max_open_conns"`
+}
+
+// DefaultDatabaseDriver is the driver used when the file names none.
+//
+// SQLite is the prototype: no server to run and no compiler to build against,
+// and the same code runs against PostgreSQL by changing this value.
+const DefaultDatabaseDriver = "sqlite"
+
+// DefaultDatabasePath is where the database lives when the file names no place.
+//
+// Under the state directory rather than beside the configuration: it is state,
+// not settings, and somebody editing the configuration should not have to think
+// about where it went.
+func DefaultDatabasePath() (string, error) {
+	directory := os.Getenv("XDG_STATE_HOME")
+	if strings.TrimSpace(directory) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("finding the home directory: %w", err)
+		}
+		directory = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(directory, "qq-group-management-bot", "bot.db"), nil
 }
 
 // Bot holds credentials and how to reach the platform.
@@ -247,6 +291,26 @@ func Load(path string) (*Config, error) {
 
 // applyDefaults fills in what the file may leave out, then validates.
 func (c *Config) applyDefaults() error {
+	if strings.TrimSpace(c.Database.Driver) == "" {
+		c.Database.Driver = DefaultDatabaseDriver
+	}
+	switch c.Database.Driver {
+	case DefaultDatabaseDriver, "postgres":
+	default:
+		return fmt.Errorf("database.driver %q is not %s or postgres",
+			c.Database.Driver, DefaultDatabaseDriver)
+	}
+	if c.Database.MaxOpenConns < 0 {
+		return fmt.Errorf("database.max_open_conns must not be negative, got %d",
+			c.Database.MaxOpenConns)
+	}
+	if strings.TrimSpace(c.Database.DSN) == "" {
+		path, err := DefaultDatabasePath()
+		if err != nil {
+			return err
+		}
+		c.Database.DSN = path
+	}
 	if strings.TrimSpace(c.Log.Level) == "" {
 		c.Log.Level = DefaultLogLevel
 	}
