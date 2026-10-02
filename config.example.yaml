@@ -214,6 +214,49 @@ features:
   #
   # 目标只能用 @ 指定。平台不给"用 QQ 号指定成员"的接口（实测），所以
   # 无法实现 /禁言 123456789。
+  # 引用消息 + AI 送检的违规检测。
+  # 默认关闭：先用 dry_run 观察误报率，再决定是否让它动手。
+  moderation:
+    enabled: false
+    dry_run: true
+    cache_hours: 6                 # 消息在 Redis 里留多久（也是能回溯的上限）
+    context_before: 10             # 引用消息之前至多取几条
+    context_after: 10              # 之后至多取几条
+    chain_minutes: 10              # 且链两端间隔不超过这么多分钟
+    context_scope: group           # group（该群时间线）| sender（只看发送者）
+    max_chars: 12000               # 送检正文上限，超出会在提示里标明已截断
+
+    # OpenAI 格式。name 填好之后判定才会启用；留空时 /违规举报 只会回
+    # 「送检失败，未采取任何处理」，不会误伤任何人。
+    #
+    # 这里刻意不写环境变量引用语法：被引用的变量必须已经存在，否则机器人根本
+    # 起不来。要放环境变量，就留空 api_key，并把 MODERATION_API_KEY 放进服务环境。
+    model:
+      base_url: "https://api.deepseek.com/v1"
+      api_key: ""
+      name: ""
+      timeout_seconds: 30
+      stream: false                # 判定不需要流式；库同样支持
+      temperature: 0
+
+    # 违规类型 → 展示名 + 禁言时长（Go 语法：30s / 10m / 6h / 1d）。
+    # 表外的类型一律不动作；类型没写时长的用 default_mute。
+    categories:
+      ad:    { label: "广告", mute: "10m" }
+      fraud: { label: "诈骗", mute: "6h" }
+    default_mute: "10m"
+
+    # 未发现违规时是否反噬举报者（默认关）。
+    report_penalty:
+      enabled: false
+      mute: "10m"
+
+    # 每群独立设置。allow 是否决权：命中的消息连模型都不会被问。
+    # groups:
+    #   "群 openid":
+    #     allow: ["官网", "example.com"]
+    #     categories: { ad: "30m" }
+    #     enabled: false
   admin_commands:
     enabled: true
 
