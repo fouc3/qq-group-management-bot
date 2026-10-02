@@ -185,8 +185,14 @@ func TestAViolationIsChangedAndSaid(t *testing.T) {
 	if !strings.Contains(reply, "已禁言") {
 		t.Errorf("reply = %q, want the mute reported", reply)
 	}
-	if !strings.Contains(reply, "已撤回") {
-		t.Errorf("reply = %q, want the recall reported", reply)
+	if !strings.Contains(reply, "已撤回 2 条消息") {
+		t.Errorf("reply = %q, want the number of messages taken back", reply)
+	}
+	// How many, never which ones: the judgement's numbers are positions in the
+	// window that was sent for judging, and the group never saw that list. Printing
+	// them makes a reader count and come up with a different answer.
+	if strings.Contains(reply, "第 ") {
+		t.Errorf("reply = %q, want no window positions in it", reply)
 	}
 	if count := h.muteCount(); count == 0 {
 		t.Error("no mute was actually sent")

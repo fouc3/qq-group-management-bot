@@ -3,7 +3,6 @@ package admincmd
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -147,7 +146,7 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	// want of an administrator must not cost the mute, and the mute is the part
 	// that stops the next message.
 	var notes []string
-	var recalled []string
+	recalled, failed := 0, 0
 	for index, messageID := range verdict.RecallMessageIDs {
 		number := 0
 		if index < len(verdict.RecallNumbers) {
@@ -157,13 +156,26 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 			h.deps.Logger.Warn("could not recall a message that was judged",
 				"group", groupOpenID, "message", messageID, "number", number,
 				"error", err)
-			notes = append(notes, "第 "+numberText(number)+" 条撤回失败（"+shortReason(err)+"）")
+			failed++
 			continue
 		}
-		recalled = append(recalled, numberText(number))
+		recalled++
 	}
-	if len(recalled) > 0 {
-		notes = append(notes, "已撤回第 "+strings.Join(recalled, "、")+" 条")
+	// The group is told how many were taken back, never which ones.
+	//
+	// The numbers a judgement works in are positions in the window that was sent
+	// for judging: "2" means the second message of about twenty, most of which came
+	// before the one that was reported and none of which anybody in the group ever
+	// saw as a numbered list. Printing them invites exactly the question the reply
+	// is meant to answer -- somebody counted, and got a different number.
+	switch {
+	case recalled > 0 && failed == 0:
+		notes = append(notes, fmt.Sprintf("已撤回 %d 条消息", recalled))
+	case recalled > 0:
+		notes = append(notes, fmt.Sprintf("已撤回 %d 条消息，另有 %d 条撤回失败",
+			recalled, failed))
+	case failed > 0:
+		notes = append(notes, fmt.Sprintf("撤回失败（%d 条）", failed))
 	}
 	if verdict.MuteSeconds > 0 && verdict.SubjectOpenID != "" {
 		duration := time.Duration(verdict.MuteSeconds) * time.Second
@@ -246,15 +258,6 @@ func (h *handler) allowReport(reporter string) bool {
 	}
 	h.reports[reporter] = kept
 	return allowed
-}
-
-// numberText is how one message is named in the reply: by the number the judge was
-// shown, so that what the group reads matches what the judgement was about.
-func numberText(number int) string {
-	if number <= 0 {
-		return "引用的那条"
-	}
-	return strconv.Itoa(number)
 }
 
 // shortReason is an error message fit to put in a group: the platform's wording
