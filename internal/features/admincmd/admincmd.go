@@ -992,13 +992,10 @@ func targetOf(data *qqbotsdk.GroupMessageCreateData, command parsedCommand) (str
 
 // reply answers in the group, as a passive reply to the command.
 func (h *handler) reply(ctx context.Context, data *qqbotsdk.GroupMessageCreateData, text string) {
-	_, err := h.deps.Client.SendGroupMessage(ctx, data.GroupOpenID, &qqbotsdk.Message{
-		MsgType:  qqbotsdk.MsgTypeMarkdown,
-		Markdown: &qqbotsdk.MessageMarkdown{Content: text},
-		MsgID:    data.ID,
-		MsgSeq:   1,
-	})
-	if err != nil {
+	// Through the one sender, so that every answer to a command is retried the
+	// same way: an answer that never arrives is indistinguishable, from the
+	// group's side, from a bot that ignored them.
+	if err := h.sendMessage(ctx, data.GroupOpenID, text, data.ID); err != nil {
 		h.deps.Logger.Warn("could not answer a command", "error", err)
 	}
 }

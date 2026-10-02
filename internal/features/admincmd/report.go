@@ -86,7 +86,25 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		"dry_run", h.moderation.DryRun())
 
 	if verdict.Category == "" {
-		h.sayInGroup(ctx, groupOpenID, "未发现违规，未采取任何处理。")
+		// Nothing was found, so nobody's message was wrong. Whether that costs the
+		// reporter anything is the group's policy, and the default is that it does
+		// not.
+		penalty := h.moderation.ReportPenaltySeconds()
+		if penalty <= 0 || h.moderation.DryRun() {
+			h.sayInGroup(ctx, groupOpenID, "未发现违规，未采取任何处理。")
+			return
+		}
+		duration := time.Duration(penalty) * time.Second
+		if err := h.muteMember(ctx, groupOpenID, reporter, duration); err != nil {
+			h.deps.Logger.Error("could not silence a reporter whose report found nothing",
+				"group", groupOpenID, "reporter", reporter, "error", err)
+			h.sayInGroup(ctx, groupOpenID, "未发现违规；禁言举报者失败（"+shortReason(err)+"）。")
+			return
+		}
+		h.deps.Logger.Info("a report found nothing, so the reporter was silenced",
+			"group", groupOpenID, "reporter", reporter, "seconds", penalty)
+		h.sayInGroup(ctx, groupOpenID, "未发现违规。举报前请自行确认，已禁言举报者 "+
+			humanDuration(duration)+"。")
 		return
 	}
 	if h.moderation.DryRun() {
@@ -140,13 +158,11 @@ func (h *handler) muteMember(ctx context.Context, groupOpenID, memberOpenID stri
 		})
 }
 
-// sayInGroup sends a message that is not an answer to anything, because the
-// judgement finishes long after the report did.
+// sayInGroup sends a message that answers nothing, because a judgement finishes
+// long after the report it is about did -- and long after the platform would let
+// the bot reply to that report's event.
 func (h *handler) sayInGroup(ctx context.Context, groupOpenID, text string) {
-	if _, err := h.deps.Client.SendGroupMessage(ctx, groupOpenID, &qqbotsdk.Message{
-		MsgType:  qqbotsdk.MsgTypeMarkdown,
-		Markdown: &qqbotsdk.MessageMarkdown{Content: text},
-	}); err != nil {
+	if err := h.sendMessage(ctx, groupOpenID, text, ""); err != nil {
 		h.deps.Logger.Warn("could not report a judgement in the group",
 			"group", groupOpenID, "error", err)
 	}

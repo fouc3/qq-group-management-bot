@@ -68,6 +68,10 @@ type Config struct {
 	// is what "different times per type, or one fixed time" comes to. Empty means
 	// the finding is reported without silencing anybody.
 	DefaultMute string `yaml:"default_mute"`
+	// ReportPenalty silences the reporter when a report finds nothing. Off unless
+	// the section turns it on, because it punishes somebody for being wrong rather
+	// than for doing wrong.
+	ReportPenalty *Penalty `yaml:"report_penalty"`
 	// DryRun judges and reports without muting or recalling anything.
 	//
 	// On unless it is turned off: the first days of a moderation prompt are for
@@ -92,6 +96,15 @@ type Category struct {
 	// carry text a member talked the model into writing.
 	Label string `yaml:"label"`
 	// Mute is how long the member is silenced for it.
+	Mute string `yaml:"mute"`
+}
+
+// Penalty is a punishment the configuration asks for, in the same duration syntax
+// as a category.
+type Penalty struct {
+	// Enabled turns it on. A block written without it is off.
+	Enabled bool `yaml:"enabled"`
+	// Mute is how long it lasts.
 	Mute string `yaml:"mute"`
 }
 
@@ -151,6 +164,16 @@ func (c *Config) applyDefaults() error {
 	if strings.TrimSpace(c.DefaultMute) != "" {
 		if _, err := time.ParseDuration(c.DefaultMute); err != nil {
 			return fmt.Errorf("default_mute %q: %w", c.DefaultMute, err)
+		}
+	}
+	if c.ReportPenalty != nil && c.ReportPenalty.Enabled {
+		// Enabled with nothing to serve would silence the reporter for no length
+		// of time, which reads as a bug rather than as a policy.
+		if strings.TrimSpace(c.ReportPenalty.Mute) == "" {
+			return errors.New("report_penalty is enabled but names no mute duration")
+		}
+		if _, err := time.ParseDuration(c.ReportPenalty.Mute); err != nil {
+			return fmt.Errorf("report_penalty mute %q: %w", c.ReportPenalty.Mute, err)
 		}
 	}
 	for name, category := range c.Categories {
@@ -251,6 +274,23 @@ func (h *handler) Name() string { return Name }
 // On unless it is turned off, and asked for from the outside: what it holds back
 // belongs to whoever acts on a verdict.
 func (h *handler) DryRun() bool { return h.cfg.DryRun == nil || *h.cfg.DryRun }
+
+// ReportPenaltySeconds implements feature.Moderation.
+//
+// Zero means the configuration does not ask for a penalty, and it also means a
+// penalty of no length: to a caller those are the same thing, because neither
+// silences anybody.
+func (h *handler) ReportPenaltySeconds() int64 {
+	if h.cfg.ReportPenalty == nil || !h.cfg.ReportPenalty.Enabled {
+		return 0
+	}
+	parsed, err := time.ParseDuration(strings.TrimSpace(h.cfg.ReportPenalty.Mute))
+	if err != nil {
+		// Refused at startup, so this cannot happen in a running bot.
+		return 0
+	}
+	return int64(parsed.Seconds())
+}
 
 // Intents implements feature.Feature.
 func (h *handler) Intents() qqbotsdk.Intent {

@@ -23,6 +23,9 @@ type stubJudge struct {
 	// release holds the judgement until the test lets it go, so that the line the
 	// group sees first can be asserted without racing the verdict.
 	release chan struct{}
+	// penalty is how long the configuration silences a reporter whose report found
+	// nothing, zero when it does not ask for that.
+	penalty int64
 }
 
 func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
@@ -39,6 +42,8 @@ func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
 }
 
 func (s *stubJudge) DryRun() bool { return s.dryRun }
+
+func (s *stubJudge) ReportPenaltySeconds() int64 { return s.penalty }
 
 // reportHarness builds a harness with a stub judge behind the command.
 func reportHarness(t *testing.T, judge *stubJudge) *harness {
@@ -244,5 +249,48 @@ func TestTheRateLimitStopsFlooding(t *testing.T) {
 	h.handler.mu.Unlock()
 	if !h.handler.allowReport(testAdmin) {
 		t.Error("a report from two hours ago still counted against the limit")
+	}
+}
+
+// TestAnUnfoundedReportCanCostTheReporter covers the setting that makes a member
+// think before reporting: nothing was found, so the report was wrong.
+//
+// The verdict carries no subject, which is what makes this unambiguous: any mute
+// here can only be the reporter's.
+func TestAnUnfoundedReportCanCostTheReporter(t *testing.T) {
+	judge := &stubJudge{penalty: 300}
+	h := reportHarness(t, judge)
+
+	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-1"),
+		parsedCommand{}); err != nil {
+		t.Fatalf("reportCommand: %v", err)
+	}
+	reply := waitForReply(t, h, "未发现违规")
+
+	if !strings.Contains(reply, "禁言举报者") {
+		t.Errorf("reply = %q, want it to say the reporter was silenced", reply)
+	}
+	if count := h.muteCount(); count != 1 {
+		t.Errorf("sent %d mutes, want exactly the reporter's", count)
+	}
+}
+
+// TestTheReporterIsNotPunishedByDefault covers the default the plan asked for:
+// with no penalty configured, a report that finds nothing costs nothing.
+func TestTheReporterIsNotPunishedByDefault(t *testing.T) {
+	judge := &stubJudge{}
+	h := reportHarness(t, judge)
+
+	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-1"),
+		parsedCommand{}); err != nil {
+		t.Fatalf("reportCommand: %v", err)
+	}
+	reply := waitForReply(t, h, "未发现违规")
+
+	if strings.Contains(reply, "禁言") {
+		t.Errorf("reply = %q, want nobody silenced", reply)
+	}
+	if count := h.muteCount(); count != 0 {
+		t.Errorf("sent %d mutes with no penalty configured", count)
 	}
 }

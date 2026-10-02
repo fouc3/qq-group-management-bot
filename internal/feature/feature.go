@@ -232,6 +232,13 @@ type Moderation interface {
 	// judgement, because the things it holds back -- silencing somebody, taking a
 	// message back -- are the caller's to do and not the judge's.
 	DryRun() bool
+	// ReportPenaltySeconds is how long a reporter is silenced when a report finds
+	// nothing, or zero when the configuration does not ask for that at all.
+	//
+	// The policy is the moderation feature's, and the silencing is the caller's:
+	// the verdict says what was found, this says what the group's rules make of a
+	// report that found nothing.
+	ReportPenaltySeconds() int64
 }
 
 // ModerationVerdict is what a judgement came to.
