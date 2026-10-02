@@ -1,0 +1,215 @@
+package moderation
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/feature"
+)
+
+// reportHarness builds the feature with both a cache and a stub model, which is
+// what the whole path needs: a window to find and a judgement to come back.
+func reportHarness(t *testing.T, stub *modelStub, extra string) (*handler, string) {
+	t.Helper()
+	addr := os.Getenv("TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("set TEST_REDIS_ADDR to run the report tests against a real Redis " +
+			"(the bot's own is at 127.0.0.1:6380)")
+	}
+	server := stub.start(t)
+	group := "G-" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	section := `
+enabled: true
+cache_hours: 6
+context_before: 10
+context_after: 10
+chain_minutes: 10
+default_mute: "5m"
+model:
+  base_url: "` + server.URL + `/v1"
+  api_key: "test-key"
+  name: "stub-model"
+  timeout_seconds: 5
+categories:
+  ad:
+    label: "广告"
+    mute: "10m"
+  fraud:
+    label: "诈骗"
+` + extra
+
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(section), &document); err != nil {
+		t.Fatalf("decoding the section: %v", err)
+	}
+	if len(document.Content) == 0 {
+		t.Fatal("the section produced no node")
+	}
+	instance, err := New(*document.Content[0], feature.Deps{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Redis:  config.Redis{Addr: addr, Prefix: "qgb-test", DialTimeoutSeconds: 3},
+	})
+	if err != nil {
+		t.Fatalf("building the feature: %v", err)
+	}
+	h := instance.(*handler)
+	t.Cleanup(func() {
+		ctx := context.Background()
+		set, index := h.cache.keys(group)
+		h.cache.client.Del(ctx, set, index)
+		h.cache.Close()
+	})
+	return h, group
+}
+
+// cacheChain writes a window into the cache, the quoted message in the middle.
+func cacheChain(t *testing.T, h *handler, group string, texts ...string) string {
+	t.Helper()
+	ctx := context.Background()
+	chain := chainOf(texts...)
+	quoted := chain[len(chain)/2].Idx
+	for _, message := range chain {
+		if err := h.cache.Record(ctx, group, message); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	return quoted
+}
+
+// TestAReportBecomesAVerdict covers the ordinary path end to end: a cached
+// window, a model that finds an advertisement, and everything a caller needs in
+// order to act.
+func TestAReportBecomesAVerdict(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+		`"reason":"卖号广告","confidence":0.9}`}
+	h, group := reportHarness(t, stub, "")
+	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我", "谁在发广告")
+
+	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	if err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	if report.Category != "ad" {
+		t.Fatalf("category = %q, want ad", report.Category)
+	}
+	// The label is the configuration's, which is what keeps the group's side of
+	// the reply free of anything the model wrote.
+	if report.Label != "广告" {
+		t.Errorf("label = %q, want the configured one", report.Label)
+	}
+	if report.MuteSeconds != 600 {
+		t.Errorf("mute = %d seconds, want 600", report.MuteSeconds)
+	}
+	// The subject is the quoted message's author, and the quoted message is what a
+	// recall would take back -- not the newest message in the window.
+	if report.SubjectOpenID == "" || report.QuotedMessageID == "" {
+		t.Errorf("report = %+v, want a subject and a message to recall", report)
+	}
+	if len(report.JudgedMessageIDs) != 3 {
+		t.Errorf("judged %d messages, want all three", len(report.JudgedMessageIDs))
+	}
+	if report.Reason == "" || report.Model != "stub-model" {
+		t.Errorf("report = %+v, want the model's reason and name for the record", report)
+	}
+}
+
+// TestACategoryWithoutItsOwnDurationFallsBack covers the configuration the plan
+// calls "one fixed time for every type": fraud names no duration here.
+func TestACategoryWithoutItsOwnDurationFallsBack(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"violation","category":"fraud",` +
+		`"confidence":0.9}`}
+	h, group := reportHarness(t, stub, "")
+	quoted := cacheChain(t, h, group, "先交押金")
+
+	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	if err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	if report.MuteSeconds != 300 {
+		t.Errorf("mute = %d seconds, want the 5m default", report.MuteSeconds)
+	}
+	if report.Label != "诈骗" {
+		t.Errorf("label = %q, want the configured one", report.Label)
+	}
+}
+
+// TestACleanVerdictHasNoPunishment covers the case that decides whether anybody
+// is silenced: nothing found means nothing served, and the reporter's fate is the
+// caller's business.
+func TestACleanVerdictHasNoPunishment(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	h, group := reportHarness(t, stub, "")
+	quoted := cacheChain(t, h, group, "这条没问题")
+
+	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	if err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	if report.Category != "" || report.MuteSeconds != 0 || report.Label != "" {
+		t.Errorf("report = %+v, want nothing to act on", report)
+	}
+}
+
+// TestNoJudgementIsAnError covers every way of not reaching one. None may look
+// like a clean verdict, or a real report would be silently dropped.
+func TestNoJudgementIsAnError(t *testing.T) {
+	cases := map[string]struct {
+		stub    *modelStub
+		extra   string
+		quoted  string
+		noModel bool
+	}{
+		"a message nobody cached": {
+			stub: &modelStub{answer: `{"verdict":"ok"}`}, quoted: "NEVER-SEEN"},
+		"an empty index": {
+			stub: &modelStub{answer: `{"verdict":"ok"}`}, quoted: ""},
+		"a model that answered nothing readable": {
+			stub: &modelStub{answer: "我不知道"}, quoted: "MID"},
+		"a server error": {
+			stub: &modelStub{status: 500}, quoted: "MID"},
+		"no model configured": {
+			stub: &modelStub{answer: `{"verdict":"ok"}`}, quoted: "MID", noModel: true},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			h, group := reportHarness(t, testCase.stub, testCase.extra)
+			quoted := testCase.quoted
+			if quoted == "MID" {
+				quoted = cacheChain(t, h, group, "正常聊天", "加群送皮肤")
+			}
+			if testCase.noModel {
+				h.cfg.Model.Name = ""
+			}
+			_, err := h.JudgeQuoted(context.Background(), group, quoted)
+			if !errors.Is(err, ErrUnjudged) {
+				t.Fatalf("err = %v, want ErrUnjudged", err)
+			}
+		})
+	}
+}
+
+// TestNoCategoryDurationMeansNoPunishment covers a category the configuration
+// knows but gives no duration to, and no default either: the finding is reported
+// without anybody being silenced.
+func TestNoCategoryDurationMeansNoPunishment(t *testing.T) {
+	var cfg Config
+	cfg.DefaultMute = ""
+	cfg.Categories = map[string]Category{"ad": {Label: "广告"}}
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
+	}
+	if seconds, known := cfg.MuteFor("ad"); !known || seconds != 0 {
+		t.Errorf("MuteFor = %d, %v; want 0, true", seconds, known)
+	}
+	if _, known := cfg.MuteFor("nothing-such"); known {
+		t.Error("a category that is not configured must not be known")
+	}
+}

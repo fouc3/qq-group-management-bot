@@ -1,0 +1,86 @@
+package moderation
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/fouc3/qq-group-management-bot/internal/feature"
+)
+
+// JudgeQuoted judges one quoted message in its context.
+//
+// It is the whole path from a report to a verdict: find the quoted message in the
+// cache, take the window around it, ask the model, and describe the result in the
+// terms a caller acts on -- what was found, how long it is punished with, and who
+// posted it.
+//
+// Everything that is not a judgement is an error. A cache miss and an unreadable
+// answer both mean nobody knows whether the message is acceptable, and a caller
+// that confused that with acceptable would quietly drop a real report.
+func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID,
+	quotedIndex string) (feature.ModerationVerdict, error) {
+	if strings.TrimSpace(quotedIndex) == "" {
+		return feature.ModerationVerdict{}, fmt.Errorf("%w: the report does not say "+
+			"which message it is about", ErrUnjudged)
+	}
+	if !h.cfg.JudgingEnabled() {
+		return feature.ModerationVerdict{}, fmt.Errorf("%w: no model is configured, "+
+			"so nothing can be judged", ErrUnjudged)
+	}
+
+	chain, err := h.cache.Context(ctx, groupOpenID, quotedIndex,
+		h.cfg.ContextBefore, h.cfg.ContextAfter,
+		time.Duration(h.cfg.ChainMinutes)*time.Minute)
+	if err != nil {
+		return feature.ModerationVerdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
+	}
+
+	// The subject is the author of the message that was reported, not whoever is
+	// loudest in the window: the report is about that message, and what follows
+	// follows the message.
+	subject, quotedID := "", ""
+	judged := make([]string, 0, len(chain))
+	for _, message := range chain {
+		if message.ID != "" {
+			judged = append(judged, message.ID)
+		}
+		if message.Idx == quotedIndex {
+			subject, quotedID = message.User, message.ID
+		}
+	}
+	if subject == "" {
+		return feature.ModerationVerdict{}, fmt.Errorf("%w: the quoted message is not "+
+			"in the window", ErrUnjudged)
+	}
+
+	verdict, err := h.Judge(ctx, chain)
+	if err != nil {
+		return feature.ModerationVerdict{}, err
+	}
+
+	report := feature.ModerationVerdict{
+		Category:         verdict.Category,
+		SubjectOpenID:    subject,
+		QuotedMessageID:  quotedID,
+		JudgedMessageIDs: judged,
+		Reason:           verdict.Reason,
+		Model:            verdict.Model,
+	}
+	if !verdict.Violation() {
+		return report, nil
+	}
+
+	report.Label = h.cfg.LabelFor(verdict.Category)
+	seconds, known := h.cfg.MuteFor(verdict.Category)
+	if !known {
+		// The category came from the configuration's own list, so this cannot
+		// happen in a running bot. Saying so is still better than punishing
+		// somebody for a category that has no duration to serve.
+		return feature.ModerationVerdict{}, fmt.Errorf("%w: category %q has no "+
+			"duration configured", ErrUnjudged, verdict.Category)
+	}
+	report.MuteSeconds = seconds
+	return report, nil
+}

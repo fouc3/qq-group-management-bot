@@ -214,6 +214,44 @@ func InjectAdminDirectory(features []Feature) {
 //
 // It keeps the two independent: neither package imports the other, and the app
 // hands one to the other once both are built.
+// Moderation is what the moderation feature provides to whatever reports
+// content: it judges a quoted message against the configured model.
+//
+// It is the seam the /违规举报 command reaches through, so that the command, the
+// cache and the model stay in packages that do not import each other.
+type Moderation interface {
+	// JudgeQuoted judges the window of messages around one quoted message.
+	//
+	// An error means no judgement was reached: the message is not in the cache,
+	// the cache is down, or the model could not be read. None of those is a
+	// violation, and a caller must never treat one as a violation.
+	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex string) (ModerationVerdict, error)
+}
+
+// ModerationVerdict is what a judgement came to.
+type ModerationVerdict struct {
+	// Category is the configured name of what was found. Empty means nothing was
+	// found, which is the only sense in which a verdict is "clean".
+	Category string
+	// Label is what a group may be told, and it comes from the configuration
+	// rather than from the model.
+	Label string
+	// MuteSeconds is how long the member who posted the message is silenced for.
+	// Zero means the finding is reported without silencing anybody.
+	MuteSeconds int64
+	// SubjectOpenID is the author of the message that was reported.
+	SubjectOpenID string
+	// QuotedMessageID is the reported message itself: the one a recall takes back.
+	QuotedMessageID string
+	// JudgedMessageIDs is everything that was sent for judgement, for the record.
+	JudgedMessageIDs []string
+	// Reason is the model's own explanation, for the administrators and the audit
+	// table and never for the group.
+	Reason string
+	// Model names what answered.
+	Model string
+}
+
 type Verifier interface {
 	// Reverify holds a member again and sends a fresh prompt.
 	Reverify(ctx context.Context, groupOpenID, memberOpenID string) error

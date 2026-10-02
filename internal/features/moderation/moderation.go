@@ -64,6 +64,10 @@ type Config struct {
 	// MaxChars bounds what is sent for judgement. A longer window is truncated,
 	// with the truncation said out loud in the prompt.
 	MaxChars int `yaml:"max_chars"`
+	// DefaultMute is used for a category that names no duration of its own, which
+	// is what "different times per type, or one fixed time" comes to. Empty means
+	// the finding is reported without silencing anybody.
+	DefaultMute string `yaml:"default_mute"`
 	// DryRun judges and reports without muting or recalling anything.
 	//
 	// On unless it is turned off: the first days of a moderation prompt are for
@@ -137,7 +141,82 @@ func (c *Config) applyDefaults() error {
 		dryRun := true
 		c.DryRun = &dryRun
 	}
+
+	// The durations are parsed here rather than where they are used, so that a
+	// typo is refused at startup instead of becoming a silent default on the day
+	// somebody is actually silenced.
+	//
+	// Go's own syntax, unlike a command argument: this is a file a person edits
+	// deliberately, and 10m is shorter to read than 10分.
+	if strings.TrimSpace(c.DefaultMute) != "" {
+		if _, err := time.ParseDuration(c.DefaultMute); err != nil {
+			return fmt.Errorf("default_mute %q: %w", c.DefaultMute, err)
+		}
+	}
+	for name, category := range c.Categories {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("categories has an entry with an empty name")
+		}
+		if strings.TrimSpace(category.Label) == "" {
+			return fmt.Errorf("category %q has no label, so the group could not be "+
+				"told what was found", name)
+		}
+		if strings.TrimSpace(category.Mute) == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(category.Mute); err != nil {
+			return fmt.Errorf("category %q mute %q: %w", name, category.Mute, err)
+		}
+	}
 	return nil
+}
+
+// JudgingEnabled reports whether a model is configured to judge with.
+//
+// A deployment that only fills the cache is a stage worth being able to run in,
+// so a missing model is not a configuration error; it just means every report
+// ends in "could not judge" rather than in a verdict.
+func (c *Config) JudgingEnabled() bool {
+	return strings.TrimSpace(c.Model.Name) != ""
+}
+
+// MuteFor is how long a member is silenced for one category, and whether the
+// category is one this configuration knows.
+//
+// A category with no duration of its own falls back to the default, which is
+// what "set no per-type duration, use a fixed one" means in practice.
+func (c *Config) MuteFor(category string) (int64, bool) {
+	entry, known := c.Categories[category]
+	if !known {
+		return 0, false
+	}
+	text := strings.TrimSpace(entry.Mute)
+	if text == "" {
+		text = strings.TrimSpace(c.DefaultMute)
+	}
+	if text == "" {
+		// Nothing was configured, so nothing is served: the caller reports the
+		// finding without silencing anybody.
+		return 0, true
+	}
+	parsed, err := time.ParseDuration(text)
+	if err != nil {
+		// Refused at startup, so this cannot happen in a running bot.
+		return 0, true
+	}
+	return int64(parsed.Seconds()), true
+}
+
+// LabelFor is what a group is told about a category, from the configuration.
+func (c *Config) LabelFor(category string) string {
+	entry, known := c.Categories[category]
+	if !known {
+		return category
+	}
+	if strings.TrimSpace(entry.Label) == "" {
+		return category
+	}
+	return entry.Label
 }
 
 // handler implements feature.Feature.
