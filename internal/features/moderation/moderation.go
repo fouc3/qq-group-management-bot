@@ -72,6 +72,8 @@ type Config struct {
 	// the section turns it on, because it punishes somebody for being wrong rather
 	// than for doing wrong.
 	ReportPenalty *Penalty `yaml:"report_penalty"`
+	// Groups holds one group's differences from the section above it.
+	Groups map[string]GroupOverride `yaml:"groups"`
 	// DryRun judges and reports without muting or recalling anything.
 	//
 	// On unless it is turned off: the first days of a moderation prompt are for
@@ -106,6 +108,75 @@ type Penalty struct {
 	Enabled bool `yaml:"enabled"`
 	// Mute is how long it lasts.
 	Mute string `yaml:"mute"`
+}
+
+// GroupOverride is one group's differences from the section above it.
+//
+// Every field is optional, so a group that appears here only to carry an allow
+// list keeps every other setting from the feature itself.
+type GroupOverride struct {
+	// Enabled turns judging off for one group while it stays on elsewhere. Nil
+	// follows the feature.
+	Enabled *bool `yaml:"enabled"`
+	// Allow is what this group accepts as legitimate: a domain, or a phrase.
+	//
+	// It is a veto and not a hint. A message it matches is never acted on, whatever
+	// the model makes of it -- which is the point: the group's own site must not
+	// become an advertisement because a model was having a bad day, or because
+	// somebody talked it into one.
+	Allow []string `yaml:"allow"`
+	// Categories overrides durations for this group. A category named here takes
+	// this duration; every other category is unchanged.
+	Categories map[string]string `yaml:"categories"`
+}
+
+// groupFor is one group's overrides, or an empty set.
+func (c *Config) groupFor(groupOpenID string) GroupOverride {
+	if c.Groups == nil {
+		return GroupOverride{}
+	}
+	return c.Groups[groupOpenID]
+}
+
+// judgingEnabledFor reports whether judging happens in one group at all.
+func (c *Config) judgingEnabledFor(groupOpenID string) bool {
+	if enabled := c.groupFor(groupOpenID).Enabled; enabled != nil {
+		return *enabled
+	}
+	return true
+}
+
+// allowedIn reports whether a message is on one group's list of what it accepts,
+// and which entry matched.
+func (c *Config) allowedIn(groupOpenID, text string) (string, bool) {
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	lowered := strings.ToLower(text)
+	for _, entry := range c.groupFor(groupOpenID).Allow {
+		needle := strings.ToLower(strings.TrimSpace(entry))
+		if needle == "" {
+			continue
+		}
+		if strings.Contains(lowered, needle) {
+			return entry, true
+		}
+	}
+	return "", false
+}
+
+// MuteForGroup is how long a member is silenced for one category in one group,
+// falling back to the section's own setting.
+func (c *Config) MuteForGroup(groupOpenID, category string) (int64, bool) {
+	if text := strings.TrimSpace(c.groupFor(groupOpenID).Categories[category]); text != "" {
+		parsed, err := time.ParseDuration(text)
+		if err != nil {
+			// Refused at startup, so this cannot happen in a running bot.
+			return 0, false
+		}
+		return int64(parsed.Seconds()), true
+	}
+	return c.MuteFor(category)
 }
 
 // modelClient builds the client the judge uses.
@@ -189,6 +260,28 @@ func (c *Config) applyDefaults() error {
 		}
 		if _, err := time.ParseDuration(category.Mute); err != nil {
 			return fmt.Errorf("category %q mute %q: %w", name, category.Mute, err)
+		}
+	}
+	for openID, group := range c.Groups {
+		if strings.TrimSpace(openID) == "" {
+			return errors.New("groups has an entry with an empty group openid")
+		}
+		for _, duration := range group.Categories {
+			// Checked here for the same reason as the others: a duration that
+			// cannot be read must not be discovered on the day somebody is
+			// silenced for it.
+			if strings.TrimSpace(duration) == "" {
+				continue
+			}
+			if _, err := time.ParseDuration(duration); err != nil {
+				return fmt.Errorf("group %s: %w", openID, err)
+			}
+		}
+		for _, entry := range group.Allow {
+			if strings.TrimSpace(entry) == "" {
+				return fmt.Errorf("group %s has an empty allow entry, which would "+
+					"match every message", openID)
+			}
 		}
 	}
 	return nil

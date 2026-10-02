@@ -213,3 +213,91 @@ func TestNoCategoryDurationMeansNoPunishment(t *testing.T) {
 		t.Error("a category that is not configured must not be known")
 	}
 }
+
+// groupSection is a groups: block naming the group this test's harness uses.
+//
+// The harness names its group after the test, so a test can address its own
+// without the two agreeing on a constant.
+func groupSection(t *testing.T, body string) string {
+	t.Helper()
+	return "groups:\n  \"G-" + t.Name() + "\":\n" + body
+}
+
+// TestTheAllowListIsAVeto covers the group's own list of what it accepts: a
+// report about something on it is answered without asking the model at all.
+//
+// Asking anyway would be the weaker design. The model's answer cannot be relied
+// on to respect the list -- it may not even be shown it -- so the veto belongs to
+// the code, before the message goes anywhere.
+func TestTheAllowListIsAVeto(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+		`"reason":"看起来像广告","confidence":0.99}`}
+	h, group := reportHarness(t, stub,
+		groupSection(t, "    allow: [\"our-site.example\"]\n"))
+	quoted := cacheChain(t, h, group, "正常聊天",
+		"这是我们自己的官网 our-site.example 的介绍")
+
+	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	if err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	if report.Category != "" {
+		t.Errorf("report = %+v, want nothing to act on", report)
+	}
+	if len(stub.requests) != 0 {
+		t.Error("the model was asked about a message the group had already accepted")
+	}
+	// The reason names the entry that matched, and it is for the administrators:
+	// the group itself is told that nothing was found.
+	if !strings.Contains(report.Reason, "our-site.example") {
+		t.Errorf("reason = %q, want it to name the entry that matched", report.Reason)
+	}
+}
+
+// TestJudgingCanBeTurnedOffForOneGroup covers one group opting out while the
+// feature stays on everywhere else.
+func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	h, group := reportHarness(t, stub, groupSection(t, "    enabled: false\n"))
+	quoted := cacheChain(t, h, group, "正常聊天")
+
+	if _, err := h.JudgeQuoted(context.Background(), group, quoted); !errors.Is(err, ErrUnjudged) {
+		t.Fatalf("err = %v, want ErrUnjudged", err)
+	}
+	if len(stub.requests) != 0 {
+		t.Error("the model was asked about a group where judging is turned off")
+	}
+}
+
+// TestAGroupCanHaveItsOwnDurations covers the per-group override: the same
+// category is punished for different lengths in different groups.
+func TestAGroupCanHaveItsOwnDurations(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+		`"confidence":0.9}`}
+	h, group := reportHarness(t, stub,
+		groupSection(t, "    categories:\n      ad: \"30m\"\n"))
+	quoted := cacheChain(t, h, group, "加群送皮肤 私聊我")
+
+	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	if err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	if report.MuteSeconds != 1800 {
+		t.Errorf("mute = %d seconds, want the group's own 30 minutes", report.MuteSeconds)
+	}
+	if report.Label != "广告" {
+		t.Errorf("label = %q, want the configured one", report.Label)
+	}
+}
+
+// TestAnEmptyAllowEntryIsRefusedAtStartup covers the typo that would otherwise
+// silently accept every message in the group.
+func TestAnEmptyAllowEntryIsRefusedAtStartup(t *testing.T) {
+	cfg := Config{
+		Categories: map[string]Category{"ad": {Label: "广告", Mute: "10m"}},
+		Groups:     map[string]GroupOverride{"G-1": {Allow: []string{" "}}},
+	}
+	if err := cfg.applyDefaults(); err == nil {
+		t.Error("an empty allow entry must be refused: it would match every message")
+	}
+}

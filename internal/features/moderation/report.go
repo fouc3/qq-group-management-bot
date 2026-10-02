@@ -29,6 +29,10 @@ func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID,
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: no model is configured, "+
 			"so nothing can be judged", ErrUnjudged)
 	}
+	if !h.cfg.judgingEnabledFor(groupOpenID) {
+		return feature.ModerationVerdict{}, fmt.Errorf("%w: judging is turned off "+
+			"for this group", ErrUnjudged)
+	}
 
 	chain, err := h.cache.Context(ctx, groupOpenID, quotedIndex,
 		h.cfg.ContextBefore, h.cfg.ContextAfter,
@@ -40,19 +44,32 @@ func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID,
 	// The subject is the author of the message that was reported, not whoever is
 	// loudest in the window: the report is about that message, and what follows
 	// follows the message.
-	subject, quotedID := "", ""
+	subject, quotedID, quotedText := "", "", ""
 	judged := make([]string, 0, len(chain))
 	for _, message := range chain {
 		if message.ID != "" {
 			judged = append(judged, message.ID)
 		}
 		if message.Idx == quotedIndex {
-			subject, quotedID = message.User, message.ID
+			subject, quotedID, quotedText = message.User, message.ID, message.Text
 		}
 	}
 	if subject == "" {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: the quoted message is not "+
 			"in the window", ErrUnjudged)
+	}
+
+	// The group's own list of what it accepts is a veto, and it is applied before
+	// the model is asked anything. That is deliberate: a group's official site must
+	// not become an advertisement because a model was having a bad day, or because
+	// somebody wrote a convincing sentence into the same window.
+	if matched, allowed := h.cfg.allowedIn(groupOpenID, quotedText); allowed {
+		return feature.ModerationVerdict{
+			SubjectOpenID:    subject,
+			QuotedMessageID:  quotedID,
+			JudgedMessageIDs: judged,
+			Reason:           "该群合法内容：" + matched,
+		}, nil
 	}
 
 	verdict, err := h.Judge(ctx, chain)
@@ -73,7 +90,7 @@ func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID,
 	}
 
 	report.Label = h.cfg.LabelFor(verdict.Category)
-	seconds, known := h.cfg.MuteFor(verdict.Category)
+	seconds, known := h.cfg.MuteForGroup(groupOpenID, verdict.Category)
 	if !known {
 		// The category came from the configuration's own list, so this cannot
 		// happen in a running bot. Saying so is still better than punishing
