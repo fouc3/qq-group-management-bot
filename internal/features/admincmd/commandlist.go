@@ -86,6 +86,14 @@ func commands(prefix string) []command {
 			adminOnly: true,
 		},
 		{
+			// Any member may report: the people who see an advertisement are not
+			// only the administrators.
+			name: "违规举报",
+			usage: prefix + "违规举报 —— 引用一条消息举报（任何成员可用；也可写作" +
+				prefix + "违规反馈）",
+			desc: "引用消息举报违规",
+		},
+		{
 			name:         "debug",
 			usage:        prefix + "debug 超时测试 [@目标]（需开启调试）",
 			desc:         "调试用",

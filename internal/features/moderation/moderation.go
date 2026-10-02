@@ -246,6 +246,12 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 // Name implements feature.Feature.
 func (h *handler) Name() string { return Name }
 
+// DryRun implements feature.Moderation.
+//
+// On unless it is turned off, and asked for from the outside: what it holds back
+// belongs to whoever acts on a verdict.
+func (h *handler) DryRun() bool { return h.cfg.DryRun == nil || *h.cfg.DryRun }
+
 // Intents implements feature.Feature.
 func (h *handler) Intents() qqbotsdk.Intent {
 	// Everything the bot is allowed to receive, because the cache is only as

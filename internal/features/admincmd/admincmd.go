@@ -201,6 +201,10 @@ type handler struct {
 	// moderation judges reported content, or nil when no such feature is
 	// configured. The command says so rather than pretending to judge.
 	moderation feature.Moderation
+
+	// reports counts how often each member has reported, so that one person
+	// cannot flood the model. Guarded by mu.
+	reports map[string][]time.Time
 }
 
 // Blacklist is the part of the data layer the /黑名单 command uses.
@@ -612,6 +616,8 @@ func (h *handler) run(ctx context.Context, data *qqbotsdk.GroupMessageCreateData
 			return nil
 		}
 		return h.resendVerification(ctx, data, target)
+	case "违规举报", "违规反馈", "report":
+		return h.reportCommand(ctx, data, command)
 	case "黑名单", "blacklist":
 		return h.blacklistCommand(ctx, data, command)
 	case "debug":

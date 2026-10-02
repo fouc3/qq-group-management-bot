@@ -226,6 +226,12 @@ type Moderation interface {
 	// the cache is down, or the model could not be read. None of those is a
 	// violation, and a caller must never treat one as a violation.
 	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex string) (ModerationVerdict, error)
+	// DryRun reports whether judgements are only to be recorded and reported.
+	//
+	// It is asked rather than assumed, and it is asked here rather than inside the
+	// judgement, because the things it holds back -- silencing somebody, taking a
+	// message back -- are the caller's to do and not the judge's.
+	DryRun() bool
 }
 
 // ModerationVerdict is what a judgement came to.
