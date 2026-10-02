@@ -138,7 +138,13 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 			h.deps.Logger.Error("could not silence a reporter whose report found nothing",
 				"group", groupOpenID, "reporter", reporter, "error", err)
 			action = "report_penalty_failed"
-			h.sayInGroup(ctx, groupOpenID, "未发现违规；禁言举报者失败（"+shortReason(err)+"）。")
+			// The judgement's own outcome is stated first and without hedging: nothing
+			// was found is the answer to the report. What could not be done comes after,
+			// with the reason, because a penalty that cannot be carried out is the
+			// platform's rule and not a failure to report.
+			h.sayInGroup(ctx, groupOpenID, fmt.Sprintf(
+				"未发现违规。本应禁言举报者 %d 秒，但未执行：%s。",
+				penalty, shortReason(err)))
 			return
 		}
 		action, muteSeconds = "report_penalty", penalty
@@ -275,10 +281,41 @@ func (h *handler) allowReport(reporter string) bool {
 
 // shortReason is an error message fit to put in a group: the platform's wording
 // is long and often carries an identifier nobody there can use.
+// platformReason turns a platform refusal into something a group can read.
+//
+// The raw error is a request line, an HTTP status, an error code and a trace id:
+// accurate, and useless to the people reading it. What matters is the one fact a
+// member can act on, and the code for it is stable enough to name.
 func shortReason(err error) string {
-	text := strings.TrimSpace(err.Error())
-	if len(text) > 60 {
-		return text[:60] + "…"
+	if err == nil {
+		return ""
 	}
-	return text
+	text := strings.TrimSpace(err.Error())
+
+	// Measured, from a real refusal: the platform will not silence a bot, the group's
+	// owner or an administrator. Saying so matters, because the alternative message
+	// looks like the bot broke rather than like a rule of the platform's.
+	if strings.Contains(text, "40103004") {
+		return "平台不允许禁言群主或管理员"
+	}
+
+	// Otherwise the code and its own wording, with the request line and the trace id
+	// taken off: those belong in the log, not in a group.
+	if index := strings.Index(text, "err_code"); index >= 0 {
+		text = strings.TrimSpace(text[index:])
+	}
+	if index := strings.Index(text, "[trace_id"); index >= 0 {
+		text = strings.TrimSpace(text[:index])
+	}
+	return shortened(text, 80)
+}
+
+// shortened keeps a message readable, counting characters rather than bytes so it
+// cannot cut one in half.
+func shortened(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
 }

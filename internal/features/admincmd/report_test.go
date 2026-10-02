@@ -110,6 +110,38 @@ func TestAnyMemberMayReport(t *testing.T) {
 	}
 }
 
+// TestAPlatformRefusalIsSaidInWords covers what a group is told when the platform
+// refuses.
+//
+// The raw error names a URL, a status, a code and a trace id. A member reading it
+// learns nothing they can act on -- and in the case measured in production, the fact
+// that matters is that the platform will not silence an administrator, which is a rule
+// rather than the bot breaking.
+func TestAPlatformRefusalIsSaidInWords(t *testing.T) {
+	refusal := errors.New("qqbotsdk: POST https://api.bot.qq.com/v2/groups/" +
+		"GROUP-OPENID/restrict_chat_setting: http 400: err_code 40103004: " +
+		"目标成员为机器人/群主/管理员，不允许被禁言 [trace_id=b36250c483b7ab6463a5e4c3d4dee83d]")
+
+	reason := shortReason(refusal)
+	if !strings.Contains(reason, "群主") || !strings.Contains(reason, "管理员") {
+		t.Errorf("reason = %q, want it to name who cannot be silenced", reason)
+	}
+	if strings.Contains(reason, "https://") || strings.Contains(reason, "trace_id") {
+		t.Errorf("reason = %q, want neither the request line nor the trace id", reason)
+	}
+
+	// Anything else keeps the platform's own code and wording, stripped of the parts
+	// that belong in the log.
+	other := shortReason(errors.New("qqbotsdk: POST https://api.bot.qq.com/x: " +
+		"http 400: err_code 306004: 请求参数错误 [trace_id=abc]"))
+	if !strings.Contains(other, "306004") || strings.Contains(other, "https://") {
+		t.Errorf("reason = %q, want the code and its message, without the request", other)
+	}
+	if shortReason(nil) != "" {
+		t.Error("no error is no reason")
+	}
+}
+
 // TestATemporaryQuoteReachesTheJudgement covers the quote whose index the cache can
 // never hold.
 //
