@@ -104,6 +104,17 @@ type Config struct {
 	// DeclineBots declines applicants the platform flags as bots, whatever
 	// Action says, while leaving people to the configured action.
 	DeclineBots bool `yaml:"decline_bots"`
+	// Barred says what an applicant on the blacklist gets: decline or ignore.
+	//
+	// It is a policy rather than a fact, which is why it is not fixed in code:
+	// refusing somebody outright and quietly leaving them for a person are both
+	// defensible, and a group should not have to fork to choose.
+	//
+	// Two boundaries belong with it. A barred applicant is only ever refused or
+	// left alone -- never admitted, so approve is not a value here. And this says
+	// nothing about members who are already in the group: the list decides a join
+	// request, it does not reach back and remove anybody.
+	Barred string `yaml:"barred"`
 	// Groups changes what single groups do, keyed by group openid.
 	//
 	// Only the action is overridable, because that is the decision a group
@@ -127,6 +138,18 @@ func (c *Config) actionFor(groupOpenID string) string {
 		return *override.Action
 	}
 	return c.Action
+}
+
+// barredAction is what an applicant on the blacklist gets.
+//
+// The default is to refuse them: a list that only leaves the decision to a person
+// still lets the request sit there looking like any other, which is not what
+// anybody writes a list for.
+func (c *Config) barredAction() string {
+	if strings.TrimSpace(c.Barred) == "" {
+		return ActionDecline
+	}
+	return c.Barred
 }
 
 // validateGroups checks every group's action at startup, so a typo is found when
@@ -163,6 +186,13 @@ func (c *Config) applyDefaults() error {
 	if c.Action != ActionDecline && strings.TrimSpace(c.RejectReason) != "" {
 		return errors.New("reject_reason only applies to action: decline")
 	}
+	switch c.barredAction() {
+	case ActionDecline, ActionIgnore:
+	default:
+		return fmt.Errorf("barred %q is not %s or %s: an applicant on the list is "+
+			"either refused or left to a person, never admitted",
+			c.Barred, ActionDecline, ActionIgnore)
+	}
 	return c.validateGroups()
 }
 
@@ -176,6 +206,16 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		return nil, err
 	}
 	return &handler{cfg: cfg, deps: deps, blacklist: emptyBlacklist{}}, nil
+}
+
+// SetBlacklist hands over the list the feature checks.
+//
+// The app calls it after the feature is built and before it is registered, so no
+// request can arrive in between. A deployment that never calls it runs on
+// emptyBlacklist and bars nobody, which is the right way round: a list that
+// cannot be reached must refuse no one rather than block everybody.
+func (h *handler) SetBlacklist(blacklist Blacklist) {
+	h.blacklist = blacklist
 }
 
 // handler implements feature.Feature.
@@ -241,10 +281,14 @@ func (h *handler) onJoinRequest(ctx context.Context, event *qqbotsdk.Event) erro
 	action := h.cfg.actionFor(data.GroupOpenID)
 	reason := h.cfg.RejectReason
 	if barred {
-		action = ActionDecline
-		reason = barredReason
-		h.deps.Logger.Warn("refused an applicant who is barred from joining",
-			"group", data.GroupOpenID, "user", data.MemberOpenID)
+		// Refused or left to a person, whichever the group asked for. Never
+		// admitted: being on the list is not the same as being approved.
+		action = h.cfg.barredAction()
+		if action == ActionDecline {
+			reason = barredReason
+		}
+		h.deps.Logger.Warn("an applicant who is barred from joining was answered",
+			"group", data.GroupOpenID, "user", data.MemberOpenID, "outcome", action)
 	}
 	if h.cfg.DeclineBots && data.Bot {
 		action = ActionDecline

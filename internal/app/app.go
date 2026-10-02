@@ -15,6 +15,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -106,6 +107,15 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 		return err
 	}
 	feature.InjectAdminDirectory(features)
+	// The blacklist is handed over here as well, before anything is registered,
+	// so no request can arrive while the feature is still on its empty default.
+	for _, instance := range features {
+		if aware, ok := instance.(interface {
+			SetBlacklist(joinrequest.Blacklist)
+		}); ok {
+			aware.SetBlacklist(barredFromJoining{blacklist: database.Blacklist()})
+		}
+	}
 	for _, instance := range features {
 		if err := instance.Register(ctx); err != nil {
 			closeFeatures(ctx, features, logger)

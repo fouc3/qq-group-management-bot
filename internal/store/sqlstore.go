@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -50,6 +50,36 @@ CREATE TABLE IF NOT EXISTS join_blacklist (
     added_by      TEXT   NOT NULL DEFAULT '',
     expires_at    BIGINT NOT NULL DEFAULT 0
 );
+CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_member ON join_blacklist (member_openid);
+CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_union ON join_blacklist (union_openid);
+`,
+	// 2: the blacklist identities have to be nullable.
+	//
+	// The first layout made them NOT NULL DEFAULT '', which a unique index then
+	// refuses to hold twice: an entry naming only a union openid -- somebody
+	// barred before they ever applied here -- would collide with the next such
+	// entry on the empty string, so only one of them could ever exist.
+	//
+	// NULLIF turns the old empty strings into NULLs on the way across. Rows that
+	// name neither identity are still refused, by the store rather than by the
+	// column, which is where that rule belongs.
+	`
+CREATE TABLE join_blacklist_rebuilt (
+    id            TEXT   PRIMARY KEY,
+    member_openid TEXT,
+    union_openid  TEXT,
+    reason        TEXT   NOT NULL DEFAULT '',
+    added_at      BIGINT NOT NULL,
+    added_by      TEXT   NOT NULL DEFAULT '',
+    expires_at    BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO join_blacklist_rebuilt
+    (id, member_openid, union_openid, reason, added_at, added_by, expires_at)
+SELECT id, NULLIF(member_openid, ''), NULLIF(union_openid, ''), reason, added_at,
+       added_by, expires_at
+FROM join_blacklist;
+DROP TABLE join_blacklist;
+ALTER TABLE join_blacklist_rebuilt RENAME TO join_blacklist;
 CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_member ON join_blacklist (member_openid);
 CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_union ON join_blacklist (union_openid);
 `,
@@ -310,11 +340,25 @@ func (b blacklistStore) Add(ctx context.Context, entry Barred) error {
 			return fmt.Errorf("replacing a blacklist entry: %w", err)
 		}
 	}
+	// NULL rather than an empty string for an identity that was not given: the
+	// unique index has to hold more than one entry that names only the other
+	// identity, and it cannot do that for two empty strings.
+	var member, union any
+	if strings.TrimSpace(entry.MemberOpenID) != "" {
+		member = entry.MemberOpenID
+	}
+	if strings.TrimSpace(entry.UnionOpenID) != "" {
+		union = entry.UnionOpenID
+	}
+	if member == nil && union == nil {
+		return errors.New("store: a blacklist entry needs a member openid or a union openid")
+	}
+
 	if _, err := tx.ExecContext(ctx, b.store.query(`
 INSERT INTO join_blacklist
     (id, member_openid, union_openid, reason, added_at, added_by, expires_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		entry.ID, entry.MemberOpenID, entry.UnionOpenID, entry.Reason,
+		entry.ID, member, union, entry.Reason,
 		entry.AddedAt, entry.AddedBy, entry.ExpiresAt); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("adding a blacklist entry: %w", err)
@@ -327,6 +371,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`),
 
 // Remove implements BlacklistStore.
 func (b blacklistStore) Remove(ctx context.Context, key string) error {
+	if strings.TrimSpace(key) == "" {
+		// An empty key would be a request to delete by an identity nobody has,
+		// and it is refused rather than left to match nothing quietly.
+		return errors.New("store: removing a blacklist entry needs an id or an openid")
+	}
 	if _, err := b.store.db.ExecContext(ctx, b.store.query(`
 DELETE FROM join_blacklist WHERE id = ? OR member_openid = ? OR union_openid = ?`),
 		key, key, key); err != nil {
@@ -353,10 +402,15 @@ LIMIT ?`), limit)
 	var entries []Barred
 	for rows.Next() {
 		var entry Barred
-		if err := rows.Scan(&entry.ID, &entry.MemberOpenID, &entry.UnionOpenID,
-			&entry.Reason, &entry.AddedAt, &entry.AddedBy, &entry.ExpiresAt); err != nil {
+		// Scanned as nullable, because an entry may name only one of the two
+		// identities, and the other is NULL rather than an empty string.
+		var member, union sql.NullString
+		if err := rows.Scan(&entry.ID, &member, &union, &entry.Reason,
+			&entry.AddedAt, &entry.AddedBy, &entry.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("reading a blacklist entry: %w", err)
 		}
+		entry.MemberOpenID = member.String
+		entry.UnionOpenID = union.String
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
