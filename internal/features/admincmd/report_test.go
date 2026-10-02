@@ -108,6 +108,34 @@ func TestAnyMemberMayReport(t *testing.T) {
 	}
 }
 
+// TestAForwardedQuoteIsAnsweredAtOnce covers the quote that can never resolve.
+//
+// A forwarded or merged message carries a temporary index, which never appears in
+// an ordinary message event and so is never in the cache. Waiting for it would
+// leave the reporter standing there for the whole retry budget before saying no; the
+// useful answer names the problem and says what to do instead.
+func TestAForwardedQuoteIsAnsweredAtOnce(t *testing.T) {
+	h := reportHarness(t, &stubJudge{})
+	start := time.Now()
+
+	if err := h.handler.reportCommand(context.Background(),
+		quotedReport("TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4"),
+		parsedCommand{}); err != nil {
+		t.Fatalf("reportCommand: %v", err)
+	}
+
+	reply := h.lastReply()
+	if !strings.Contains(reply, "转发") && !strings.Contains(reply, "合并") {
+		t.Errorf("reply = %q, want it to name what kind of message this is", reply)
+	}
+	if strings.Contains(reply, "送检失败") {
+		t.Errorf("reply = %q, want an explanation rather than a judgement failure", reply)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("the answer took %s: nothing was ever going to arrive", elapsed)
+	}
+}
+
 // waitForReply waits for a reply that mentions something, because the judgement
 // runs on its own goroutine and the test must not race it.
 func waitForReply(t *testing.T, h *harness, contains string) string {

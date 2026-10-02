@@ -45,6 +45,21 @@ func (h *handler) reportCommand(ctx context.Context,
 		return nil
 	}
 
+	// Some quotes cannot be resolved at all, and waiting will not change that.
+	//
+	// A forwarded or merged message is named by a temporary index -- TMP_..., seen
+	// in the wild -- which never appears in an ordinary message event, so the cache
+	// can never hold it. The wait below would only leave the reporter standing there
+	// for twelve seconds before saying no. Saying so at once, with what to do
+	// instead, is the honest answer.
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(quotedIndex)), "TMP_") {
+		h.deps.Logger.Info("a report quoted a message whose index is temporary",
+			"group", data.GroupOpenID, "ref_msg_idx", quotedIndex)
+		h.reply(ctx, data, "这条引用机器人拿不到原始消息（看起来是转发或合并消息），"+
+			"既撤回不了也禁言不了。请直接引用对方发的那条普通消息再举报。")
+		return nil
+	}
+
 	// Written down because the platform's identifiers here are not what they
 	// looked like: a quote names the message it points at, and that name turned out
 	// not to be the one the same message carried when it arrived, so a lookup by it
