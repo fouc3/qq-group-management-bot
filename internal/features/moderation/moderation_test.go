@@ -27,6 +27,49 @@ func timeline(start time.Time, gap time.Duration, count int) []CachedMessage {
 	return ordered
 }
 
+// TestTheWindowIsOnlyTheReportedMember covers the design the window rests on.
+//
+// What goes to the judge is one person's messages and nobody else's. An earlier
+// version sent the whole neighbourhood, which put other members' advertisements in
+// front of the judge where nothing could be done about them -- the recall list is
+// filtered to the reported member -- and put bystanders' words into a judgement
+// that was never about them.
+func TestTheWindowIsOnlyTheReportedMember(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	var ordered []CachedMessage
+	for index := 0; index < 21; index++ {
+		user := "SOMEONE-ELSE"
+		if index%2 == 0 {
+			user = "REPORTED"
+		}
+		ordered = append(ordered, CachedMessage{
+			ID:   fmt.Sprintf("M-%02d", index),
+			Idx:  fmt.Sprintf("IDX-%02d", index),
+			User: user,
+			TS:   start.Add(time.Duration(index) * time.Minute).UnixMilli(),
+		})
+	}
+
+	// The quoted message is index 10, one of the reported member's own.
+	chain := expandChain(ordered, 10, 10, 10, time.Hour)
+	for _, message := range chain {
+		if message.User != "REPORTED" {
+			t.Fatalf("the window includes %s, which %s said: nothing about that "+
+				"can be acted on, so it must not be judged", message.Idx, message.User)
+		}
+	}
+	// Eleven: the reported message and the member's own five either side, with the
+	// ten messages other people sent in between left out entirely.
+	if got := chainIdx(chain); len(got) != 11 {
+		t.Fatalf("the window holds %d messages (%v), want the reported one and the "+
+			"member's own either side", len(got), got)
+	}
+	if chain[0].Idx != "IDX-00" || chain[len(chain)-1].Idx != "IDX-20" {
+		t.Errorf("the window runs %s..%s, want the member's own IDX-00..IDX-20",
+			chain[0].Idx, chain[len(chain)-1].Idx)
+	}
+}
+
 // chainIdx lists what a chain selected, which is what the assertions are about.
 func chainIdx(chain []CachedMessage) []string {
 	indexes := make([]string, 0, len(chain))

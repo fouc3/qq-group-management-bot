@@ -220,9 +220,11 @@ features:
     enabled: false
     dry_run: true
     cache_hours: 6                 # 消息在 Redis 里留多久（也是能回溯的上限）
-    context_before: 10             # 引用消息之前至多取几条
-    context_after: 10              # 之后至多取几条
+    context_before: 10             # 被举报者本人之前的消息，至多取几条
+    context_after: 10              # 之后的，至多取几条
     chain_minutes: 10              # 且链两端间隔不超过这么多分钟
+    # 只送被举报者本人的消息：窗口里不会有别人说的话。别人的广告看到了也动不了
+    # （撤回只允许针对被举报者），而且旁人的话不该进一个与他无关的判定。
     context_scope: group           # group（该群时间线）| sender（只看发送者）
     max_chars: 12000               # 送检正文上限，超出会在提示里标明已截断
 
