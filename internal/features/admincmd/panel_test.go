@@ -75,35 +75,33 @@ func TestThePanelPublishesEveryCommandButDebug(t *testing.T) {
 	}
 }
 
-// TestThePanelKeepsTheMenuOpenToEverybody covers the entry that has to stay
-// visible: hiding the help from ordinary members would leave them with no way to
-// find out what the bot answers.
-func TestThePanelKeepsTheMenuOpenToEverybody(t *testing.T) {
+// TestThePanelRestrictsNobody covers the flag that is deliberately left unset.
+//
+// The platform reads only_admin as its own notion of the role -- the group owner
+// and whoever they appointed -- while this bot obeys the administrator list in
+// the configuration. Marking an entry would hide it from exactly the people the
+// configuration names, whenever one of them holds no platform role, which is how
+// a management command becomes invisible to its own administrator.
+//
+// The bot still refuses an ordinary member when the command arrives.
+func TestThePanelRestrictsNobody(t *testing.T) {
 	h := newHarnessWithRegistering(t, baseSection)
+
 	entries := panelEntries(t, h.publishedPanel())
-
-	if _, ok := entries["/菜单"]; !ok {
-		t.Fatal("the panel does not offer the menu")
+	if len(entries) == 0 {
+		t.Fatal("the panel is empty")
 	}
-	if entries["/菜单"]["only_admin"] == true {
-		t.Error("the menu is restricted to administrators, so an ordinary member " +
-			"has no way to discover the commands")
+	for name, entry := range entries {
+		if entry["only_admin"] == true {
+			t.Errorf("entry %q is restricted to the platform's own administrators, "+
+				"which is not the list this bot obeys", name)
+		}
 	}
-	if entries["/禁言"]["only_admin"] != true {
-		t.Error("the mute command is offered to everybody in the panel")
-	}
-}
-
-// TestThePanelFollowsTheWhoisSetting covers the one entry whose audience is
-// configurable: a panel that hid /whois from the members who are allowed to use
-// it would be advertising the wrong thing.
-func TestThePanelFollowsTheWhoisSetting(t *testing.T) {
-	h := newHarnessWithRegistering(t, baseSection+"\nwhois_admin_only: false\n")
-	entries := panelEntries(t, h.publishedPanel())
-
-	if entries["/whois"]["only_admin"] == true {
-		t.Error("/whois is restricted in the panel while the section says " +
-			"everybody may use it")
+	// The management commands are still offered: refusing them at run time is
+	// what keeps them out of the wrong hands, and a menu nobody can see is a
+	// command nobody knows exists.
+	if _, ok := entries["/黑名单"]; !ok {
+		t.Error("the panel does not offer the blacklist command")
 	}
 }
 

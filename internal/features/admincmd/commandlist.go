@@ -105,23 +105,29 @@ func usage(prefix string) string {
 
 // panelItems renders the table as panel entries.
 //
-// /whois follows its own setting rather than the table, because that setting is
-// what decides whether an ordinary member can use it at all.
+// only_admin is deliberately left unset, even for the commands that really are
+// administrative. The platform reads that flag as "the group or channel
+// administrators", which is its own notion of the role -- the group owner and
+// whoever they appointed. What this bot obeys is the administrator list in the
+// configuration, and the two are different sets.
+//
+// Sending the flag would therefore hide management commands from exactly the
+// people the configuration names, whenever one of them holds no platform role.
+// The bot refuses an ordinary member when the command arrives, which is the
+// check that matters; the panel is a menu, not a lock.
+//
+// adminOnly in the table is kept anyway: it records which commands are
+// administrative, so the next person can see the intent next to the command.
 func (h *handler) panelItems() []qqbotsdk.PanelItem {
 	var items []qqbotsdk.PanelItem
 	for _, entry := range commands(h.cfg.Prefix) {
 		if entry.unregistered {
 			continue
 		}
-		adminOnly := entry.adminOnly
-		if entry.name == "whois" && !h.whoisAdminOnly() {
-			adminOnly = false
-		}
 		items = append(items, qqbotsdk.PanelItem{
-			Name:      h.cfg.Prefix + entry.name,
-			Desc:      entry.desc,
-			Type:      qqbotsdk.PanelItemCommand,
-			OnlyAdmin: adminOnly,
+			Name: h.cfg.Prefix + entry.name,
+			Desc: entry.desc,
+			Type: qqbotsdk.PanelItemCommand,
 		})
 	}
 	return items
@@ -222,6 +228,19 @@ func (h *handler) syncPanelTargets(ctx context.Context, existing *qqbotsdk.Panel
 	detail, err := h.deps.Client.GetPanel(ctx, existing.PanelID)
 	if err != nil {
 		return err
+	}
+
+	// What the platform says it is holding, not what was sent. A panel that
+	// quietly lost an entry looks exactly like one that never had it, and this
+	// is the only place that can tell the difference.
+	if detail.Panel != nil {
+		var held []string
+		for _, item := range detail.Panel.Items {
+			held = append(held, item.Name)
+		}
+		h.deps.Logger.Info("the instruction panel is holding",
+			"panel_id", existing.PanelID, "items", len(held),
+			"names", strings.Join(held, " "))
 	}
 
 	have := make(map[string]bool, len(detail.GroupOpenIDs))
