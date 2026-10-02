@@ -1,0 +1,20 @@
+module github.com/fouc3/qq-group-management-bot
+
+go 1.27.1
+
+require (
+	github.com/fouc3/onebot-ext v0.0.0
+	github.com/fouc3/qq-bot-sdk v0.0.0-00010101000000-000000000000
+	gopkg.in/yaml.v3 v3.0.1
+)
+
+require github.com/gorilla/websocket v1.5.3 // indirect
+
+// 本地开发期指向同级的 SDK 源码，便于同步改动。
+// 若要改用已发布版本：删掉这行，然后
+//   go mod edit -dropreplace=github.com/fouc3/qq-bot-sdk
+//   go get github.com/fouc3/qq-bot-sdk@main
+replace github.com/fouc3/qq-bot-sdk => ../QQ-Bot-CLI/qq-bot-sdk
+
+// OneBot 扩展是仓库内的独立子模块，见 onebot-ext/。
+replace github.com/fouc3/onebot-ext => ./onebot-ext

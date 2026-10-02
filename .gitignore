@@ -1,0 +1,6 @@
+# 含明文凭证，绝不入库。线上配置在 ~/.config/qq-group-management-bot/config.yaml
+config.yaml
+*.local.yaml
+# 本地编译产物
+/bot
+/qq-group-management-bot

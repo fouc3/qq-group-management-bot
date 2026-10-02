@@ -1,0 +1,264 @@
+// Package feature defines what a bot feature is and how one is registered.
+//
+// A feature is one independently switchable behaviour: it owns a section under
+// features: in the configuration file, declares the gateway intents it needs,
+// and registers its own event handlers. Adding a feature means adding a
+// package, one registry line and one configuration section; no core file has
+// to change.
+package feature
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+	"gopkg.in/yaml.v3"
+
+	"github.com/fouc3/onebot-ext/onebot"
+	"github.com/fouc3/qq-group-management-bot/internal/config"
+)
+
+// Deps is what a feature is handed to do its work.
+type Deps struct {
+	// Client is the configured SDK client.
+	Client *qqbotsdk.Client
+	// OneBot is the fallback for what the official bot is not allowed to do,
+	// or nil when no fallback is configured.
+	OneBot *onebot.Client
+	// Logger already carries the feature name, so a feature logs without
+	// repeating itself.
+	Logger *slog.Logger
+	// Groups is the managed group list from bot.groups. An empty list allows
+	// every group.
+	Groups config.Groups
+	// BotQQ is the bot's own QQ number, which the OneBot fallback uses to
+	// accept a message as the bot's own rather than a forged copy.
+	BotQQ int64
+	// JoinTolerance is how many seconds a join match may differ between the
+	// official event timestamp and OneBot's recorded join time.
+	JoinTolerance int64
+}
+
+// InGroup reports whether the feature should act on a group.
+//
+// Without a configured list every group is allowed, which is what the file asks
+// for when it leaves bot.groups out.
+func (d Deps) InGroup(groupOpenID string) bool {
+	return d.Groups.Allowed(groupOpenID)
+}
+
+// GroupQQID returns the QQ group number that belongs to an openid.
+//
+// Only the OneBot fallback needs it, because OneBot acts on QQ group numbers
+// while everything on the official side speaks of openids.
+func (d Deps) GroupQQID(groupOpenID string) (int64, bool) {
+	return d.Groups.QQGroupID(groupOpenID)
+}
+
+// Feature is one independently switchable behaviour.
+type Feature interface {
+	// Name is the feature's name: its key under features: in the file, and
+	// the value of the feature log field.
+	Name() string
+	// Intents reports what the feature needs to receive. The app unions the
+	// answers, so a feature never lists intents that belong to another one.
+	Intents() qqbotsdk.Intent
+	// Register declares the feature's event handlers.
+	Register(ctx context.Context) error
+	// Close releases what the feature holds. It may run after a failed or
+	// skipped Register, so it must tolerate having nothing to release.
+	Close(ctx context.Context) error
+}
+
+// Factory builds one feature from its own configuration section.
+type Factory func(section yaml.Node, deps Deps) (Feature, error)
+
+// enabledKey is the switch any feature section may carry.
+const enabledKey = "enabled"
+
+// Registry maps feature names to the factories that build them.
+type Registry struct {
+	factories map[string]Factory
+	order     []string
+}
+
+// NewRegistry returns an empty registry.
+func NewRegistry() *Registry {
+	return &Registry{factories: map[string]Factory{}}
+}
+
+// Add registers a factory under name. Registering the same name twice is a
+// programming mistake, so it panics at startup rather than picking one.
+func (r *Registry) Add(name string, factory Factory) {
+	if _, exists := r.factories[name]; exists {
+		panic("feature: " + name + " is registered twice")
+	}
+	r.factories[name] = factory
+	r.order = append(r.order, name)
+}
+
+// Names lists the registered features in registration order.
+func (r *Registry) Names() []string {
+	return append([]string(nil), r.order...)
+}
+
+// Build turns the configured sections into features.
+//
+// A section that is absent, or present with enabled: false, is skipped. A
+// section whose name was never registered is an error: it is nearly always a
+// typo, and ignoring it would leave the operator believing a feature runs while
+// it does not.
+func (r *Registry) Build(cfg *config.Config, deps Deps) ([]Feature, error) {
+	for _, name := range cfg.FeatureNames() {
+		if _, known := r.factories[name]; !known {
+			return nil, fmt.Errorf("unknown feature %q; registered features are: %s",
+				name, strings.Join(r.Names(), ", "))
+		}
+	}
+
+	built := make([]Feature, 0, len(r.order))
+	for _, name := range r.order {
+		section, configured := cfg.Feature(name)
+		if !configured {
+			continue
+		}
+		on, err := sectionEnabled(name, section)
+		if err != nil {
+			return nil, err
+		}
+		if !on {
+			continue
+		}
+
+		featureDeps := deps
+		featureDeps.Logger = deps.Logger.With("feature", name)
+		instance, err := r.factories[name](section, featureDeps)
+		if err != nil {
+			return nil, fmt.Errorf("feature %s: %w", name, err)
+		}
+		if instance.Name() != name {
+			return nil, fmt.Errorf("feature registered as %q calls itself %q",
+				name, instance.Name())
+		}
+		built = append(built, instance)
+	}
+	return built, nil
+}
+
+// sectionEnabled reads the enabled switch.
+//
+// A section that is written out without the switch is on: writing it is already
+// a statement of intent. Only an explicit enabled: false turns it off.
+func sectionEnabled(name string, section yaml.Node) (bool, error) {
+	var probe struct {
+		Enabled *bool `yaml:"enabled"`
+	}
+	if err := section.Decode(&probe); err != nil {
+		return false, fmt.Errorf("feature %s: %w", name, err)
+	}
+	if probe.Enabled == nil {
+		return true, nil
+	}
+	return *probe.Enabled, nil
+}
+
+// AdminDirectory reports who may administer a group.
+//
+// The administrator list is written in the command feature's configuration,
+// but more than one feature has to know it, so the app shares it here rather
+// than letting the features import each other.
+type AdminDirectory interface {
+	// IsAdmin reports whether a member administers a group.
+	IsAdmin(groupOpenID, memberOpenID string) bool
+}
+
+// AdminAware is implemented by a feature that needs the administrator list.
+type AdminAware interface {
+	SetAdminDirectory(AdminDirectory)
+}
+
+// InjectAdminDirectory hands the administrator list to every feature that
+// wants it.
+func InjectAdminDirectory(features []Feature) {
+	var directory AdminDirectory
+	for _, instance := range features {
+		if candidate, ok := instance.(AdminDirectory); ok {
+			directory = candidate
+			break
+		}
+	}
+	for _, instance := range features {
+		if aware, ok := instance.(AdminAware); ok {
+			aware.SetAdminDirectory(directory)
+		}
+	}
+}
+
+// Verifier is what the administrator commands need from the join verification
+// feature.
+//
+// It keeps the two independent: neither package imports the other, and the app
+// hands one to the other once both are built.
+type Verifier interface {
+	// Reverify holds a member again and sends a fresh prompt.
+	Reverify(ctx context.Context, groupOpenID, memberOpenID string) error
+	// SimulateDeadline runs the missed-deadline path for a member now, without
+	// waiting for the deadline.
+	SimulateDeadline(ctx context.Context, groupOpenID, memberOpenID string) error
+	// IsPending reports whether a member is waiting to verify.
+	//
+	// A command asks before lifting a mute: a member who is being held has to
+	// verify, and releasing them by hand would defeat the check. The command
+	// gives way to the verification, not the other way round.
+	IsPending(groupOpenID, memberOpenID string) bool
+	// Resend sends the verification prompt again for a member who is already
+	// waiting, using the button they already have.
+	//
+	// It is for the ordinary case of nobody noticing the first prompt: the
+	// member is not held again and no fresh prompt replaces the old one, so the
+	// button already in the group keeps working.
+	Resend(ctx context.Context, groupOpenID, memberOpenID string) error
+}
+
+// VerifierAware is implemented by a feature that drives the join verification.
+type VerifierAware interface {
+	SetVerifier(Verifier)
+}
+
+// InjectVerifier hands the verification feature to every feature that wants it.
+//
+// It is the only place that knows both sides, which is what keeps the features
+// from depending on each other. A nil verifier is handed over when no feature
+// provides verification, so the receiver can say so instead of failing later.
+func InjectVerifier(features []Feature) error {
+	var verifier Verifier
+	var providers []string
+	for _, instance := range features {
+		if candidate, ok := instance.(Verifier); ok {
+			verifier = candidate
+			providers = append(providers, instance.Name())
+		}
+	}
+	if len(providers) > 1 {
+		return fmt.Errorf("feature: %s both provide verification",
+			strings.Join(providers, " and "))
+	}
+	for _, instance := range features {
+		if aware, ok := instance.(VerifierAware); ok {
+			aware.SetVerifier(verifier)
+		}
+	}
+	return nil
+}
+
+// Intents unions what every feature asked for, which is what the websocket
+// connection subscribes to.
+func Intents(features []Feature) qqbotsdk.Intent {
+	var all qqbotsdk.Intent
+	for _, instance := range features {
+		all |= instance.Intents()
+	}
+	return all
+}
