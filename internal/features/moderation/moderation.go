@@ -8,6 +8,7 @@ import (
 	"time"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+	openai "github.com/sashabaranov/go-openai"
 	"gopkg.in/yaml.v3"
 
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
@@ -49,6 +50,54 @@ type Config struct {
 	ChainMinutes int `yaml:"chain_minutes"`
 	// ContextScope is ScopeGroup or ScopeSender.
 	ContextScope string `yaml:"context_scope"`
+
+	// Model is how the judge is reached. It is deliberately optional: a
+	// deployment that only fills the cache is a legitimate stage to run in, and
+	// a judgement with no model configured is a failure rather than a guess.
+	Model Model `yaml:"model"`
+	// Categories are the kinds of violation the bot may punish, by name. The
+	// model may only choose among these; anything else is not acted on.
+	Categories map[string]Category `yaml:"categories"`
+	// MinConfidence is how sure the model has to be before anything happens.
+	// A violation below it is treated as no judgement at all.
+	MinConfidence float64 `yaml:"min_confidence"`
+	// MaxChars bounds what is sent for judgement. A longer window is truncated,
+	// with the truncation said out loud in the prompt.
+	MaxChars int `yaml:"max_chars"`
+	// DryRun judges and reports without muting or recalling anything.
+	//
+	// On unless it is turned off: the first days of a moderation prompt are for
+	// reading, not for silencing people.
+	DryRun *bool `yaml:"dry_run"`
+}
+
+// Model is the OpenAI-compatible endpoint the judge asks.
+type Model struct {
+	BaseURL        string  `yaml:"base_url"`
+	APIKey         string  `yaml:"api_key"`
+	Name           string  `yaml:"name"`
+	TimeoutSeconds int     `yaml:"timeout_seconds"`
+	Stream         bool    `yaml:"stream"`
+	Temperature    float32 `yaml:"temperature"`
+}
+
+// Category is one kind of violation.
+type Category struct {
+	// Label is what the group is told when this category is found. It comes from
+	// the configuration and never from the model, so the public reply cannot
+	// carry text a member talked the model into writing.
+	Label string `yaml:"label"`
+	// Mute is how long the member is silenced for it.
+	Mute string `yaml:"mute"`
+}
+
+// modelClient builds the client the judge uses.
+func (h *handler) modelClient() *openai.Client {
+	config := openai.DefaultConfig(h.cfg.Model.APIKey)
+	if strings.TrimSpace(h.cfg.Model.BaseURL) != "" {
+		config.BaseURL = h.cfg.Model.BaseURL
+	}
+	return openai.NewClientWithConfig(config)
 }
 
 func (c *Config) applyDefaults() error {
@@ -72,6 +121,21 @@ func (c *Config) applyDefaults() error {
 	default:
 		return fmt.Errorf("context_scope %q is not %s or %s",
 			c.ContextScope, ScopeGroup, ScopeSender)
+	}
+	if c.Model.TimeoutSeconds <= 0 {
+		c.Model.TimeoutSeconds = 30
+	}
+	if c.MinConfidence <= 0 {
+		// A threshold rather than a share of the decision: it decides whether an
+		// answer is acted on at all, so a model that is unsure changes nothing.
+		c.MinConfidence = 0.6
+	}
+	if c.MaxChars <= 0 {
+		c.MaxChars = 12000
+	}
+	if c.DryRun == nil {
+		dryRun := true
+		c.DryRun = &dryRun
 	}
 	return nil
 }
