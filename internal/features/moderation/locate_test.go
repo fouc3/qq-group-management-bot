@@ -86,3 +86,40 @@ func TestAQuoteIsLocatedByItsText(t *testing.T) {
 		t.Errorf("err = %v, want ErrNotCached", err)
 	}
 }
+
+// TestATemporaryQuoteIsResolvedEndToEnd covers the join between locating a message
+// and naming it.
+//
+// The bug it exists for: the window was found by the text, and then the anchor was
+// still looked for by the temporary index the quote carried -- which is not in the
+// window and never could be. So locating succeeded, and the whole report still came
+// back as "the quoted message is not in the window", which is what a real member hit.
+func TestATemporaryQuoteIsResolvedEndToEnd(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+		`"confidence":0.9,"recall":[1]}`}
+	h, group := reportHarness(t, stub, "")
+	// Two messages, and the quote's text names the second one.
+	cacheChain(t, h, group, "今天天气不错", "加群送皮肤 私聊我")
+
+	// What the platform gives for a quote of a message that is itself a quote: a
+	// temporary index, and the text the quote showed.
+	report, err := h.JudgeQuoted(context.Background(), group,
+		"TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4",
+		"=== 消息 1 ===\n[消息内容]   加群送皮肤 私聊我\n[消息类型] 引用消息\n",
+		"REPORTER-1")
+	if err != nil {
+		t.Fatalf("a quote that can be located must be judged, not refused: %v", err)
+	}
+	if report.SubjectOpenID == "" {
+		t.Error("nobody was identified as the one being judged")
+	}
+	if report.Category == "" {
+		t.Errorf("report = %+v, want the verdict the model gave", report)
+	}
+	// The recall list is the located message, by its own id -- the message the
+	// judgement actually saw, not the temporary name the quote carried.
+	if len(report.RecallMessageIDs) != 1 || report.RecallMessageIDs[0] ==
+		"TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4" {
+		t.Errorf("recall = %v, want the located message", report.RecallMessageIDs)
+	}
+}

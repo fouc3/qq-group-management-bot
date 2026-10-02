@@ -37,12 +37,14 @@ const (
 // The text is a locator and never evidence: it chooses which cached message is meant,
 // and that message is then judged as its author's own words.
 func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
-	quotedText string) ([]CachedMessage, error) {
+	quotedText string) ([]CachedMessage, string, error) {
 	span := time.Duration(h.cfg.ChainMinutes) * time.Minute
 
 	if temporaryIndex(quotedIndex) {
-		if window, err := h.locateWindow(ctx, groupOpenID, quotedText, span); err == nil {
-			return window, nil
+		if window, anchor, err := h.locateWindow(ctx, groupOpenID, quotedText, span); err == nil {
+			h.deps.Logger.Info("the quoted message was found by its text",
+				"group", groupOpenID, "anchor", anchor)
+			return window, anchor, nil
 		}
 	}
 
@@ -56,43 +58,51 @@ func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
 				h.deps.Logger.Info("the quoted message arrived while waiting for it",
 					"attempt", attempt)
 			}
-			return chain, nil
+			return chain, quotedIndex, nil
 		}
 		if !errors.Is(err, ErrNotCached) {
-			return nil, err
+			return nil, "", err
 		}
-		if window, locateErr := h.locateWindow(ctx, groupOpenID, quotedText, span); locateErr == nil {
+		if window, anchor, locateErr := h.locateWindow(ctx, groupOpenID, quotedText, span); locateErr == nil {
 			h.deps.Logger.Info("the quoted message was found by its text",
-				"attempt", attempt)
-			return window, nil
+				"group", groupOpenID, "anchor", anchor, "attempt", attempt)
+			return window, anchor, nil
 		}
 		if attempt == cacheRetryAttempts {
-			return nil, err
+			return nil, "", err
 		}
 		// Waited out rather than asked again immediately, and abandoned the moment
 		// the caller's context ends: a shutdown should not be held up by this.
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-time.After(cacheRetryDelay):
 		}
 	}
-	return nil, err
+	return nil, "", err
 }
 
 // locateWindow finds a quoted message by what the quote showed of it, then reads the
 // window around it by the index that message really has.
+//
+// The index it returns is the point of the second return value: a message found this
+// way is named in the window by its own index, not by the temporary one the quote
+// carried, and anything that goes looking for the anchor has to be told which.
 func (h *handler) locateWindow(ctx context.Context, groupOpenID, quotedText string,
-	span time.Duration) ([]CachedMessage, error) {
+	span time.Duration) ([]CachedMessage, string, error) {
 	if strings.TrimSpace(quotedText) == "" {
-		return nil, ErrNotCached
+		return nil, "", ErrNotCached
 	}
 	located, err := h.cache.Locate(ctx, groupOpenID, quotedText, locateWithin)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return h.cache.Context(ctx, groupOpenID, located.Idx,
+	chain, err := h.cache.Context(ctx, groupOpenID, located.Idx,
 		h.cfg.ContextBefore, h.cfg.ContextAfter, span)
+	if err != nil {
+		return nil, "", err
+	}
+	return chain, located.Idx, nil
 }
 
 // temporaryIndex reports whether an index is one the cache can never hold.
@@ -139,7 +149,12 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	// that came just before it, which was measured the hard way: the same report
 	// failed when it followed the message by four seconds and worked when it
 	// followed it by ten. A miss is therefore waited on rather than believed.
-	chain, err := h.resolveWindow(ctx, groupOpenID, quotedIndex, quotedText)
+	// anchor is the index the quoted message is known by *inside this window*. It is
+	// the one the quote carried when that could be resolved, and the one the located
+	// message really has when the quote only came with its text -- looking for the
+	// temporary index here would never find anything, which is exactly the bug this
+	// return value exists to prevent.
+	chain, anchor, err := h.resolveWindow(ctx, groupOpenID, quotedIndex, quotedText)
 	if err != nil {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 	}
@@ -153,7 +168,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 		if message.ID != "" {
 			judged = append(judged, message.ID)
 		}
-		if message.Idx == quotedIndex {
+		if message.Idx == anchor {
 			subject, quotedID = message.User, message.ID
 		}
 	}
@@ -192,7 +207,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	report.Reason = verdict.Reason
 	report.Model = verdict.Model
 	report.RecallMessageIDs, report.RecallNumbers =
-		resolveRecall(chain, subject, verdict.Recall, quotedID, quotedIndex)
+		resolveRecall(chain, subject, verdict.Recall, quotedID, anchor)
 	if !verdict.Violation() {
 		return report, nil
 	}
