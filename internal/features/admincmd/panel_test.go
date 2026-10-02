@@ -114,3 +114,32 @@ func TestThePanelIsNotPublishedWhenTheSectionSaysSo(t *testing.T) {
 		t.Error("a panel was published even though register_commands is off")
 	}
 }
+
+// TestTheReportCommandIsOnlyOfferedWhenItWorks covers the entry that depends on
+// another feature.
+//
+// The panel is built during registration, before the app hands the judge over, so
+// the harness cannot inject one in time: the entry is asked for directly instead,
+// with and without a judge behind it.
+func TestTheReportCommandIsOnlyOfferedWhenItWorks(t *testing.T) {
+	offered := func(h *handler) bool {
+		for _, item := range h.panelItems() {
+			if item.Name == "/违规举报" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// A cache with no judge: the command exists and would answer "not configured",
+	// which is exactly what the menu should not advertise.
+	without := &handler{cfg: Config{Prefix: "/"}}
+	if offered(without) {
+		t.Error("the menu offers the report command with no judge behind it")
+	}
+
+	with := &handler{cfg: Config{Prefix: "/"}, moderation: &stubJudge{}}
+	if !offered(with) {
+		t.Error("the menu does not offer the report command although a judge is present")
+	}
+}
