@@ -225,7 +225,8 @@ type Moderation interface {
 	// An error means no judgement was reached: the message is not in the cache,
 	// the cache is down, or the model could not be read. None of those is a
 	// violation, and a caller must never treat one as a violation.
-	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex string) (ModerationVerdict, error)
+	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
+		reporterOpenID string) (ModerationVerdict, error)
 	// DryRun reports whether judgements are only to be recorded and reported.
 	//
 	// It is asked rather than assumed, and it is asked here rather than inside the
@@ -239,10 +240,24 @@ type Moderation interface {
 	// the verdict says what was found, this says what the group's rules make of a
 	// report that found nothing.
 	ReportPenaltySeconds() int64
+	// JudgingEnabled reports whether a model is configured to judge with at all.
+	//
+	// It is what decides whether the report command is worth offering: a command
+	// whose only answer is that nothing is configured should not be in the menu.
+	JudgingEnabled() bool
+	// RecordOutcome says what was done about a judgement that was reached.
+	//
+	// The decision and the act happen in different places, so the record of the
+	// first is closed by whoever did the second. An empty action is a fact too:
+	// it means nothing was done.
+	RecordOutcome(ctx context.Context, judgementID, action string, muteSeconds int64) error
 }
 
 // ModerationVerdict is what a judgement came to.
 type ModerationVerdict struct {
+	// JudgementID identifies the record written when the judgement was reached,
+	// which the caller closes with RecordOutcome once it has acted.
+	JudgementID string
 	// Category is the configured name of what was found. Empty means nothing was
 	// found, which is the only sense in which a verdict is "clean".
 	Category string

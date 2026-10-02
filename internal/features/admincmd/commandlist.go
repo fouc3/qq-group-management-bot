@@ -136,7 +136,7 @@ func (h *handler) panelItems() []qqbotsdk.PanelItem {
 		// behind it: a command whose only answer is that it is not configured is
 		// worse than no command at all. The help still lists it, because there it
 		// can say why.
-		if entry.name == "违规举报" && h.moderation == nil {
+		if entry.name == "违规举报" && (h.moderation == nil || !h.moderation.JudgingEnabled()) {
 			continue
 		}
 		items = append(items, qqbotsdk.PanelItem{

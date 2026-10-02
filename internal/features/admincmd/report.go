@@ -60,7 +60,7 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
-	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quotedIndex)
+	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quotedIndex, reporter)
 	if err != nil {
 		// No judgement is not a clean verdict: nobody is touched, and the group is
 		// told why rather than left wondering.
@@ -69,6 +69,12 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		h.sayInGroup(ctx, groupOpenID, "送检失败，未采取任何处理。")
 		return
 	}
+
+	// What was done is recorded separately from what was decided, and it is
+	// recorded however this function leaves. An outcome that never got written is
+	// the one thing that would leave a punishment unauditable afterwards.
+	action, muteSeconds := "none", int64(0)
+	defer func() { h.recordOutcome(ctx, verdict.JudgementID, action, muteSeconds) }()
 
 	// The reason is the model's own words, so it goes to the log and nowhere else:
 	// the group is told the configured label and nothing more.
@@ -98,9 +104,11 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		if err := h.muteMember(ctx, groupOpenID, reporter, duration); err != nil {
 			h.deps.Logger.Error("could not silence a reporter whose report found nothing",
 				"group", groupOpenID, "reporter", reporter, "error", err)
+			action = "report_penalty_failed"
 			h.sayInGroup(ctx, groupOpenID, "未发现违规；禁言举报者失败（"+shortReason(err)+"）。")
 			return
 		}
+		action, muteSeconds = "report_penalty", penalty
 		h.deps.Logger.Info("a report found nothing, so the reporter was silenced",
 			"group", groupOpenID, "reporter", reporter, "seconds", penalty)
 		h.sayInGroup(ctx, groupOpenID, "未发现违规。举报前请自行确认，已禁言举报者 "+
@@ -108,6 +116,7 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		return
 	}
 	if h.moderation.DryRun() {
+		action = "dry_run"
 		h.sayInGroup(ctx, groupOpenID, fmt.Sprintf(
 			"【试运行】判定为【%s】。试运行期间不禁言、不撤回。", verdict.Label))
 		return
@@ -142,7 +151,23 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	if len(notes) > 0 {
 		answer += "，" + strings.Join(notes, "，")
 	}
+	action, muteSeconds = strings.Join(notes, " "), verdict.MuteSeconds
 	h.sayInGroup(ctx, groupOpenID, answer+"。")
+}
+
+// recordOutcome closes a judgement with what was actually done about it.
+//
+// A failure is reported and swallowed: the group has already been answered, and
+// the record is for reviewing afterwards rather than for deciding now.
+func (h *handler) recordOutcome(ctx context.Context, judgementID, action string,
+	muteSeconds int64) {
+	if judgementID == "" || h.moderation == nil {
+		return
+	}
+	if err := h.moderation.RecordOutcome(ctx, judgementID, action, muteSeconds); err != nil {
+		h.deps.Logger.Warn("could not record what followed a judgement",
+			"judgement", judgementID, "action", action, "error", err)
+	}
 }
 
 // muteMember silences one member, which is the call the /禁言 command makes too.

@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -83,6 +83,30 @@ ALTER TABLE join_blacklist_rebuilt RENAME TO join_blacklist;
 CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_member ON join_blacklist (member_openid);
 CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_union ON join_blacklist (union_openid);
 `,
+	// 3: the record of what was judged.
+	//
+	// A punishment has to be reviewable afterwards, and the log is not a record:
+	// it says what happened next to everything else that happened, and it is
+	// rotated away. This says what was decided about one message, by which model,
+	// looking at which messages, and what was done about it.
+	`
+CREATE TABLE IF NOT EXISTS moderation_judgements (
+    id              TEXT   PRIMARY KEY,
+    group_openid    TEXT   NOT NULL,
+    subject_openid  TEXT   NOT NULL DEFAULT '',
+    reporter_openid TEXT   NOT NULL DEFAULT '',
+    category        TEXT   NOT NULL DEFAULT '',
+    verdict         TEXT   NOT NULL DEFAULT '',
+    model           TEXT   NOT NULL DEFAULT '',
+    message_ids     TEXT   NOT NULL DEFAULT '[]',
+    reason          TEXT   NOT NULL DEFAULT '',
+    action          TEXT   NOT NULL DEFAULT '',
+    mute_seconds    BIGINT NOT NULL DEFAULT 0,
+    created_at      BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS judgements_by_subject ON moderation_judgements (group_openid, subject_openid, created_at);
+CREATE INDEX IF NOT EXISTS judgements_by_age ON moderation_judgements (created_at);
+`,
 }
 
 // sqlStore is the database/sql implementation, shared by both dialects.
@@ -95,10 +119,11 @@ type sqlStore struct {
 // package goes through it, so the ?/$1 difference lives in exactly one place.
 func (s *sqlStore) query(statement string) string { return s.dialect.rewrite(statement) }
 
-func (s *sqlStore) Pending() PendingStore     { return pendingStore{s} }
-func (s *sqlStore) Blacklist() BlacklistStore { return blacklistStore{s} }
-func (s *sqlStore) Meta() MetaStore           { return metaStore{s} }
-func (s *sqlStore) Close() error              { return s.db.Close() }
+func (s *sqlStore) Pending() PendingStore      { return pendingStore{s} }
+func (s *sqlStore) Blacklist() BlacklistStore  { return blacklistStore{s} }
+func (s *sqlStore) Judgements() JudgementStore { return judgementStore{s} }
+func (s *sqlStore) Meta() MetaStore            { return metaStore{s} }
+func (s *sqlStore) Close() error               { return s.db.Close() }
 
 // metaStore implements MetaStore.
 type metaStore struct{ store *sqlStore }

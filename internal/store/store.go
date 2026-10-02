@@ -65,6 +65,8 @@ type Store interface {
 	Pending() PendingStore
 	// Blacklist holds the applicants barred from joining.
 	Blacklist() BlacklistStore
+	// Judgements holds the record of what was judged and what followed.
+	Judgements() JudgementStore
 	// Meta holds small bookkeeping values that have to survive a restart, such
 	// as whether a one-off import has already run.
 	//

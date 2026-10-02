@@ -118,13 +118,21 @@ type GroupOverride struct {
 	// Enabled turns judging off for one group while it stays on elsewhere. Nil
 	// follows the feature.
 	Enabled *bool `yaml:"enabled"`
-	// Allow is what this group accepts as legitimate: a domain, or a phrase.
+	// Allow is what this group calls its own: its site, its announcement page.
 	//
-	// It is a veto and not a hint. A message it matches is never acted on, whatever
-	// the model makes of it -- which is the point: the group's own site must not
-	// become an advertisement because a model was having a bad day, or because
-	// somebody talked it into one.
+	// It is not a veto, and it cannot be one. A rule about text is satisfied by
+	// the text, so an exemption keyed on it is handed to whoever writes the
+	// message: both attempts at one were defeated by the obvious trick, and both
+	// are written down in allowedIn. What the list can do is tell the judge what
+	// this group considers its own, so that the judge can weigh a message which
+	// names it next to something else -- which is a judgement, and belongs there.
 	Allow []string `yaml:"allow"`
+	// AllowSenders are the openids whose messages are never judged at all.
+	//
+	// This is the one exemption the code makes, because it is about identity
+	// rather than content: an announcement from the group's own account cannot be
+	// imitated by writing something convincing.
+	AllowSenders []string `yaml:"allow_senders"`
 	// Categories overrides durations for this group. A category named here takes
 	// this duration; every other category is unchanged.
 	Categories map[string]string `yaml:"categories"`
@@ -166,11 +174,41 @@ func (c *Config) judgingEnabledFor(groupOpenID string) bool {
 // The lesson is not that the matching needed to be better. It is that an
 // exemption keyed on what a message says can always be satisfied by what the
 // message says. What a group means by "legitimate" is a judgement, and judgements
-// belong to the judge: the group's list is handed to the model as trusted context
-// instead. Where the code must decide, it decides on identity -- who sent it --
-// and never on content.
+// belong to the judge: the group's list now goes into the prompt as context, and
+// the only exemption left in code is about who sent the message.
 func (c *Config) allowedIn(groupOpenID, text string) (string, bool) {
 	return "", false
+}
+
+// senderExempt reports whether a group has put one sender beyond judging.
+//
+// Identity, not content, which is what makes it the one exemption worth having:
+// there is no sentence somebody can write to become the group's own account.
+func (c *Config) senderExempt(groupOpenID, memberOpenID string) bool {
+	if strings.TrimSpace(memberOpenID) == "" {
+		return false
+	}
+	for _, entry := range c.groupFor(groupOpenID).AllowSenders {
+		if strings.TrimSpace(entry) == memberOpenID {
+			return true
+		}
+	}
+	return false
+}
+
+// allowText is the group's own list as a sentence for the prompt.
+func (c *Config) allowText(groupOpenID string) string {
+	entries := c.groupFor(groupOpenID).Allow
+	var kept []string
+	for _, entry := range entries {
+		if strings.TrimSpace(entry) != "" {
+			kept = append(kept, strings.TrimSpace(entry))
+		}
+	}
+	if len(kept) == 0 {
+		return "（该群没有声明任何属于它自己的内容）"
+	}
+	return strings.Join(kept, "、")
 }
 
 // MuteForGroup is how long a member is silenced for one category in one group,
@@ -289,6 +327,12 @@ func (c *Config) applyDefaults() error {
 			if strings.TrimSpace(entry) == "" {
 				return fmt.Errorf("group %s has an empty allow entry, which would "+
 					"match every message", openID)
+			}
+		}
+		for _, entry := range group.AllowSenders {
+			if strings.TrimSpace(entry) == "" {
+				return fmt.Errorf("group %s has an empty allow_senders entry, which "+
+					"is an openid that belongs to nobody", openID)
 			}
 		}
 	}

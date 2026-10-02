@@ -93,7 +93,7 @@ func TestAReportBecomesAVerdict(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我", "谁在发广告")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestACategoryWithoutItsOwnDurationFallsBack(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "先交押金")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestACleanVerdictHasNoPunishment(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "这条没问题")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestNoJudgementIsAnError(t *testing.T) {
 			if testCase.noModel {
 				h.cfg.Model.Name = ""
 			}
-			_, err := h.JudgeQuoted(context.Background(), group, quoted)
+			_, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
 			if !errors.Is(err, ErrUnjudged) {
 				t.Fatalf("err = %v, want ErrUnjudged", err)
 			}
@@ -259,7 +259,7 @@ func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
 	h, group := reportHarness(t, stub, groupSection(t, "    enabled: false\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")
 
-	if _, err := h.JudgeQuoted(context.Background(), group, quoted); !errors.Is(err, ErrUnjudged) {
+	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1"); !errors.Is(err, ErrUnjudged) {
 		t.Fatalf("err = %v, want ErrUnjudged", err)
 	}
 	if len(stub.requests) != 0 {
@@ -276,7 +276,7 @@ func TestAGroupCanHaveItsOwnDurations(t *testing.T) {
 		groupSection(t, "    categories:\n      ad: \"30m\"\n"))
 	quoted := cacheChain(t, h, group, "加群送皮肤 私聊我")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted)
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -297,5 +297,63 @@ func TestAnEmptyAllowEntryIsRefusedAtStartup(t *testing.T) {
 	}
 	if err := cfg.applyDefaults(); err == nil {
 		t.Error("an empty allow entry must be refused: it would match every message")
+	}
+}
+
+// TestASenderTheGroupTrustsIsNotJudged covers the one exemption the code makes.
+//
+// It is about identity, and that is the whole reason it is sound: there is no
+// sentence somebody can write to become the group's own account, which is exactly
+// what could not be said of the content versions.
+func TestASenderTheGroupTrustsIsNotJudged(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+		`"confidence":0.99}`}
+	h, group := reportHarness(t, stub,
+		groupSection(t, "    allow_senders: [\"MEMBER-1\"]\n"))
+	// Every message in the window carries the same sender, which is the one the
+	// group declared.
+	quoted := cacheChain(t, h, group, "本群公告", "官方说明")
+
+	report, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1")
+	if err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	if report.Category != "" {
+		t.Errorf("report = %+v, want nothing to act on", report)
+	}
+	if len(stub.requests) != 0 {
+		t.Error("the model was asked about a sender the group had put beyond judging")
+	}
+}
+
+// TestTheGroupsOwnListGoesIntoTheInstructions covers where the list belongs.
+//
+// The instructions are the part of the prompt a member cannot write into, which
+// is what makes them the right home for something a message must not be able to
+// satisfy. The data block is where a member's text goes, and the list must not be
+// there.
+func TestTheGroupsOwnListGoesIntoTheInstructions(t *testing.T) {
+	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	h, group := reportHarness(t, stub,
+		groupSection(t, "    allow: [\"api.mcapple.top\"]\n"))
+	quoted := cacheChain(t, h, group, "正常聊天")
+
+	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "REPORTER-1"); err != nil {
+		t.Fatalf("JudgeQuoted: %v", err)
+	}
+	request := stub.lastRequest(t)
+
+	system := systemContent(t, request)
+	if !strings.Contains(system, "api.mcapple.top") {
+		t.Errorf("the group's own list is not in the instructions:\n%s", system)
+	}
+	// The instructions also say what the list is worth, because the trick is to
+	// wear it: the point is not to protect the listed content but to stop it being
+	// used as a shield.
+	if !strings.Contains(system, "免罪牌") {
+		t.Error("the instructions do not warn that the list can be worn as a disguise")
+	}
+	if strings.Contains(userContent(t, request), "api.mcapple.top") {
+		t.Error("the group's list reached the part of the prompt a member writes")
 	}
 }

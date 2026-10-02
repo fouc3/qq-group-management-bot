@@ -26,15 +26,21 @@ type stubJudge struct {
 	// penalty is how long the configuration silences a reporter whose report found
 	// nothing, zero when it does not ask for that.
 	penalty int64
+	// reporter, outcome and outcomeMute are what the command told the stub, so a
+	// test can see the two halves of a judgement line up.
+	reporter    string
+	outcome     string
+	outcomeMute int64
 }
 
 func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
-	quotedIndex string) (feature.ModerationVerdict, error) {
+	quotedIndex, reporter string) (feature.ModerationVerdict, error) {
 	if s.release != nil {
 		<-s.release
 	}
 	s.judged++
 	s.lastGroup, s.lastQuoted = groupOpenID, quotedIndex
+	s.reporter = reporter
 	if s.err != nil {
 		return feature.ModerationVerdict{}, s.err
 	}
@@ -44,6 +50,19 @@ func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
 func (s *stubJudge) DryRun() bool { return s.dryRun }
 
 func (s *stubJudge) ReportPenaltySeconds() int64 { return s.penalty }
+
+// JudgingEnabled is true because a stub is only ever built where a judge would be:
+// the harnesses that need one without say so by leaving it out entirely.
+func (s *stubJudge) JudgingEnabled() bool { return true }
+
+// RecordOutcome keeps what it was told, so that the record and the act can be
+// asserted to have happened together.
+func (s *stubJudge) RecordOutcome(_ context.Context, judgementID, action string,
+	muteSeconds int64) error {
+	s.outcome = action
+	s.outcomeMute = muteSeconds
+	return nil
+}
 
 // reportHarness builds a harness with a stub judge behind the command.
 func reportHarness(t *testing.T, judge *stubJudge) *harness {
@@ -125,6 +144,7 @@ func TestAViolationIsChangedAndSaid(t *testing.T) {
 	judge := &stubJudge{
 		release: release,
 		verdict: feature.ModerationVerdict{
+			JudgementID:     "JUDGE-1",
 			Category:        "ad",
 			Label:           "广告",
 			MuteSeconds:     600,
@@ -169,6 +189,16 @@ func TestAViolationIsChangedAndSaid(t *testing.T) {
 	}
 	if judge.lastQuoted != "IDX-QUOTED" {
 		t.Errorf("judged %q, want the quoted index", judge.lastQuoted)
+	}
+	if judge.reporter != testAdmin {
+		t.Errorf("the judgement was recorded against %q, want the reporter",
+			judge.reporter)
+	}
+	// What was done is written back onto the judgement, which is the only way the
+	// record answers "and then what" rather than "and then nothing".
+	if judge.outcome == "" || judge.outcomeMute != 600 {
+		t.Errorf("outcome = %q, %d; want the actions that were taken",
+			judge.outcome, judge.outcomeMute)
 	}
 }
 
