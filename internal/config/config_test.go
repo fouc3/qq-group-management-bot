@@ -45,6 +45,55 @@ func TestTheExampleConfigurationIsStructurallySound(t *testing.T) {
 	}
 }
 
+// TestRedisDefaults covers the section a deployment may leave out entirely.
+//
+// The address has a default on purpose: it is the bot's own cache server, and a
+// default that pointed at whatever else already listens on a common port would
+// put this bot's keys in somebody else's keyspace.
+func TestRedisDefaults(t *testing.T) {
+	if DefaultRedisAddr != "127.0.0.1:6380" {
+		t.Errorf("DefaultRedisAddr = %q, want the bot's own cache port", DefaultRedisAddr)
+	}
+
+	var empty Config
+	resolved := empty.RedisConfig()
+	if resolved.Addr != DefaultRedisAddr {
+		t.Errorf("addr = %q, want %q", resolved.Addr, DefaultRedisAddr)
+	}
+	if resolved.Prefix != DefaultRedisPrefix {
+		t.Errorf("prefix = %q, want %q", resolved.Prefix, DefaultRedisPrefix)
+	}
+	if resolved.DialTimeoutSeconds != DefaultRedisDialTimeoutSeconds {
+		t.Errorf("dial timeout = %d, want %d",
+			resolved.DialTimeoutSeconds, DefaultRedisDialTimeoutSeconds)
+	}
+
+	// A section that names its own values keeps them.
+	configured := Config{Redis: Redis{
+		Addr: "cache.internal:6379", Prefix: "other", DialTimeoutSeconds: 9, DB: 3,
+	}}
+	resolved = configured.RedisConfig()
+	if resolved.Addr != "cache.internal:6379" || resolved.Prefix != "other" ||
+		resolved.DialTimeoutSeconds != 9 || resolved.DB != 3 {
+		t.Errorf("the section was not kept as written: %+v", resolved)
+	}
+}
+
+// TestTheRedisSectionIsValidated covers the ways a file can get it wrong.
+func TestTheRedisSectionIsValidated(t *testing.T) {
+	for name, section := range map[string]Redis{
+		"a negative database": {DB: -1},
+		"a negative timeout":  {DialTimeoutSeconds: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			parsed := Config{Redis: section}
+			if err := parsed.applyDefaults(); err == nil {
+				t.Error("the section must be refused")
+			}
+		})
+	}
+}
+
 // TestDatabaseDefaults covers the section a deployment may leave out entirely:
 // it still has to end up with a driver and with a place to put the file.
 func TestDatabaseDefaults(t *testing.T) {

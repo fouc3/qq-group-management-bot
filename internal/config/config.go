@@ -52,6 +52,8 @@ type Config struct {
 	OneBot OneBot `yaml:"onebot"`
 	// Database says where what has to outlive a restart is kept.
 	Database Database `yaml:"database"`
+	// Redis says where the volatile cache lives.
+	Redis Redis `yaml:"redis"`
 	// Log holds logging settings.
 	Log Log `yaml:"log"`
 	// Features holds one raw node per feature, keyed by the feature name.
@@ -60,6 +62,61 @@ type Config struct {
 	// new feature does not touch this package.
 	Features map[string]yaml.Node `yaml:"features"`
 }
+
+// DefaultRedisAddr is where the cache is looked for when the file names no
+// place: a Redis of this bot's own, on the loopback interface.
+//
+// Its own, because the cache shares a keyspace with whatever else uses the same
+// server, and a keyspace is not something to share by accident.
+const DefaultRedisAddr = "127.0.0.1:6380"
+
+// Redis is where the volatile cache lives -- group messages kept for a short
+// while so that a reported one can be judged in context.
+//
+// It is deliberately separate from Database: what is here may be lost without
+// consequence, and what is there may not. Nothing in this section is a source of
+// truth.
+type Redis struct {
+	// Addr is host:port.
+	Addr string `yaml:"addr"`
+	// Password is empty when the server wants none.
+	Password string `yaml:"password"`
+	// DB is the numeric database, for a server shared with something else that
+	// keeps to its own.
+	DB int `yaml:"db"`
+	// Prefix is put in front of every key, so one server can hold several
+	// applications' keys without a collision being possible.
+	Prefix string `yaml:"prefix"`
+	// DialTimeoutSeconds bounds connecting and each command.
+	//
+	// Short on purpose: the cache sits in the path of answering a command, and
+	// waiting on a dead server is worse than judging without context.
+	DialTimeoutSeconds int `yaml:"dial_timeout_seconds"`
+}
+
+// RedisConfig is the section as the app uses it, with the defaults filled in.
+//
+// The defaults are applied here rather than written back into the section so
+// that one place decides what an unset field means.
+func (c *Config) RedisConfig() Redis {
+	redis := c.Redis
+	if strings.TrimSpace(redis.Addr) == "" {
+		redis.Addr = DefaultRedisAddr
+	}
+	if strings.TrimSpace(redis.Prefix) == "" {
+		redis.Prefix = DefaultRedisPrefix
+	}
+	if redis.DialTimeoutSeconds <= 0 {
+		redis.DialTimeoutSeconds = DefaultRedisDialTimeoutSeconds
+	}
+	return redis
+}
+
+// DefaultRedisPrefix keeps this bot's keys apart from anything else's.
+const DefaultRedisPrefix = "qgb"
+
+// DefaultRedisDialTimeoutSeconds is how long a cache command may take.
+const DefaultRedisDialTimeoutSeconds = 3
 
 // Database is where the bot keeps what must survive a restart: the members held
 // until they verify, and the applicants barred from joining.
@@ -311,6 +368,16 @@ func (c *Config) applyDefaults() error {
 		}
 		c.Database.DSN = path
 	}
+	if c.Redis.DB < 0 {
+		return fmt.Errorf("redis.db must not be negative, got %d", c.Redis.DB)
+	}
+	if c.Redis.DialTimeoutSeconds < 0 {
+		return fmt.Errorf("redis.dial_timeout_seconds must not be negative, got %d",
+			c.Redis.DialTimeoutSeconds)
+	}
+	// The address is not required: an unset one means the default cache server,
+	// and a deployment that does not use the cache at all never needs to name
+	// one.
 	if strings.TrimSpace(c.Log.Level) == "" {
 		c.Log.Level = DefaultLogLevel
 	}
