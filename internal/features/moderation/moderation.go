@@ -124,6 +124,30 @@ func (h *handler) Register(ctx context.Context) error {
 			"addr", h.deps.Redis.Addr, "retention_hours", h.cfg.CacheHours)
 	}
 
+	// The receive setting decides whether this feature can work at all, so it is
+	// read and reported rather than assumed. A group that delivers only mentions
+	// gives the cache nothing but the messages that mention the bot, and a report
+	// about somebody else's advertisement would have nothing to judge it with.
+	for _, group := range h.deps.Groups {
+		state, err := h.deps.Client.GetGroupBotState(ctx, group.OpenID)
+		if err != nil {
+			h.deps.Logger.Warn("could not read a group's receive setting",
+				"group", group.OpenID, "error", err)
+			continue
+		}
+		h.deps.Logger.Info("a managed group delivers messages this way",
+			"group", group.OpenID,
+			"recv_msg_setting", state.RecvMsgSetting,
+			"proactive_allowed", state.AllowProactiveMsg)
+		if state.RecvMsgSetting == qqbotsdk.GroupRecvMsgOnlyMention {
+			h.deps.Logger.Warn("this group delivers only messages that mention "+
+				"the bot, so the cache will hold almost nothing and a report "+
+				"will be judged without context",
+				"group", group.OpenID,
+				"how_to_change", "the group's bot settings, receive all messages")
+		}
+	}
+
 	// Both events, so a message is cached whichever way the group delivers it.
 	// A message that arrives as both is written twice with the same payload,
 	// which the cache treats as one message.
