@@ -104,6 +104,49 @@ type Config struct {
 	// DeclineBots declines applicants the platform flags as bots, whatever
 	// Action says, while leaving people to the configured action.
 	DeclineBots bool `yaml:"decline_bots"`
+	// Groups changes what single groups do, keyed by group openid.
+	//
+	// Only the action is overridable, because that is the decision a group
+	// actually differs on: a large public group may want to admit everybody and
+	// let verification sort it out, while a small one wants to look at each
+	// request. Whether bots are declined is not a per-group question.
+	Groups map[string]GroupOverride `yaml:"groups"`
+}
+
+// GroupOverride is one group's difference from the section.
+//
+// A pointer field so that "not written" is distinguishable from "written as the
+// zero value": a group that only sets an action must inherit the rest.
+type GroupOverride struct {
+	Action *string `yaml:"action"`
+}
+
+// actionFor returns the action that applies to a group.
+func (c *Config) actionFor(groupOpenID string) string {
+	if override, known := c.Groups[groupOpenID]; known && override.Action != nil {
+		return *override.Action
+	}
+	return c.Action
+}
+
+// validateGroups checks every group's action at startup, so a typo is found when
+// the file is read rather than when somebody is waiting at the door.
+func (c *Config) validateGroups() error {
+	for groupOpenID, override := range c.Groups {
+		if strings.TrimSpace(groupOpenID) == "" {
+			return errors.New("groups has an entry with an empty group openid")
+		}
+		if override.Action == nil {
+			continue
+		}
+		switch *override.Action {
+		case ActionIgnore, ActionApprove, ActionDecline:
+		default:
+			return fmt.Errorf("groups[%s]: action %q is not %s, %s or %s",
+				groupOpenID, *override.Action, ActionIgnore, ActionApprove, ActionDecline)
+		}
+	}
+	return nil
 }
 
 // applyDefaults fills in what the section leaves out, then validates it.
@@ -120,7 +163,7 @@ func (c *Config) applyDefaults() error {
 	if c.Action != ActionDecline && strings.TrimSpace(c.RejectReason) != "" {
 		return errors.New("reject_reason only applies to action: decline")
 	}
-	return nil
+	return c.validateGroups()
 }
 
 // New builds the feature from its configuration section.
@@ -193,7 +236,9 @@ func (h *handler) onJoinRequest(ctx context.Context, event *qqbotsdk.Event) erro
 		return nil
 	}
 
-	action := h.cfg.Action
+	// The action is the group's own, so one group can admit everybody while
+	// another looks at each request.
+	action := h.cfg.actionFor(data.GroupOpenID)
 	reason := h.cfg.RejectReason
 	if barred {
 		action = ActionDecline

@@ -219,3 +219,49 @@ func TestAnIgnoredRequestIsNotAnswered(t *testing.T) {
 }
 
 var errStub = errors.New("stub failure")
+
+// TestTheActionIsPerGroup covers the reason the override exists: one section,
+// two groups, a different decision each.
+func TestTheActionIsPerGroup(t *testing.T) {
+	h := newHarness(t, `
+enabled: true
+action: approve
+groups:
+  GROUP-OPENID:
+    action: ignore
+`)
+
+	if got := h.feature.cfg.actionFor(testGroupOpenID); got != ActionIgnore {
+		t.Errorf("actionFor(the named group) = %q, want %q", got, ActionIgnore)
+	}
+	if got := h.feature.cfg.actionFor("ANOTHER-GROUP"); got != ActionApprove {
+		t.Errorf("actionFor(a group the file does not name) = %q, want the default %q",
+			got, ActionApprove)
+	}
+
+	// And the grouping is acted on, not only resolved.
+	if err := h.request(); err != nil {
+		t.Fatalf("onJoinRequest: %v", err)
+	}
+	if got := h.answered(); got != "" {
+		t.Errorf("answered %q, want nothing for a group set to ignore", got)
+	}
+}
+
+// TestATypoInAGroupActionFailsAtStartup covers that the override is validated
+// before anybody is waiting at the door.
+func TestATypoInAGroupActionFailsAtStartup(t *testing.T) {
+	_, err := New(sectionNode(t, `
+enabled: true
+action: approve
+groups:
+  GROUP-OPENID:
+    action: aprove
+`), feature.Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err == nil {
+		t.Error("a misspelled action must be refused")
+	}
+	if err != nil && !strings.Contains(err.Error(), "GROUP-OPENID") {
+		t.Errorf("err = %v, want it to name the group at fault", err)
+	}
+}
