@@ -242,7 +242,8 @@ features:
       # 实测：不发这个开关时，deepseek-chat 只输出 5 个 token、思维链 0 字符 —— 等于没思考。
       thinking: hide
       reasoning_effort: high       # low / medium / high / max；服务端默认 high
-      max_tokens: 1024             # 思维链也算在这个额度里，太小会截断成读不出的答案
+      max_tokens: 4096             # 思维链也算在这个额度里；1024 实测偏紧，容易截断成读不出的答案
+      retries: 2                   # 回答不是 JSON 时重试几次（0-3，留空用默认 2）
       timeout_seconds: 30
       stream: false                # 判定不需要流式；注意流式发不了 thinking 开关
       temperature: 0

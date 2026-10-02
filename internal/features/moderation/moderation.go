@@ -108,8 +108,26 @@ type Model struct {
 	ReasoningEffort string `yaml:"reasoning_effort"`
 	// MaxTokens caps the answer, and the chain of thought is paid for out of it.
 	// Too small a cap leaves the model mid-sentence with no JSON to read, which the
-	// judgement treats as no judgement at all.
+	// judgement treats as no judgement at all -- and since the chain of thought is
+	// paid for out of the same budget, a cap that looks generous for one small JSON
+	// object can still be tight.
 	MaxTokens int `yaml:"max_tokens"`
+	// Retries is how many times an answer that could not be read is asked for again,
+	// at most three. Nil means the default; zero means never, which is a real choice
+	// for somebody paying per call.
+	Retries *int `yaml:"retries"`
+}
+
+// defaultJudgeRetries is how many times an unreadable answer is asked for again when
+// the configuration says nothing.
+const defaultJudgeRetries = 2
+
+// judgeRetries is how many retries are in force.
+func (c *Config) judgeRetries() int {
+	if c.Model.Retries == nil {
+		return defaultJudgeRetries
+	}
+	return *c.Model.Retries
 }
 
 // Category is one kind of violation.
@@ -281,8 +299,14 @@ func (c *Config) applyDefaults() error {
 		c.Model.TimeoutSeconds = 30
 	}
 	if c.Model.MaxTokens <= 0 {
-		// Comfortable for a chain of thought and the small JSON object after it.
-		c.Model.MaxTokens = 1024
+		// Generous on purpose: the chain of thought is paid for out of the same budget
+		// as the answer, so a cap that looks roomy for one small JSON object can still
+		// cut the model off mid-sentence. Measured chains run to a few hundred tokens,
+		// and the answer after them is tiny -- 1024 left no room to spare.
+		c.Model.MaxTokens = 4096
+	}
+	if retries := c.judgeRetries(); retries < 0 || retries > 3 {
+		return fmt.Errorf("model retries %d: want 0 to 3", retries)
 	}
 
 	switch c.Model.Thinking {
@@ -524,6 +548,9 @@ func (h *handler) Register(ctx context.Context) error {
 		"categories", len(h.cfg.Categories),
 		"default_mute", h.cfg.DefaultMute,
 		"report_penalty_seconds", h.ReportPenaltySeconds(),
+		"thinking", h.cfg.Model.Thinking,
+		"max_tokens", h.cfg.Model.MaxTokens,
+		"retries", h.cfg.judgeRetries(),
 		"context", fmt.Sprintf("%d before, %d after, %d minutes",
 			h.cfg.ContextBefore, h.cfg.ContextAfter, h.cfg.ChainMinutes))
 

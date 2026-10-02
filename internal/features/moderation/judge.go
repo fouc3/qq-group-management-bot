@@ -118,38 +118,87 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	}
 	// Streaming is configured, not assumed: a verdict is one small object, so the
 	// usual setting is off, and the library collects the pieces when it is on.
+	//
+	// It is the one path without the retries below: the pieces are read as they
+	// arrive, so an answer that could not be read is never held whole. It is kept
+	// because it works, and refused together with thinking, which cannot be sent that
+	// way at all.
 	if h.cfg.Model.Stream {
 		return h.judgeStreaming(callCtx, request, categories)
 	}
 
-	// With thinking configured the request is built here rather than by the library,
-	// which can send reasoning_effort but not the switch that turns reasoning on.
-	// The two are refused together at startup, so the paths cannot disagree about
-	// what was asked for.
-	if h.cfg.Model.Thinking != "" {
-		content, reasoning, err := h.ask(callCtx, h.judgeRequest(messages))
+	// One attempt, then as many more as the configuration allows when an answer
+	// arrived but could not be read. A model is not deterministic even at temperature
+	// zero, so asking again is a real chance at a well-formed answer; a request that
+	// never arrived is a different problem, and asking again immediately is not the
+	// answer to it.
+	onceOver := func() (Verdict, error) {
+		if h.cfg.Model.Thinking != "" {
+			content, reasoning, err := h.ask(callCtx, h.judgeRequest(messages))
+			if err != nil {
+				return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
+			}
+			if h.cfg.Model.Thinking == "show" && strings.TrimSpace(reasoning) != "" {
+				// Kept because a surprising verdict has to be explainable afterwards. It
+				// is never shown to the group: it is free text from a model, and the group
+				// gets the configured category name and nothing else.
+				h.deps.Logger.Info("the judge reasoned before answering",
+					"group", groupOpenID, "characters", len(reasoning),
+					"reasoning", oneLine(reasoning))
+			}
+			return h.answer(content, categories)
+		}
+
+		response, err := h.modelClient().CreateChatCompletion(callCtx, request)
 		if err != nil {
 			return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 		}
-		if h.cfg.Model.Thinking == "show" && strings.TrimSpace(reasoning) != "" {
-			// Kept because a surprising verdict has to be explainable afterwards. It
-			// is never shown to the group: it is free text from a model, and the group
-			// gets the configured category name and nothing else.
-			h.deps.Logger.Info("the judge reasoned before answering",
-				"group", groupOpenID, "characters", len(reasoning),
-				"reasoning", oneLine(reasoning))
+		if len(response.Choices) == 0 {
+			return Verdict{}, fmt.Errorf("%w: the answer carried no choice", ErrUnjudged)
 		}
-		return h.readAnswer(content, categories, nil)
+		return h.answer(response.Choices[0].Message.Content, categories)
 	}
 
-	response, err := h.modelClient().CreateChatCompletion(callCtx, request)
+	var lastErr error
+	for attempt := 1; attempt <= h.cfg.judgeRetries()+1; attempt++ {
+		verdict, err := onceOver()
+		if err == nil {
+			if attempt > 1 {
+				h.deps.Logger.Info("a later answer could be read",
+					"group", groupOpenID, "attempt", attempt)
+			}
+			return verdict, nil
+		}
+		lastErr = err
+		if !errors.Is(err, errUnreadable) || attempt > h.cfg.judgeRetries() {
+			return Verdict{}, err
+		}
+		h.deps.Logger.Warn("the model's answer could not be read, asking again",
+			"group", groupOpenID, "attempt", attempt, "of", h.cfg.judgeRetries()+1,
+			"error", err)
+		select {
+		case <-callCtx.Done():
+			return Verdict{}, err
+		case <-time.After(judgeRetryDelay):
+		}
+	}
+	return Verdict{}, lastErr
+}
+
+// judgeRetryDelay is how long the model is given before being asked again.
+const judgeRetryDelay = 500 * time.Millisecond
+
+// answer reads one reply, marking a reply that arrived but could not be understood.
+//
+// The mark is what makes the retry above possible and, just as importantly, what keeps
+// a request that failed to arrive out of it: those are different problems and only one
+// of them is answered by asking again.
+func (h *handler) answer(content string, categories []string) (Verdict, error) {
+	verdict, err := h.readAnswer(content, categories, nil)
 	if err != nil {
-		return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
+		return Verdict{}, fmt.Errorf("%w: %w", errUnreadable, err)
 	}
-	if len(response.Choices) == 0 {
-		return Verdict{}, fmt.Errorf("%w: the answer carried no choice", ErrUnjudged)
-	}
-	return h.readAnswer(response.Choices[0].Message.Content, categories, err)
+	return verdict, nil
 }
 
 // judgeStreaming collects a streamed answer and reads it the same way.
@@ -302,6 +351,13 @@ func (h *handler) categoryNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// errUnreadable marks an answer that arrived but could not be understood.
+//
+// It is the one failure worth asking again for: the model is not deterministic even at
+// temperature zero, so a second answer can simply be a well-formed one. A request that
+// never arrived is not this, and is not retried.
+var errUnreadable = errors.New("the answer could not be read")
 
 // judgeRequest is one judgement as it goes on the wire.
 //

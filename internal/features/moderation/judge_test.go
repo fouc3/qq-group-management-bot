@@ -20,7 +20,11 @@ import (
 // modelStub is an OpenAI-compatible endpoint that answers with what the test
 // says, and keeps every request so the prompt itself can be asserted on.
 type modelStub struct {
-	answer   string
+	answer string
+	// answers are handed out one per request, which is how a retry gets tested: a stub
+	// that says something unreadable once and something readable afterwards is the
+	// whole point of asking again.
+	answers  []string
 	status   int
 	requests []string
 }
@@ -35,10 +39,14 @@ func (s *modelStub) start(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"error":{"message":"stub failure"}}`))
 			return
 		}
+		answer := s.answer
+		if len(s.answers) > 0 {
+			answer, s.answers = s.answers[0], s.answers[1:]
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{
-				"message": map[string]any{"role": "assistant", "content": s.answer},
+				"message": map[string]any{"role": "assistant", "content": answer},
 			}},
 		})
 	}))
