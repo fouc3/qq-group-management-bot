@@ -1,11 +1,13 @@
 package moderation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -103,20 +105,41 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	messages := []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem,
+			Content: fmt.Sprintf(judgeSystemPrompt,
+				strings.Join(categories, "、"), h.cfg.allowText(groupOpenID))},
+		{Role: openai.ChatMessageRoleUser, Content: judgeUserMessage(chain, h.cfg.MaxChars)},
+	}
 	request := openai.ChatCompletionRequest{
 		Model:       h.cfg.Model.Name,
 		Temperature: h.cfg.Model.Temperature,
-		Messages: []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem,
-				Content: fmt.Sprintf(judgeSystemPrompt,
-					strings.Join(categories, "、"), h.cfg.allowText(groupOpenID))},
-			{Role: openai.ChatMessageRoleUser, Content: judgeUserMessage(chain, h.cfg.MaxChars)},
-		},
+		Messages:    messages,
 	}
 	// Streaming is configured, not assumed: a verdict is one small object, so the
 	// usual setting is off, and the library collects the pieces when it is on.
 	if h.cfg.Model.Stream {
 		return h.judgeStreaming(callCtx, request, categories)
+	}
+
+	// With thinking configured the request is built here rather than by the library,
+	// which can send reasoning_effort but not the switch that turns reasoning on.
+	// The two are refused together at startup, so the paths cannot disagree about
+	// what was asked for.
+	if h.cfg.Model.Thinking != "" {
+		content, reasoning, err := h.ask(callCtx, h.judgeRequest(messages))
+		if err != nil {
+			return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
+		}
+		if h.cfg.Model.Thinking == "show" && strings.TrimSpace(reasoning) != "" {
+			// Kept because a surprising verdict has to be explainable afterwards. It
+			// is never shown to the group: it is free text from a model, and the group
+			// gets the configured category name and nothing else.
+			h.deps.Logger.Info("the judge reasoned before answering",
+				"group", groupOpenID, "characters", len(reasoning),
+				"reasoning", oneLine(reasoning))
+		}
+		return h.readAnswer(content, categories, nil)
 	}
 
 	response, err := h.modelClient().CreateChatCompletion(callCtx, request)
@@ -278,6 +301,120 @@ func (h *handler) categoryNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// judgeRequest is one judgement as it goes on the wire.
+//
+// It is built here rather than handed to the OpenAI-compatible client because the
+// switch that decides whether the model reasons at all -- thinking -- is a field
+// that client cannot send. What its absence costs was measured, not assumed:
+// against DeepSeek's own endpoint the same moderation question came back in five
+// output tokens with an empty reasoning_content.
+type judgeRequest struct {
+	Model           string                         `json:"model"`
+	Messages        []openai.ChatCompletionMessage `json:"messages"`
+	Temperature     *float32                       `json:"temperature,omitempty"`
+	ReasoningEffort string                         `json:"reasoning_effort,omitempty"`
+	Thinking        *judgeThinking                 `json:"thinking,omitempty"`
+	MaxTokens       int                            `json:"max_tokens,omitempty"`
+}
+
+// judgeThinking is the thinking switch: enabled or disabled.
+type judgeThinking struct {
+	Type string `json:"type"`
+}
+
+// judgeAnswer is the part of an answer a judgement reads.
+type judgeAnswer struct {
+	Choices []struct {
+		Message struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// judgeRequest turns the configuration and the messages into a request.
+func (h *handler) judgeRequest(messages []openai.ChatCompletionMessage) judgeRequest {
+	request := judgeRequest{
+		Model:           h.cfg.Model.Name,
+		Messages:        messages,
+		ReasoningEffort: h.cfg.Model.ReasoningEffort,
+		MaxTokens:       h.cfg.Model.MaxTokens,
+	}
+	switch h.cfg.Model.Thinking {
+	case "hide", "show":
+		request.Thinking = &judgeThinking{Type: "enabled"}
+	case "off":
+		request.Thinking = &judgeThinking{Type: "disabled"}
+	}
+	if request.Thinking == nil || request.Thinking.Type == "disabled" {
+		// Temperature means something only without reasoning: the API accepts it in
+		// thinking mode and ignores it, so sending it there would be a setting that
+		// looks applied and is not.
+		temperature := h.cfg.Model.Temperature
+		request.Temperature = &temperature
+	}
+	return request
+}
+
+// answerLimit is how much of an answer is read before giving up on it.
+const answerLimit = 1 << 20
+
+// ask sends one judgement and returns the answer and the chain of thought.
+func (h *handler) ask(ctx context.Context, request judgeRequest) (string, string, error) {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return "", "", fmt.Errorf("encoding the judgement: %w", err)
+	}
+	address := strings.TrimSuffix(h.cfg.Model.BaseURL, "/") + "/chat/completions"
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, address,
+		bytes.NewReader(body))
+	if err != nil {
+		return "", "", fmt.Errorf("building the judgement request: %w", err)
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Authorization", "Bearer "+h.cfg.Model.APIKey)
+
+	response, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		return "", "", err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, answerLimit))
+	if err != nil {
+		return "", "", fmt.Errorf("reading the answer: %w", err)
+	}
+
+	var answer judgeAnswer
+	if err := json.Unmarshal(raw, &answer); err != nil {
+		return "", "", fmt.Errorf("the answer was not JSON (%s): %s",
+			response.Status, shortened(oneLine(string(raw)), 200))
+	}
+	if answer.Error != nil {
+		return "", "", fmt.Errorf("the model refused: %s", answer.Error.Message)
+	}
+	if response.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("the model answered %s", response.Status)
+	}
+	if len(answer.Choices) == 0 {
+		return "", "", errors.New("the answer carried no choice")
+	}
+	return answer.Choices[0].Message.Content,
+		answer.Choices[0].Message.ReasoningContent, nil
+}
+
+// shortened keeps a message readable, counting characters rather than bytes so it
+// cannot cut one in half.
+func shortened(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // isCategory reports whether a name is one of the configured categories.

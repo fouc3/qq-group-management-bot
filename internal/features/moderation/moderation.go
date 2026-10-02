@@ -89,6 +89,27 @@ type Model struct {
 	TimeoutSeconds int     `yaml:"timeout_seconds"`
 	Stream         bool    `yaml:"stream"`
 	Temperature    float32 `yaml:"temperature"`
+	// Thinking says what to do about the model's chain of thought.
+	//
+	// The switch is worth a configuration field of its own because of what its
+	// absence costs: measured against DeepSeek's own endpoint, a request without it
+	// came back in five output tokens with an empty reasoning_content -- the model
+	// answered a moderation question without reasoning about it at all, which is
+	// the shallow judgement this field exists to stop.
+	//
+	//	hide  (default) thinking on, and the chain is thrown away
+	//	show            thinking on, and the chain goes to the log, which is how a
+	//	                surprising verdict gets explained afterwards
+	//	off             thinking off: the fastest and cheapest answer
+	//	""              nothing is sent, and the provider's own default applies
+	Thinking string `yaml:"thinking"`
+	// ReasoningEffort is how hard it thinks: low, medium, high or max. Empty sends
+	// nothing, and the provider's own default -- high -- applies.
+	ReasoningEffort string `yaml:"reasoning_effort"`
+	// MaxTokens caps the answer, and the chain of thought is paid for out of it.
+	// Too small a cap leaves the model mid-sentence with no JSON to read, which the
+	// judgement treats as no judgement at all.
+	MaxTokens int `yaml:"max_tokens"`
 }
 
 // Category is one kind of violation.
@@ -258,6 +279,41 @@ func (c *Config) applyDefaults() error {
 	}
 	if c.Model.TimeoutSeconds <= 0 {
 		c.Model.TimeoutSeconds = 30
+	}
+	if c.Model.MaxTokens <= 0 {
+		// Comfortable for a chain of thought and the small JSON object after it.
+		c.Model.MaxTokens = 1024
+	}
+
+	switch c.Model.Thinking {
+	case "hide", "show", "off":
+	case "":
+		// Nothing is sent, so the provider's own default applies. Left alone
+		// deliberately: it is a real choice for somebody running against a model
+		// whose default they know.
+	default:
+		return fmt.Errorf("model thinking %q: want hide, show, off or empty",
+			c.Model.Thinking)
+	}
+	switch c.Model.ReasoningEffort {
+	case "", "low", "medium", "high", "max":
+	default:
+		return fmt.Errorf("model reasoning_effort %q: want low, medium, high or max",
+			c.Model.ReasoningEffort)
+	}
+	if c.Model.Thinking == "" && c.Model.ReasoningEffort != "" {
+		return errors.New("model reasoning_effort is set but thinking is empty, so " +
+			"the effort would be sent without the switch that turns reasoning on")
+	}
+	if c.Model.Stream && c.Model.Thinking != "" {
+		// Refused rather than silently ignored. The streaming request goes through
+		// the OpenAI-compatible client, which cannot carry the thinking switch, so
+		// the two settings together would promise reasoning and quietly not ask for
+		// it -- and a configuration that lies about that is worse than one that
+		// refuses.
+		return errors.New("model stream is on together with thinking: streaming " +
+			"cannot carry the thinking switch, so set stream: false, or thinking: \"\" " +
+			"to send whatever the provider defaults to")
 	}
 	if c.MinConfidence <= 0 {
 		// A threshold rather than a share of the decision: it decides whether an
