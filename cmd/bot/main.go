@@ -24,6 +24,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinverify"
+	"github.com/fouc3/qq-group-management-bot/internal/features/moderation"
 )
 
 func main() {
@@ -49,6 +50,7 @@ func run() error {
 	registry.Add(joinverify.Name, joinverify.New)
 	registry.Add(joinrequest.Name, joinrequest.New)
 	registry.Add(admincmd.Name, admincmd.New)
+	registry.Add(moderation.Name, moderation.New)
 	logger.Debug("features registered", "features", registry.Names())
 
 	ctx, stop := signal.NotifyContext(context.Background(),

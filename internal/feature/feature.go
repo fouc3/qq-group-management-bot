@@ -47,6 +47,11 @@ type Deps struct {
 	// already declares one -- the join-request feature's blacklist is the
 	// example, and it is what lets that feature be tested without a database.
 	Store store.Store
+	// Redis is where the volatile cache lives, with its defaults filled in.
+	//
+	// Lifted out of the configuration the way Groups and JoinTolerance are, so
+	// that a feature which caches something does not have to read the file.
+	Redis config.Redis
 }
 
 // InGroup reports whether the feature should act on a group.

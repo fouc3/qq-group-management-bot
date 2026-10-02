@@ -94,6 +94,7 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 		BotQQ:         cfg.Bot.QQ,
 		JoinTolerance: cfg.OneBot.Tolerance(),
 		Store:         database,
+		Redis:         cfg.RedisConfig(),
 	})
 	if err != nil {
 		return err
