@@ -289,3 +289,29 @@ func TestTheSchemaIsNotDowngraded(t *testing.T) {
 		t.Error("a database at a newer version must be refused")
 	}
 }
+
+// TestMetaRoundTrip covers the bookkeeping the one-off import depends on: a key
+// that is absent has to be distinguishable from one set to an empty value, or a
+// marker that was never written would read as written.
+func TestMetaRoundTrip(t *testing.T) {
+	opened := openTestStore(t)
+	ctx := context.Background()
+
+	if _, found, err := opened.Meta().Get(ctx, "IMPORTED"); err != nil || found {
+		t.Fatalf("Get on an absent key = found %v, err %v; want false, nil", found, err)
+	}
+	if err := opened.Meta().Set(ctx, "IMPORTED", "2026-10-02"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	value, found, err := opened.Meta().Get(ctx, "IMPORTED")
+	if err != nil || !found || value != "2026-10-02" {
+		t.Fatalf("Get = %q, %v, %v; want the value that was set", value, found, err)
+	}
+	// Setting again replaces, which is what a marker being re-stamped needs.
+	if err := opened.Meta().Set(ctx, "IMPORTED", "later"); err != nil {
+		t.Fatalf("Set again: %v", err)
+	}
+	if value, _, _ := opened.Meta().Get(ctx, "IMPORTED"); value != "later" {
+		t.Errorf("Get = %q, want the replacement", value)
+	}
+}

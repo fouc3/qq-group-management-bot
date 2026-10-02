@@ -65,8 +65,22 @@ type Store interface {
 	Pending() PendingStore
 	// Blacklist holds the applicants barred from joining.
 	Blacklist() BlacklistStore
+	// Meta holds small bookkeeping values that have to survive a restart, such
+	// as whether a one-off import has already run.
+	//
+	// Not a general dumping ground: nothing here is typed, so a value belongs
+	// only when it has no better home.
+	Meta() MetaStore
 	// Close releases the database.
 	Close() error
+}
+
+// MetaStore is small key/value storage.
+type MetaStore interface {
+	// Get returns a value and whether it was set.
+	Get(ctx context.Context, key string) (string, bool, error)
+	// Set stores a value, replacing any earlier one.
+	Set(ctx context.Context, key, value string) error
 }
 
 // PendingStore holds the members waiting to verify.

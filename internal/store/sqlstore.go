@@ -67,7 +67,38 @@ func (s *sqlStore) query(statement string) string { return s.dialect.rewrite(sta
 
 func (s *sqlStore) Pending() PendingStore     { return pendingStore{s} }
 func (s *sqlStore) Blacklist() BlacklistStore { return blacklistStore{s} }
+func (s *sqlStore) Meta() MetaStore           { return metaStore{s} }
 func (s *sqlStore) Close() error              { return s.db.Close() }
+
+// metaStore implements MetaStore.
+type metaStore struct{ store *sqlStore }
+
+// Get implements MetaStore.
+func (m metaStore) Get(ctx context.Context, key string) (string, bool, error) {
+	var value string
+	err := m.store.db.QueryRowContext(ctx,
+		m.store.query(`SELECT value FROM meta WHERE key = ?`), key).Scan(&value)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("reading %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// Set implements MetaStore.
+//
+// An upsert, for the same reason the schema version is written with one: the key
+// usually does not exist yet the first time it is set.
+func (m metaStore) Set(ctx context.Context, key, value string) error {
+	if _, err := m.store.db.ExecContext(ctx, m.store.query(`
+INSERT INTO meta (key, value) VALUES (?, ?)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value`), key, value); err != nil {
+		return fmt.Errorf("writing %q: %w", key, err)
+	}
+	return nil
+}
 
 // create brings a fresh database up to schemaVersion and reports what it found.
 func (s *sqlStore) create(ctx context.Context) error {
