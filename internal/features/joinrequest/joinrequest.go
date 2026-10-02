@@ -30,6 +30,66 @@ const (
 	ActionDecline = "decline"
 )
 
+// barredReason is what a barred applicant is told.
+//
+// Deliberately neutral, and deliberately not the configured reject_reason:
+// telling somebody they are on a list invites them to argue about it, and the
+// list is not theirs to audit. A refusal that looks like every other refusal
+// says everything the applicant needs to know.
+const barredReason = "暂不接受你的加群申请"
+
+// Applicant is one join request, reduced to what a decision about it needs.
+//
+// A struct rather than the raw event, so a blacklist is handed a stable shape:
+// the list may well outlive the current event fields, and it should not have to
+// be rewritten when one is added.
+type Applicant struct {
+	GroupOpenID string
+	// MemberOpenID identifies the applicant to this application, and is what a
+	// blacklist is keyed on.
+	MemberOpenID string
+	// UnionOpenID is the cross-application identity, for a list that has to
+	// outlive this bot. Both are passed: the choice is not made yet.
+	UnionOpenID string
+	Username    string
+	// InvitedBy names the inviter when the applicant was invited.
+	InvitedBy string
+}
+
+// applicantOf reduces a request to the fields a decision uses.
+func applicantOf(data *qqbotsdk.GroupJoinRequestData) Applicant {
+	return Applicant{
+		GroupOpenID:  data.GroupOpenID,
+		MemberOpenID: data.MemberOpenID,
+		UnionOpenID:  data.UnionOpenID,
+		Username:     data.Username,
+		InvitedBy:    data.InvitedBy,
+	}
+}
+
+// Blacklist answers whether an applicant is barred from joining.
+//
+// An interface rather than a call into a store because the list does not exist
+// yet: the handler needs a decision, not a source, and keeping the two apart is
+// what lets the list be chosen later without touching the handler.
+type Blacklist interface {
+	// Barred reports whether the applicant may not join.
+	//
+	// An error must mean "unknown", never "allowed": the caller leaves the
+	// request for a person rather than guessing.
+	Barred(ctx context.Context, applicant Applicant) (bool, error)
+}
+
+// emptyBlacklist bars nobody. It is what the feature runs on today.
+//
+// TODO: replace with the real list. Nothing else has to change: the check is
+// already the first thing a request passes through, so filling this in is a
+// change to this file alone.
+type emptyBlacklist struct{}
+
+// Barred implements Blacklist.
+func (emptyBlacklist) Barred(context.Context, Applicant) (bool, error) { return false, nil }
+
 // Config is this feature's section in the configuration file.
 type Config struct {
 	// Enabled turns the switch on. A section written without it is on.
@@ -72,13 +132,17 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	return &handler{cfg: cfg, deps: deps}, nil
+	return &handler{cfg: cfg, deps: deps, blacklist: emptyBlacklist{}}, nil
 }
 
 // handler implements feature.Feature.
 type handler struct {
 	cfg  Config
 	deps feature.Deps
+	// blacklist answers whether an applicant is barred. It is the first thing a
+	// request is checked against, and it is a field so that a test can decide
+	// what it says.
+	blacklist Blacklist
 }
 
 // Name implements feature.Feature.
@@ -114,13 +178,35 @@ func (h *handler) onJoinRequest(ctx context.Context, event *qqbotsdk.Event) erro
 		return nil
 	}
 
+	// The blacklist is checked before anything else decides, so that a barred
+	// applicant is refused whatever the configured action says -- including
+	// action: approve, which is the point of having the check first.
+	barred, err := h.blacklist.Barred(ctx, applicantOf(data))
+	if err != nil {
+		// Unknown is not a decision. Admitting would let a barred applicant in,
+		// and refusing would turn a lookup failure into rejections of ordinary
+		// people, so the request is left for a person instead: that is what
+		// action: ignore means, and it is the only answer that cannot be wrong.
+		h.deps.Logger.Error("could not check the join blacklist, "+
+			"leaving the request for a person",
+			"group", data.GroupOpenID, "user", data.MemberOpenID, "error", err)
+		return nil
+	}
+
 	action := h.cfg.Action
+	reason := h.cfg.RejectReason
+	if barred {
+		action = ActionDecline
+		reason = barredReason
+		h.deps.Logger.Warn("refused an applicant who is barred from joining",
+			"group", data.GroupOpenID, "user", data.MemberOpenID)
+	}
 	if h.cfg.DeclineBots && data.Bot {
 		action = ActionDecline
 	}
 	if action == ActionIgnore {
 		h.deps.Logger.Info("a join request is waiting for a person",
-			"group", data.GroupOpenID, "user", data.MemberOpenID)
+			"group", data.GroupOpenID, "user", data.MemberOpenID, "barred", barred)
 		return nil
 	}
 
@@ -129,7 +215,7 @@ func (h *handler) onJoinRequest(ctx context.Context, event *qqbotsdk.Event) erro
 		JoinRequestID: data.JoinRequestID,
 	}
 	if action == ActionDecline {
-		approval.RejectReason = h.cfg.RejectReason
+		approval.RejectReason = reason
 	}
 	if err := h.deps.Client.ApproveGroupJoinRequest(ctx, data.GroupOpenID,
 		data.MemberOpenID, approval); err != nil {
