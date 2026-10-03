@@ -25,6 +25,12 @@ type stubJudge struct {
 	// release holds the judgement until the test lets it go, so that the line the
 	// group sees first can be asserted without racing the verdict.
 	release chan struct{}
+	// entered reports that a judgement has started, so a test can stop the feature
+	// while one is running without racing on the fields below.
+	entered chan struct{}
+	// judgedCtx is the context the judgement was handed, which is where a
+	// judgement's lifetime is visible.
+	judgedCtx context.Context
 	// penalty is how long the configuration silences a reporter whose report found
 	// nothing, zero when it does not ask for that.
 	penalty int64
@@ -45,8 +51,12 @@ type stubJudge struct {
 	label string
 }
 
-func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
+func (s *stubJudge) JudgeQuoted(ctx context.Context, groupOpenID,
 	quotedIndex, quotedText, reporter string) (feature.ModerationVerdict, error) {
+	s.judgedCtx = ctx
+	if s.entered != nil {
+		s.entered <- struct{}{}
+	}
 	if s.release != nil {
 		<-s.release
 	}

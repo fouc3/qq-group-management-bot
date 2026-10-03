@@ -418,6 +418,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		instance.pending = deps.Store.Pending()
 		instance.meta = deps.Store.Meta()
 	}
+	instance.part, instance.stopPart = context.WithCancel(context.Background())
 	// Holds that outlived an earlier process are restored here, before anything
 	// can answer a button or sweep a deadline for them. The older JSON file is
 	// imported first, so the changeover does not forget anybody.
@@ -480,6 +481,13 @@ type verifier struct {
 	// without a database would get.
 	pending store.PendingStore
 	meta    store.MetaStore
+
+	// part is cancelled when this feature stops, and everything that answers a
+	// press runs under it: an interaction has to be answered even though the event
+	// that carried the press is over, and it must not be answered by an instance
+	// that has already been replaced.
+	part     context.Context
+	stopPart context.CancelFunc
 
 	// buttons is where the verification button's namespace is claimed. It is
 	// shared with the other features that have buttons, so a press reaches one of
@@ -603,6 +611,7 @@ func (v *verifier) Close(_ context.Context) error {
 	}
 	v.registrations = nil
 	v.buttons.Release(Name)
+	v.stopPart()
 	v.closeOnce.Do(func() { close(v.stopping) })
 	<-v.stopped
 	return nil
@@ -1069,7 +1078,7 @@ func (v *verifier) onInteractionPress(ctx context.Context, press command.Press) 
 		// Unknown or expired: answering with a failure keeps the button
 		// pressable, which is what someone retrying needs.
 		log.Info("a verification button was pressed after its window closed")
-		return v.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return v.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	if data.GroupOpenID != entry.groupOpenID || data.GroupMemberOpenID != entry.memberOpenID {
 		return v.foreignPress(ctx, data, press.EventID, entry)
@@ -1079,12 +1088,12 @@ func (v *verifier) onInteractionPress(ctx context.Context, press command.Press) 
 		// The member stays held, so the button must stay usable: answer with
 		// a failure rather than a success.
 		log.Error("could not lift the hold", "error", err)
-		return v.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return v.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	v.forget(token)
 	log.Info("a member verified and can speak again")
 
-	if err := v.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
+	if err := v.answer(data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
 		log.Error("the member verified but the press went unanswered", "error", err)
 	}
 	v.greet(ctx, press.EventID, entry)
@@ -1106,33 +1115,37 @@ func (v *verifier) foreignPress(ctx context.Context,
 	if v.admins == nil || !v.admins.IsAdmin(entry.groupOpenID, data.GroupMemberOpenID) {
 		log.Info("someone else pressed the verification button",
 			"expected_member", entry.memberOpenID, "presser", data.GroupMemberOpenID)
-		return v.answer(ctx, data.ID, qqbotsdk.InteractionCodeNoPermission)
+		return v.answer(data.ID, qqbotsdk.InteractionCodeNoPermission)
 	}
 
 	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings.DryRun); err != nil {
 		// The member stays held, so the answer must not claim success.
 		log.Error("an administrator skipped a verification but the hold could not be lifted",
 			"error", err, "presser", data.GroupMemberOpenID)
-		return v.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return v.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	v.forget(entry.token)
 	log.Warn("an administrator skipped a verification",
 		"presser", data.GroupMemberOpenID, "member", entry.memberOpenID)
 
-	if err := v.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
+	if err := v.answer(data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
 		log.Error("the skip went unanswered", "error", err)
 	}
-	v.notify(ctx, eventID, entry.groupOpenID, renderTemplate(entry.settings.SkipMessage,
+	v.notify(eventID, entry.groupOpenID, renderTemplate(entry.settings.SkipMessage,
 		map[string]string{"{target}": atTag(entry.memberOpenID)}))
 	return nil
 }
 
 // notify posts a message as a passive reply to an interaction event.
-func (v *verifier) notify(ctx context.Context, eventID, groupOpenID, text string) {
+//
+// It takes no context from its caller: a notice has to be posted even though the
+// event that carried the press is over, and what it waits on is the feature rather
+// than the request, so that it cannot outlive the instance it came from.
+func (v *verifier) notify(eventID, groupOpenID, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	notifyCtx, cancel := context.WithTimeout(v.part, 15*time.Second)
 	defer cancel()
 	if _, err := v.sendMarkdown(notifyCtx, groupOpenID, text, eventID); err != nil {
 		v.deps.Logger.Warn("could not post a notice", "error", err)
@@ -1143,11 +1156,11 @@ func (v *verifier) notify(ctx context.Context, eventID, groupOpenID, text string
 //
 // Every path through a button press has to answer, because an unanswered
 // interaction leaves the presser on a spinner until it times out.
-func (v *verifier) answer(ctx context.Context, interactionID string, code qqbotsdk.InteractionCode) error {
+func (v *verifier) answer(interactionID string, code qqbotsdk.InteractionCode) error {
 	if interactionID == "" {
 		return errors.New("the interaction event carried no id to answer")
 	}
-	answerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	answerCtx, cancel := context.WithTimeout(v.part, 10*time.Second)
 	defer cancel()
 	if err := v.deps.Client.RespondInteraction(answerCtx, interactionID, code); err != nil {
 		return fmt.Errorf("answering the interaction: %w", err)
@@ -1164,7 +1177,7 @@ func (v *verifier) greet(ctx context.Context, eventID string, entry *pending) {
 	if strings.TrimSpace(entry.settings.PassMessage) == "" {
 		return
 	}
-	v.notify(ctx, eventID, entry.groupOpenID, entry.settings.PassMessage)
+	v.notify(eventID, entry.groupOpenID, entry.settings.PassMessage)
 }
 
 // ask sends the prompt with the verification button.

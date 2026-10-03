@@ -78,11 +78,13 @@ func (h *handler) reportCommand(ctx context.Context,
 
 	h.reply(ctx, data, reportWaiting)
 
-	// On its own goroutine, with a context that outlives this handler: the handler
-	// runs on the path that delivers every event, and a model call of several
-	// seconds would stall every group behind it.
-	go h.judgeReport(context.WithoutCancel(ctx), data.GroupOpenID, quotedIndex,
-		message, reporter)
+	// On its own goroutine, under the feature's own context: the handler runs on
+	// the path that delivers every event, and a model call of several seconds
+	// would stall every group behind it. The feature's context rather than the
+	// request's, so that the judgement ends with the feature -- a judgement still
+	// running against an instance that has been replaced is a receipt posted for
+	// a command nobody is holding any more.
+	go h.judgeReport(h.part, data.GroupOpenID, quotedIndex, message, reporter)
 	return nil
 }
 

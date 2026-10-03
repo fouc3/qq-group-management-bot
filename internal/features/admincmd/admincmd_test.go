@@ -16,6 +16,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
@@ -766,6 +767,33 @@ func TestCloseStopsAnswering(t *testing.T) {
 	h.send("/菜单", testAdmin, testGroupOpenID)
 	if replies := h.groupReplies(); replies != 1 {
 		t.Errorf("a closed feature answered a later message: %d replies", replies)
+	}
+}
+
+// TestCloseEndsTheJudgementAFeatureStarted covers the context a judgement runs
+// under: the feature's own rather than the request's.
+//
+// A judgement takes seconds, and it ends by silencing somebody and posting a
+// receipt. Without this, a feature that was replaced while one was running would
+// come back minutes later and do all of that on behalf of an instance nobody is
+// running any more.
+func TestCloseEndsTheJudgementAFeatureStarted(t *testing.T) {
+	judge := &stubJudge{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h := reportHarness(t, judge)
+	if err := h.handler.reportCommand(context.Background(),
+		quotedReport("REF-MESSAGE"), command.Parsed{}); err != nil {
+		t.Fatalf("reporting: %v", err)
+	}
+
+	<-judge.entered
+	judged := judge.judgedCtx
+	if err := h.handler.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	close(judge.release)
+
+	if judged.Err() == nil {
+		t.Error("a judgement was still running under a feature that had stopped")
 	}
 }
 

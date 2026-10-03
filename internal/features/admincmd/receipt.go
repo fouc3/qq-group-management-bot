@@ -660,7 +660,7 @@ func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCre
 	if err != nil {
 		log.Warn("a receipt button was pressed for a record that cannot be read",
 			"error", err)
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	// A press in a group may only be about that group's records, and a press in a
 	// single chat carries no group at all: the record's own group is the one that
@@ -668,14 +668,14 @@ func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCre
 	if data.Scene == qqbotsdk.InteractionSceneGroup && entry.GroupOpenID != data.GroupOpenID {
 		log.Warn("refused the details of another group's receipt",
 			"belongs_to", entry.GroupOpenID)
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeAdminOnly)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeAdminOnly)
 	}
 	if !h.IsAdmin(entry.GroupOpenID, presser) {
 		// The platform greys the button out for a group member who is not an
 		// administrator, and this is the check that actually decides: the
 		// configured list is this bot's, and it is not the same list.
 		log.Warn("refused the details of a receipt to somebody who may not read them")
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeAdminOnly)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeAdminOnly)
 	}
 
 	// The details are a message of their own rather than an edit: the summary is
@@ -685,28 +685,28 @@ func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCre
 		if err := h.sendPrivateMessage(ctx, presser, h.receiptDetails(entry),
 			""); err != nil {
 			log.Error("could not send the details of a receipt", "error", err)
-			return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+			return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 		}
 		log.Info("an administrator read the details of a receipt privately")
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeSuccess)
 	}
 
 	token, err := newReceiptToken()
 	if err != nil {
 		log.Error("could not make a recall token", "error", err)
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	response, err := h.sendMessageWithKeyboard(ctx, data.GroupOpenID,
 		h.receiptDetails(entry), "", recallKeyboard(token))
 	if err != nil {
 		log.Error("could not send the details of a receipt", "error", err)
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	if response != nil {
 		h.rememberRecall(token, data.GroupOpenID, response.ID)
 	}
 	log.Info("an administrator read the details of a receipt")
-	return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess)
+	return h.answer(data.ID, qqbotsdk.InteractionCodeSuccess)
 }
 
 // recallDetails answers the button that takes a detailed receipt back.
@@ -720,7 +720,7 @@ func (h *handler) recallDetails(ctx context.Context, data *qqbotsdk.InteractionC
 		// A recall button only ever exists under a group's detailed receipt, so a
 		// press from anywhere else is either a stale button or not ours. Refused
 		// rather than ignored, because the presser is waiting on a spinner.
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	log := h.deps.Logger.With("group", data.GroupOpenID,
 		"member", data.GroupMemberOpenID, "token", token)
@@ -730,35 +730,39 @@ func (h *handler) recallDetails(ctx context.Context, data *qqbotsdk.InteractionC
 		// Unknown or expired: answering with a failure leaves the button
 		// pressable, which is what somebody retrying needs.
 		log.Info("a recall button was pressed after its window closed")
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	if target.groupOpenID != data.GroupOpenID ||
 		!h.IsAdmin(target.groupOpenID, data.GroupMemberOpenID) {
 		log.Warn("refused a recall to a member who may not press it")
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeNoPermission)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeNoPermission)
 	}
 	if err := h.deps.Client.RecallGroupMessage(ctx, target.groupOpenID,
 		target.messageID); err != nil {
 		// A failure the platform decides, and the most likely one by far is the
 		// two-minute limit on taking back a bot's own message.
 		log.Warn("could not take back a detailed receipt", "error", err)
-		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		return h.answer(data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	h.forgetRecall(token)
 	log.Info("a detailed receipt was taken back")
-	return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess)
+	return h.answer(data.ID, qqbotsdk.InteractionCodeSuccess)
 }
 
 // answer reports the outcome to the client that pressed the button.
 //
 // Every path through a button press has to answer, because an unanswered
 // interaction leaves the presser on a spinner until it times out.
-func (h *handler) answer(ctx context.Context, interactionID string,
-	code qqbotsdk.InteractionCode) error {
+//
+// It takes no context from its caller on purpose: an answer has to be sent even
+// though the event that carried the press has been dealt with, and what it waits
+// on is the feature rather than the request, so that a press is never answered by
+// an instance that has already been replaced.
+func (h *handler) answer(interactionID string, code qqbotsdk.InteractionCode) error {
 	if interactionID == "" {
 		return errors.New("the interaction event carried no id to answer")
 	}
-	answerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	answerCtx, cancel := context.WithTimeout(h.part, 10*time.Second)
 	defer cancel()
 	if err := h.deps.Client.RespondInteraction(answerCtx, interactionID, code); err != nil {
 		return fmt.Errorf("answering the interaction: %w", err)

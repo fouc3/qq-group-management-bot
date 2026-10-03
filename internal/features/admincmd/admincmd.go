@@ -148,6 +148,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		return nil, err
 	}
 	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(Name, deps.Buttons)}
+	h.part, h.stopPart = context.WithCancel(context.Background())
 	// The table is validated here, so that a word invoking two commands stops the
 	// bot at startup rather than leaving one of them answering nothing at all.
 	if _, err := command.NewCatalog(h.commandDefs()); err != nil {
@@ -188,6 +189,14 @@ type handler struct {
 	// router is how the handlers below reach the events a command arrives in,
 	// and it holds the record of the messages already acted on.
 	router *command.Router
+
+	// part is cancelled when this feature stops, and the work that outlives the
+	// event that asked for it runs under it: a judgement of several seconds, an
+	// answer to a button that must not be cut short. Without it, a feature built
+	// again while the bot runs would leave the old instance still talking -- a
+	// receipt posted three minutes after the instance it came from was replaced.
+	part     context.Context
+	stopPart context.CancelFunc
 
 	// tableOnce and table are the command table, built on first use.
 	tableOnce sync.Once
@@ -336,11 +345,13 @@ func (h *handler) Register(_ context.Context) error {
 
 // Close implements feature.Feature.
 //
-// It stops answering, which is what lets the app build this feature again with
-// new configuration while the bot runs: without it the second instance would sit
-// beside the first and every command would be answered twice.
+// It stops answering and then stops the work that was already running, in that
+// order: nothing new can arrive, and what was in flight ends here rather than
+// outliving the feature. Both are what lets the app build this feature again with
+// new configuration while the bot runs.
 func (h *handler) Close(context.Context) error {
 	h.router.Stop()
+	h.stopPart()
 	return nil
 }
 
