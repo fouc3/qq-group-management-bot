@@ -4,9 +4,26 @@ import (
 	"context"
 	"time"
 
+	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
+
+// joinBarrierAware is a feature that takes the list of barred applicants.
+type joinBarrierAware interface {
+	SetBlacklist(joinrequest.Blacklist)
+}
+
+// blacklistAdminAware is a feature that takes the blacklist to manage.
+//
+// Two interfaces rather than one, and both are declared here, because a feature
+// can only have one method called SetBlacklist: the two features want different
+// things from the same list, and the compiler is what tells them apart. The
+// interfaces name a feature package each, which is why they live in the
+// composition root beside the adapter.
+type blacklistAdminAware interface {
+	SetBlacklist(admincmd.Blacklist)
+}
 
 // barredFromJoining answers the join-request feature from the blacklist in the
 // data layer.

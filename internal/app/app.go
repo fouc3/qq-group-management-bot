@@ -103,16 +103,22 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 		return errors.New("app: no feature is enabled; turn one on under features:")
 	}
 	// Features that drive another feature are wired here, after both are built
-	// and before any event can arrive.
-	if err := feature.InjectVerifier(features); err != nil {
+	// and before any event can arrive. Each of these is one capability: what one
+	// feature promises another, and what a consumer says when nothing promised it
+	// anything. Every wiring is logged, so "which feature got what" is answerable
+	// from a start rather than by reading the type assertions.
+	if err := feature.InjectVerifier(features, logger); err != nil {
 		closeFeatures(ctx, features, logger)
 		return err
 	}
-	feature.InjectAdminDirectory(features)
+	if err := feature.InjectAdminDirectory(features, logger); err != nil {
+		closeFeatures(ctx, features, logger)
+		return err
+	}
 	// The judge is handed over before registration, for the same reason: the
 	// command that reports content must never be reachable while it still has
 	// nothing behind it.
-	if err := feature.InjectModeration(features); err != nil {
+	if err := feature.InjectModeration(features, logger); err != nil {
 		closeFeatures(ctx, features, logger)
 		return err
 	}
@@ -122,22 +128,19 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 	// the wiring above so that nothing can be reconfigured before it is connected.
 	go watchReloads(ctx, configPath, cfg, features, logger)
 	// The blacklist is handed over here as well, before anything is registered,
-	// so no request can arrive while the feature is still on its empty default.
-	for _, instance := range features {
-		if aware, ok := instance.(interface {
-			SetBlacklist(joinrequest.Blacklist)
-		}); ok {
-			aware.SetBlacklist(barredFromJoining{blacklist: database.Blacklist()})
-		}
-		// The command feature takes the list itself, with no adapter: it manages
-		// entries rather than asking a question about an applicant, and the two
-		// shapes already match.
-		if aware, ok := instance.(interface {
-			SetBlacklist(admincmd.Blacklist)
-		}); ok {
-			aware.SetBlacklist(database.Blacklist())
-		}
-	}
+	// so no request can arrive while a feature is still on its empty default.
+	//
+	// Two shapes of the one list, because the two features want different things
+	// from it: the join-request feature asks whether an applicant is barred, and
+	// the command feature manages the entries. The first goes through the adapter
+	// in blacklist.go, which is the only reason these are two calls rather than
+	// one.
+	feature.Inject[joinrequest.Blacklist, joinBarrierAware](features,
+		barredFromJoining{blacklist: database.Blacklist()}, "the data layer",
+		"the join barrier", logger, joinBarrierAware.SetBlacklist)
+	feature.Inject[admincmd.Blacklist, blacklistAdminAware](features,
+		database.Blacklist(), "the data layer", "the blacklist", logger,
+		blacklistAdminAware.SetBlacklist)
 	for _, instance := range features {
 		if err := instance.Register(ctx); err != nil {
 			closeFeatures(ctx, features, logger)

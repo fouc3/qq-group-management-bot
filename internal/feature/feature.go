@@ -215,19 +215,14 @@ type AdminAware interface {
 
 // InjectAdminDirectory hands the administrator list to every feature that
 // wants it.
-func InjectAdminDirectory(features []Feature) {
-	var directory AdminDirectory
-	for _, instance := range features {
-		if candidate, ok := instance.(AdminDirectory); ok {
-			directory = candidate
-			break
-		}
+func InjectAdminDirectory(features []Feature, logger *slog.Logger) error {
+	directory, providedBy, err := FindProvider[AdminDirectory](features, "the administrator list")
+	if err != nil {
+		return err
 	}
-	for _, instance := range features {
-		if aware, ok := instance.(AdminAware); ok {
-			aware.SetAdminDirectory(directory)
-		}
-	}
+	Inject[AdminDirectory, AdminAware](features, directory, providedBy,
+		"the administrator list", logger, AdminAware.SetAdminDirectory)
+	return nil
 }
 
 // Verifier is what the administrator commands need from the join verification
@@ -399,24 +394,13 @@ type VerifierAware interface {
 // It is the only place that knows both sides, which is what keeps the features
 // from depending on each other. A nil verifier is handed over when no feature
 // provides verification, so the receiver can say so instead of failing later.
-func InjectVerifier(features []Feature) error {
-	var verifier Verifier
-	var providers []string
-	for _, instance := range features {
-		if candidate, ok := instance.(Verifier); ok {
-			verifier = candidate
-			providers = append(providers, instance.Name())
-		}
+func InjectVerifier(features []Feature, logger *slog.Logger) error {
+	verifier, providedBy, err := FindProvider[Verifier](features, "verification")
+	if err != nil {
+		return err
 	}
-	if len(providers) > 1 {
-		return fmt.Errorf("feature: %s both provide verification",
-			strings.Join(providers, " and "))
-	}
-	for _, instance := range features {
-		if aware, ok := instance.(VerifierAware); ok {
-			aware.SetVerifier(verifier)
-		}
-	}
+	Inject[Verifier, VerifierAware](features, verifier, providedBy, "verification",
+		logger, VerifierAware.SetVerifier)
 	return nil
 }
 
@@ -431,24 +415,13 @@ type ModerationAware interface {
 // nil judgement source, which is how a deployment without moderation tells a
 // member that the command has nothing behind it, rather than pretending to judge
 // and answering nothing.
-func InjectModeration(features []Feature) error {
-	var moderation Moderation
-	var providers []string
-	for _, instance := range features {
-		if candidate, ok := instance.(Moderation); ok {
-			moderation = candidate
-			providers = append(providers, instance.Name())
-		}
+func InjectModeration(features []Feature, logger *slog.Logger) error {
+	moderation, providedBy, err := FindProvider[Moderation](features, "moderation")
+	if err != nil {
+		return err
 	}
-	if len(providers) > 1 {
-		return fmt.Errorf("feature: %s both provide moderation",
-			strings.Join(providers, " and "))
-	}
-	for _, instance := range features {
-		if aware, ok := instance.(ModerationAware); ok {
-			aware.SetModeration(moderation)
-		}
-	}
+	Inject[Moderation, ModerationAware](features, moderation, providedBy, "moderation",
+		logger, ModerationAware.SetModeration)
 	return nil
 }
 
