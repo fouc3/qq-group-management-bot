@@ -5,13 +5,20 @@ import (
 	"strings"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 )
 
 // The command list is written down once, here.
 //
-// The help text a member can ask for and the instruction panel the platform
-// shows are both built from it. Two lists would drift, and the panel is the one
-// that goes quietly out of date: nobody re-reads a panel they cannot see.
+// The help text a member can ask for, the instruction panel the platform shows
+// and the dispatcher that runs a command are all built from it. Written apart
+// they would drift, and the panel is the one that goes quietly out of date:
+// nobody re-reads a panel they cannot see.
+//
+// No other file in this package names a command. A command added here is added
+// to the dispatch, the help and the panel at once, and a word that would invoke
+// two of them is refused at startup instead of quietly shadowing one.
 
 // panelRemark marks the panel this bot owns.
 //
@@ -20,78 +27,97 @@ import (
 // finds the panel it published rather than leaving a second one behind.
 const panelRemark = "qq-group-management-bot 指令面板"
 
-// command is one thing the bot answers.
-type command struct {
-	// name invokes it. It is written with the prefix wherever it is shown, so
-	// what a member copies is what the bot accepts.
-	name string
-	// usage is the help line, which may explain more than one line's worth.
-	usage string
-	// desc is the panel's explanation. The platform caps an entry at thirty
-	// characters counting a Chinese character as two, so this stays short.
-	desc string
-	// adminOnly hides the entry from ordinary members in the panel. It mirrors
-	// the check the bot makes when the command arrives; it does not replace it,
-	// and it is only a convenience: anybody can still type the command.
-	adminOnly bool
-	// unregistered keeps a command out of the panel while leaving it in the
-	// help. /debug is one -- a tool for whoever runs the bot, not an entry to
-	// put in front of a group.
-	unregistered bool
-}
-
-// commands lists what the bot answers, in the order it is shown.
-func commands(prefix string) []command {
-	return []command{
+// commandDefs is what the bot answers, in the order it is shown.
+func (h *handler) commandDefs() []command.Def {
+	return []command.Def{
 		{
-			name:  "菜单",
-			usage: prefix + "菜单 —— 显示这份列表",
-			desc:  "显示可用命令",
+			Name:    "菜单",
+			Aliases: []string{"menu", "help", "帮助"},
+			Usage:   "{prefix}菜单 —— 显示这份列表",
+			Desc:    "显示可用命令",
+			// The list is help rather than a management action, so it is answered
+			// for every member. "你没有权限使用管理命令。" would only puzzle
+			// somebody asking what the bot can do, and it reveals nothing a
+			// member could not already see when an administrator mistypes a
+			// command.
+			Audience: command.Everyone,
+			Run:      h.menuCommand,
+			// A single chat answers it with its own list rather than a line of
+			// its own, which is why PrivateUsage is left out: a line here would
+			// be a line added to that list.
+			Private: h.privateMenu,
 		},
 		{
-			name:      "whois",
-			usage:     prefix + "whois —— 查看本群与成员的 openid（用于填配置）",
-			desc:      "查看本群与成员 openid",
-			adminOnly: true,
+			Name:  "whois",
+			Usage: "{prefix}whois —— 查看本群与成员的 openid（用于填配置）",
+			Desc:  "查看本群与成员 openid",
+			// The one command answered in a group the bot's own list does not
+			// name yet: running it there is how a group's openid is discovered,
+			// and until that is written down nothing else can be configured.
+			Audience:            command.Whois,
+			InUnconfiguredGroup: true,
+			Run:                 h.whoisCommand,
 		},
 		{
-			name: "禁言",
-			usage: prefix + "禁言 <时长> [@目标]，顺序随意（30s / 10m / 2h / 1d，或 30秒 / 10分 / 2小时 / 1天）" +
+			Name:    "禁言",
+			Aliases: []string{"mute"},
+			Usage: "{prefix}禁言 <时长> [@目标]，顺序随意（30s / 10m / 2h / 1d，或 30秒 / 10分 / 2小时 / 1天）" +
 				"\n（@ 取不到目标时，可改为回复引用目标的消息）",
-			desc:      "禁言成员，最长 29 天",
-			adminOnly: true,
+			Desc:     "禁言成员，最长 29 天",
+			Audience: command.Admins,
+			Run:      h.muteCommand,
 		},
 		{
-			name:      "解禁",
-			usage:     prefix + "解禁 [@目标] —— 解除禁言；正在验证中的成员不受此命令影响",
-			desc:      "解除禁言",
-			adminOnly: true,
+			Name:     "解禁",
+			Aliases:  []string{"unmute"},
+			Usage:    "{prefix}解禁 [@目标] —— 解除禁言；正在验证中的成员不受此命令影响",
+			Desc:     "解除禁言",
+			Audience: command.Admins,
+			Run:      h.unmuteCommand,
 		},
 		{
-			name:      "重新发送验证",
-			usage:     prefix + "重新发送验证 [@目标] —— 给正在验证中的成员重发验证通知",
-			desc:      "重发验证通知",
-			adminOnly: true,
+			Name:     "重新发送验证",
+			Aliases:  []string{"重发验证", "resend"},
+			Usage:    "{prefix}重新发送验证 [@目标] —— 给正在验证中的成员重发验证通知",
+			Desc:     "重发验证通知",
+			Audience: command.Admins,
+			Run:      h.resendCommand,
 		},
 		{
-			name:      "重新验证",
-			usage:     prefix + "重新验证 [@目标]",
-			desc:      "重新发起验证",
-			adminOnly: true,
+			Name:     "重新验证",
+			Aliases:  []string{"reverify", "verify"},
+			Usage:    "{prefix}重新验证 [@目标]",
+			Desc:     "重新发起验证",
+			Audience: command.Admins,
+			Run:      h.reverifyCommand,
 		},
 		{
-			name:      "黑名单",
-			usage:     prefix + "黑名单 add|remove|list —— 管理禁止加群名单（只影响加群申请，不踢人）",
-			desc:      "管理禁止加群名单",
-			adminOnly: true,
+			Name:     "黑名单",
+			Aliases:  []string{"blacklist"},
+			Usage:    "{prefix}黑名单 add|remove|list —— 管理禁止加群名单（只影响加群申请，不踢人）",
+			Desc:     "管理禁止加群名单",
+			Audience: command.Admins,
+			Run:      h.blacklistCommand,
 		},
 		{
-			// Any member may report: the people who see an advertisement are not
-			// only the administrators.
-			name: "违规举报",
-			usage: prefix + "违规举报 —— 引用一条消息举报（任何成员可用；也可写作" +
-				prefix + "违规反馈）",
-			desc: "引用消息举报违规",
+			// Reporting is for every member, which is the point of it: the people
+			// who see an advertisement are not only the administrators.
+			//
+			// That this can be said here at all is the point of the audience being
+			// a field. The check used to sit inside the switch that ran a command,
+			// so an ordinary member reporting an advertisement was answered
+			// "你没有权限使用管理命令。" -- and the tests missed it because every one
+			// of them reported as an administrator.
+			Name:     "违规举报",
+			Aliases:  []string{"违规反馈", "report"},
+			Usage:    "{prefix}违规举报 —— 引用一条消息举报（任何成员可用；也可写作{prefix}违规反馈）",
+			Desc:     "引用消息举报违规",
+			Audience: command.Everyone,
+			Run:      h.reportCommand,
+			// Offered only when there is something behind it. The judge is handed
+			// over after this table is built, which is why it is asked rather
+			// than read once.
+			Available: h.judgingEnabled,
 		},
 		{
 			// The receipt number is what a group is told when somebody is
@@ -99,63 +125,56 @@ func commands(prefix string) []command {
 			// for. It answers in a group -- about that group's records -- and in a
 			// private message with the bot, where the model's own words can be
 			// read without the group reading them too.
-			name:  "违规查询",
-			usage: prefix + "违规查询 <回执单号> —— 查看一条违规回执（任何成员可用；详细内容需管理员点击按钮）",
-			desc:  "查看违规回执",
+			Name:    "违规查询",
+			Aliases: []string{"回执", "receipt", "violation"},
+			// Any member may ask. What comes back without the button is the
+			// summary -- who was judged, what was found, what was done -- all of
+			// which this group already saw. The model's own words about a member
+			// are behind a button that only an administrator may press, and that
+			// press is checked again when it arrives.
+			Usage:        "{prefix}违规查询 <回执单号> —— 查看一条违规回执（任何成员可用；详细内容需管理员点击按钮）",
+			Desc:         "查看违规回执",
+			Audience:     command.Everyone,
+			Run:          h.receiptCommand,
+			Private:      h.privateReceipt,
+			PrivateUsage: "{prefix}违规查询 <回执单号> —— 查看一条违规判定的详细记录",
 		},
 		{
-			name:         "debug",
-			usage:        prefix + "debug 超时测试 [@目标]（需开启调试）",
-			desc:         "调试用",
-			unregistered: true,
+			Name:  "debug",
+			Usage: "{prefix}debug 超时测试 [@目标]（需开启调试）",
+			Desc:  "调试用",
+			// A tool for whoever runs the bot, not an entry to put in front of a
+			// group. The help still lists it, because there it can say what it
+			// is.
+			Unregistered: true,
+			Audience:     command.Admins,
+			Run:          h.debug,
 		},
 	}
 }
 
-// usage is the help text a reply carries.
-func usage(prefix string) string {
-	lines := []string{"可用命令："}
-	for _, entry := range commands(prefix) {
-		lines = append(lines, entry.usage)
-	}
-	return strings.Join(lines, "\n")
+// judgingEnabled reports whether there is a judge behind the report command.
+func (h *handler) judgingEnabled() bool {
+	return h.moderation != nil && h.moderation.JudgingEnabled()
+}
+
+// usageText is the help a group is answered with.
+func (h *handler) usageText() string {
+	return "可用命令：" + strings.Join(h.commands().Usage(h.cfg.Prefix), "\n")
+}
+
+// privateUsageText is what a single chat shows as available.
+func (h *handler) privateUsageText() string {
+	return strings.Join(h.commands().PrivateUsage(h.cfg.Prefix), "\n")
 }
 
 // panelItems renders the table as panel entries.
 //
-// only_admin is deliberately left unset, even for the commands that really are
-// administrative. The platform reads that flag as "the group or channel
-// administrators", which is its own notion of the role -- the group owner and
-// whoever they appointed. What this bot obeys is the administrator list in the
-// configuration, and the two are different sets.
-//
-// Sending the flag would therefore hide management commands from exactly the
-// people the configuration names, whenever one of them holds no platform role.
-// The bot refuses an ordinary member when the command arrives, which is the
-// check that matters; the panel is a menu, not a lock.
-//
-// adminOnly in the table is kept anyway: it records which commands are
-// administrative, so the next person can see the intent next to the command.
+// Why the panel is a menu rather than a lock -- only_admin is never sent, and an
+// entry with nothing behind it is left out -- is documented where the panel is
+// rendered, in the command package.
 func (h *handler) panelItems() []qqbotsdk.PanelItem {
-	var items []qqbotsdk.PanelItem
-	for _, entry := range commands(h.cfg.Prefix) {
-		if entry.unregistered {
-			continue
-		}
-		// An entry is only worth a place in the menu when there is something
-		// behind it: a command whose only answer is that it is not configured is
-		// worse than no command at all. The help still lists it, because there it
-		// can say why.
-		if entry.name == "违规举报" && (h.moderation == nil || !h.moderation.JudgingEnabled()) {
-			continue
-		}
-		items = append(items, qqbotsdk.PanelItem{
-			Name: h.cfg.Prefix + entry.name,
-			Desc: entry.desc,
-			Type: qqbotsdk.PanelItemCommand,
-		})
-	}
-	return items
+	return h.commands().Panel(h.cfg.Prefix)
 }
 
 // publishCommands registers the command list as the group instruction panel.

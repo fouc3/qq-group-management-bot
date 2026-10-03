@@ -9,6 +9,7 @@ import (
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -29,7 +30,7 @@ const reportRateLimitPerHour = 5
 // advertisement are not only the administrators. Nothing else about managing the
 // group is reachable this way.
 func (h *handler) reportCommand(ctx context.Context,
-	data *qqbotsdk.GroupMessageCreateData, _ parsedCommand) error {
+	data *qqbotsdk.GroupMessageCreateData, _ command.Parsed) error {
 	if h.moderation == nil {
 		h.reply(ctx, data, "本机器人没有配置违规检测，无法送检。")
 		return nil

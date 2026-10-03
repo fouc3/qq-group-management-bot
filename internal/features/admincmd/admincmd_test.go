@@ -66,33 +66,6 @@ func TestParseDuration(t *testing.T) {
 	}
 }
 
-// TestParseCommand covers the prefix and the mention the platform leaves in the
-// text when the bot receives every group message.
-func TestParseCommand(t *testing.T) {
-	command, ok := parseCommand("/禁言 30m", "/")
-	if !ok {
-		t.Fatal("a plain command should parse")
-	}
-	if command.name != "禁言" || len(command.args) != 1 || command.args[0] != "30m" {
-		t.Errorf("command = %+v", command)
-	}
-
-	// In full receive mode the mention of the bot stays in the text.
-	command, ok = parseCommand("<@BOT-OPENID> /mute 1h", "/")
-	if !ok {
-		t.Fatal("a mention before the command should be stripped")
-	}
-	if command.name != "mute" || command.args[0] != "1h" {
-		t.Errorf("command = %+v", command)
-	}
-
-	for _, bad := range []string{"", "禁言 30m", "/", "  ", "hello /禁言"} {
-		if _, ok := parseCommand(bad, "/"); ok {
-			t.Errorf("parseCommand(%q) should not have matched", bad)
-		}
-	}
-}
-
 // TestHumanDuration mirrors what the operator typed.
 func TestHumanDuration(t *testing.T) {
 	cases := map[time.Duration]string{
@@ -771,6 +744,30 @@ func TestWhoisAnswersInAGroupThatIsNotConfiguredYet(t *testing.T) {
 	}
 	if !strings.Contains(reply, "ADMIN-OPENID") {
 		t.Errorf("reply = %q, want the sender's own openid", reply)
+	}
+}
+
+// TestWhoisInAGroupTheBotDoesNotManageNamesNobodyElse covers the half of the
+// administrator check that is about the group rather than about the member.
+//
+// An administrator list is written per group, and a group the bot is not in can
+// still have one. /whois answers there -- that is how the group gets configured
+// at all -- and what it must report is the sender, whoever the sender administers
+// somewhere the bot does manage.
+func TestWhoisInAGroupTheBotDoesNotManageNamesNobodyElse(t *testing.T) {
+	h := newHarness(t, baseSection+`
+  UNCONFIGURED-GROUP:
+    admins: ["ADMIN-OPENID"]
+`)
+	h.send("<@BOT-OPENID> /whois <@TARGET-OPENID>", testAdmin, "UNCONFIGURED-GROUP",
+		"BOT-OPENID", testTarget)
+
+	reply := h.lastReply()
+	if !strings.Contains(reply, "UNCONFIGURED-GROUP") {
+		t.Errorf("reply = %q, want the group's own openid", reply)
+	}
+	if strings.Contains(reply, "被 @ 的 member_openid") {
+		t.Errorf("reply = %q, want nothing about another member", reply)
 	}
 }
 

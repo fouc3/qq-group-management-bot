@@ -9,6 +9,7 @@ import (
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -187,7 +188,7 @@ func TestATemporaryQuoteReachesTheJudgement(t *testing.T) {
 
 	if err := h.handler.reportCommand(context.Background(),
 		quotedReport("TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 
@@ -224,7 +225,7 @@ func TestAReportWithoutAQuoteTeachesHow(t *testing.T) {
 	judge := &stubJudge{}
 	h := reportHarness(t, judge)
 
-	if err := h.handler.reportCommand(context.Background(), quotedReport(""), parsedCommand{}); err != nil {
+	if err := h.handler.reportCommand(context.Background(), quotedReport(""), command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	if judge.judged != 0 {
@@ -241,7 +242,7 @@ func TestAReportWithoutModerationSaysSo(t *testing.T) {
 	h := newHarness(t, baseSection)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-1"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	if reply := h.lastReply(); !strings.Contains(reply, "没有配置") {
@@ -275,7 +276,7 @@ func TestAViolationIsChangedAndSaid(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	// Held at the gate, so this is the line the group sees first, and seeing it
@@ -338,7 +339,7 @@ func TestDryRunTouchesNobody(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	reply := waitForReply(t, h, "试运行")
@@ -364,7 +365,7 @@ func TestNoJudgementTouchesNobody(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	reply := waitForReply(t, h, "送检失败")
@@ -426,7 +427,7 @@ func TestAnUnfoundedReportCanCostTheReporter(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-1"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	reply := waitForReply(t, h, "未发现违规")
@@ -459,7 +460,7 @@ func TestAReportAboutYourselfCostsHalf(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	reply := waitForReply(t, h, "判定为")
@@ -494,7 +495,7 @@ func TestAnOrdinaryReportCostsTheFullTime(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	reply := waitForReply(t, h, "判定为")
@@ -521,7 +522,7 @@ func TestTheReporterIsNotPunishedByDefault(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-1"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	reply := waitForReply(t, h, "未发现违规")

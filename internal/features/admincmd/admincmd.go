@@ -6,11 +6,8 @@
 // with an explanation, because the platform gives the bot no way to address a
 // member by their QQ number.
 //
-// Supported commands, with the English alias beside each:
-//
-//	/禁言 <时长> [@目标]      /mute
-//	/重新验证 [@目标]         /reverify
-//	/debug 超时测试 [@目标]   /debug timeout
+// What the bot answers, who may run it, where it is shown and what runs it are
+// one table, in commandlist.go. Nothing else in this package names a command.
 //
 // Durations accept a number with a unit: 30s 30秒, 10m 10分 10分钟, 2h 2小时,
 // 1d 1天.
@@ -31,6 +28,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -149,30 +147,30 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	return &handler{cfg: cfg, deps: deps, seen: map[string]time.Time{}}, nil
+	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter()}
+	// The table is validated here, so that a word invoking two commands stops the
+	// bot at startup rather than leaving one of them answering nothing at all.
+	if _, err := command.NewCatalog(h.commandDefs()); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
-// firstSight reports whether this message has not been handled yet.
+// commands is the table this feature answers.
 //
-// Entries older than a minute are dropped, because the same message is never
-// delivered twice after that.
-func (h *handler) firstSight(messageID string) bool {
-	if messageID == "" {
-		return true
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	now := time.Now()
-	for id, at := range h.seen {
-		if now.Sub(at) > time.Minute {
-			delete(h.seen, id)
+// It is built once and on demand, because a handler built by hand -- which is
+// what a test does when it wants one narrow method of it -- has no table yet.
+func (h *handler) commands() *command.Catalog {
+	h.tableOnce.Do(func() {
+		table, err := command.NewCatalog(h.commandDefs())
+		if err != nil {
+			// New refuses this before the table is ever reached this way, so
+			// there is nobody left to report the mistake to.
+			panic("admincmd: " + err.Error())
 		}
-	}
-	if _, already := h.seen[messageID]; already {
-		return false
-	}
-	h.seen[messageID] = now
-	return true
+		h.table = table
+	})
+	return h.table
 }
 
 // handler implements feature.Feature.
@@ -187,12 +185,16 @@ type handler struct {
 	// bot in a message looks like. Empty when it could not be read.
 	botOpenID string
 
-	// mu guards seen, which stops one message being acted on twice.
+	// router is how the handlers below reach the events a command arrives in,
+	// and it holds the record of the messages already acted on.
+	router *command.Router
+
+	// tableOnce and table are the command table, built on first use.
+	tableOnce sync.Once
+	table     *command.Catalog
+
+	// mu guards reports, which is where one member's rate limit is counted.
 	mu sync.Mutex
-	// seen holds the message ids handled recently. A full receive group can
-	// report the same message as both a mention event and an ordinary one, and
-	// acting twice would mute twice and answer twice.
-	seen map[string]time.Time
 
 	// receiptsMu guards receipts, which is what a receipt's buttons point at:
 	// the detailed message a recall button will take back. It is held separately
@@ -290,28 +292,25 @@ func (h *handler) Register(_ context.Context) error {
 	panelCtx, panelCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	h.publishCommands(panelCtx)
 	panelCancel()
-	// Both event types are always read, and require_mention is enforced on the
-	// message itself instead.
+	// Which events a command can arrive in is the command layer's knowledge, not
+	// this feature's. The router reads both group event types, because which one
+	// carries a message depends on the group's receive setting rather than on the
+	// message, and it reads a single chat and a button press as well.
 	//
-	// Which event carries a mention depends on the group's receive setting, not
-	// on the command: a group set to receive everything delivers a message that
-	// mentions the bot as GROUP_MESSAGE_CREATE, as production showed, while a
-	// mention-only group delivers the same message as GROUP_AT_MESSAGE_CREATE.
-	// Registering only one of them made the bot unable to see commands at all
-	// in one of the two modes. A message that arrives as both is handled once,
-	// because handler.firstSight drops the second delivery.
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, h.onMessage)
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, h.onMessage)
-	// A single chat carries one command and nothing else: reading a receipt,
-	// which is the only way an administrator can see the model's own words about
-	// a member without the group reading them too. It is registered whatever the
+	// A single chat carries one command and nothing else: reading a receipt, which
+	// is the only way an administrator can see the model's own words about a
+	// member without the group reading them too. It is registered whatever the
 	// configuration says about receipts, because the handler decides what to
 	// answer rather than the registration.
-	h.deps.Client.RegisterFunc(qqbotsdk.EventC2CMessageCreate, h.onPrivateMessage)
-	// The buttons under a receipt. Every feature that listens for interactions
-	// is handed every press, so the handler starts by asking whether the button
-	// is one of ours.
-	h.deps.Client.RegisterFunc(qqbotsdk.EventInteractionCreate, h.onInteraction)
+	//
+	// A message that arrives twice, as both group types, is handled once: the
+	// record the router hands over drops the second delivery, and each path below
+	// asks it at the point where dropping is safe.
+	h.router.Register(h.deps.Client, command.Handlers{
+		Group:       h.onMessage,
+		Private:     h.onPrivateMessage,
+		Interaction: h.onInteraction,
+	})
 	h.deps.Logger.Info("administrator commands are ready",
 		"prefix", h.cfg.Prefix, "debug", h.cfg.Debug,
 		"require_mention", h.mentionsRequired(),
@@ -352,42 +351,21 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		return nil
 	}
 	if !h.deps.InGroup(data.GroupOpenID) {
-		// A group that is not configured yet still has to answer /whois. Running
-		// it there is how a group gets configured at all: its openid is the first
-		// thing the file needs, and until then nothing else can be set up.
-		//
-		// Every other command is dropped, because there would be no
-		// administrator list to check the sender against, and the command
-		// handling below is built around one. The sender is never an
-		// administrator here, so they see only their own openid.
-		command, ok := parseCommand(data.Content, h.cfg.Prefix)
-		if !ok || command.name != "whois" {
-			return nil
-		}
-		if h.mentionsRequired() && !h.botWasMentioned(event, command) {
-			return nil
-		}
-		if !h.firstSight(data.ID) {
-			return nil
-		}
-		h.deps.Logger.Info("answering /whois in a group that is not configured yet",
-			"group", data.GroupOpenID, "member", data.Author.MemberOpenID)
-		h.whois(ctx, data, false)
-		return nil
+		return h.unconfiguredGroup(ctx, event, data)
 	}
 
-	if !h.firstSight(data.ID) {
+	if !h.router.Seen.First(data.ID) {
 		// The same message arrived as a second event type.
 		return nil
 	}
 
-	command, ok := parseCommand(data.Content, h.cfg.Prefix)
+	cmd, ok := command.Parse(data.Content, h.cfg.Prefix)
 	if !ok {
 		return nil
 	}
 	// With require_mention on, a command counts only when the message reached
 	// the bot because it was mentioned.
-	if h.mentionsRequired() && !h.botWasMentioned(event, command) {
+	if h.mentionsRequired() && !h.botWasMentioned(event, cmd) {
 		return nil
 	}
 	sender := data.Author.MemberOpenID
@@ -395,69 +373,118 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		return nil
 	}
 
-	group, known := h.cfg.Groups[data.GroupOpenID]
-	isAdmin := known && contains(group.Admins, sender)
-
-	if command.name == "whois" {
-		// A group with no administrators is one being set up, and /whois is how
-		// its administrator list gets written, so it stays open until then.
-		//
-		// There is deliberately no "is a group administrator" branch beside
-		// this one. The platform refuses to let this application read a member's
-		// role or the member list at all (40012010 应用无接口访问权限, measured),
-		// so such a branch could never answer yes and would only look like a
-		// check that exists. OneBot can read the roles, but it reports QQ numbers
-		// while the bot is only ever given an openid, and nothing converts one
-		// into the other. The rule in force is therefore exactly this: the
-		// configured administrators, plus the setting-up case.
-		settingUp := !known || len(group.Admins) == 0
-		if isAdmin || settingUp || !h.whoisAdminOnly() {
-			h.whois(ctx, data, isAdmin)
-			return nil
-		}
-		h.deps.Logger.Warn("refused /whois for a member who is not an administrator",
-			"group", data.GroupOpenID, "member", sender)
-		h.reply(ctx, data, "你没有权限使用管理命令。")
-		return nil
+	def, listed := h.commands().Lookup(cmd.Name)
+	if !listed {
+		// A word the table does not hold still goes through the audience check
+		// first: an administrator who mistyped is answered with the list of what
+		// the bot does hold, and anybody else is refused like any other management
+		// command. Run stays nil, which is what comes back.
+		def = command.Def{Audience: command.Admins}
 	}
-
-	switch command.name {
-	case "菜单", "menu", "help", "帮助":
-		// The list is help rather than a management action, so it is answered
-		// for every member: "你没有权限使用管理命令。" would only puzzle somebody
-		// asking what the bot can do, and it reveals nothing a member could not
-		// already see when an administrator mistypes a command.
-		h.reply(ctx, data, usage(h.cfg.Prefix))
-		return nil
-	case "违规查询", "回执", "receipt", "violation":
-		// Any member may ask. What comes back without the button is the summary:
-		// who was judged, what was found, what was done -- all of which this
-		// group already saw. The model's own words about a member are behind a
-		// button that only an administrator may press, and that press is checked
-		// again when it arrives.
-		return h.receiptCommand(ctx, data, command)
-	case "违规举报", "违规反馈", "report":
-		// Reporting is for every member, which is the point of it: the people who
-		// see an advertisement are not only the administrators. What follows a
-		// report is decided by the judgement and the configuration, never by who
-		// raised it, so nothing about managing the group is reachable this way.
-		//
-		// Dispatched here, above the administrator check, and the placement is the
-		// fix for a real bug: the report used to be handled inside the switch behind
-		// that gate, so every ordinary member was answered "你没有权限使用管理命令。"
-		// The tests missed it because every one of them reported as an administrator.
-		return h.reportCommand(ctx, data, command)
-	}
-
-	if !isAdmin {
-		h.deps.Logger.Warn("refused a command from a member who is not on the administrator list",
-			"group", data.GroupOpenID, "member", sender, "command", command.name)
-		h.reply(ctx, data, "你没有权限使用管理命令。")
+	if !h.allows(def, h.viewerOf(data.GroupOpenID, sender)) {
+		h.deny(ctx, data, cmd.Name, sender)
 		return nil
 	}
 	h.deps.Logger.Info("an administrator command arrived",
-		"group", data.GroupOpenID, "member", sender, "command", command.name)
-	return h.run(ctx, data, group, command)
+		"group", data.GroupOpenID, "member", sender, "command", cmd.Name)
+	if def.Run == nil {
+		h.reply(ctx, data, h.usageText())
+		return nil
+	}
+	return def.Run(ctx, data, cmd)
+}
+
+// unconfiguredGroup answers a group that the bot's own group list does not name.
+//
+// Such a group still has to answer the one command that configures it: running
+// it there is how a group gets configured at all, since its openid is the first
+// thing the file needs and until then nothing else can be set up. Every other
+// command is dropped, because there would be no administrator list to check the
+// sender against. The sender is never an administrator here, so they see only
+// their own openid.
+//
+// The record of handled messages is asked after the mention test rather than
+// before it, and the order is load-bearing: a group set to receive everything can
+// report one message as both a mention event and an ordinary one, and only the
+// delivery that mentions the bot is the one to answer. Recording the first
+// sighting would drop the second, and the command would answer nothing at all.
+func (h *handler) unconfiguredGroup(ctx context.Context, event *qqbotsdk.Event,
+	data *qqbotsdk.GroupMessageCreateData) error {
+	cmd, ok := command.Parse(data.Content, h.cfg.Prefix)
+	if !ok {
+		return nil
+	}
+	def, listed := h.commands().Lookup(cmd.Name)
+	if !listed || !def.InUnconfiguredGroup {
+		return nil
+	}
+	if h.mentionsRequired() && !h.botWasMentioned(event, cmd) {
+		return nil
+	}
+	if !h.router.Seen.First(data.ID) {
+		return nil
+	}
+	h.deps.Logger.Info("answering /whois in a group that is not configured yet",
+		"group", data.GroupOpenID, "member", data.Author.MemberOpenID)
+	return def.Run(ctx, data, cmd)
+}
+
+// viewer is who is asking, about one group.
+type viewer struct {
+	// isAdmin reports whether the sender is on the group's administrator list.
+	isAdmin bool
+	// settingUp reports whether the group names no administrator yet, which is
+	// the state the one command that writes that list stays open for.
+	settingUp bool
+}
+
+// viewerOf reports who a member is to a group.
+func (h *handler) viewerOf(groupOpenID, memberOpenID string) viewer {
+	group, known := h.cfg.Groups[groupOpenID]
+	return viewer{
+		isAdmin:   known && contains(group.Admins, memberOpenID),
+		settingUp: !known || len(group.Admins) == 0,
+	}
+}
+
+// allows reports whether a command may be run by this viewer.
+//
+// This is the whole of the audience rule, read off the table instead of written
+// again for every command: what the table says a command is restricted to is what
+// the bot enforces, and the two cannot come apart.
+//
+// There is deliberately no "is a group administrator" branch in the Whois case.
+// The platform refuses to let this application read a member's role or the
+// member list at all (40012010 应用无接口访问权限, measured), so such a branch
+// could never answer yes and would only look like a check that exists. OneBot can
+// read the roles, but it reports QQ numbers while the bot is only ever given an
+// openid, and nothing converts one into the other.
+func (h *handler) allows(def command.Def, who viewer) bool {
+	switch def.Audience {
+	case command.Everyone:
+		return true
+	case command.Whois:
+		return who.isAdmin || who.settingUp || !h.whoisAdminOnly()
+	default:
+		return who.isAdmin
+	}
+}
+
+// deny refuses a command to a member who may not run it.
+//
+// reported is the word as it was typed, which is what the log line carries: a
+// command that was refused may not be one the table holds, so there is not
+// always a name of ours to log.
+func (h *handler) deny(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	reported, sender string) {
+	if reported == "whois" {
+		h.deps.Logger.Warn("refused /whois for a member who is not an administrator",
+			"group", data.GroupOpenID, "member", sender)
+	} else {
+		h.deps.Logger.Warn("refused a command from a member who is not on the administrator list",
+			"group", data.GroupOpenID, "member", sender, "command", reported)
+	}
+	h.reply(ctx, data, "你没有权限使用管理命令。")
 }
 
 // whoisAdminOnly reports whether /whois is restricted to administrators.
@@ -478,7 +505,7 @@ func (h *handler) whoisAdminOnly() bool {
 // showed what that costs: "@AIRY /菜单" was answered, because AIRY's mention led
 // the message just as the bot's would. A command that runs whenever anybody
 // mentions anybody is not a command that requires a mention.
-func (h *handler) botWasMentioned(event *qqbotsdk.Event, command parsedCommand) bool {
+func (h *handler) botWasMentioned(event *qqbotsdk.Event, cmd command.Parsed) bool {
 	if event.Type == qqbotsdk.EventGroupAtMessageCreate {
 		return true
 	}
@@ -487,9 +514,9 @@ func (h *handler) botWasMentioned(event *qqbotsdk.Event, command parsedCommand) 
 		// checked against it. Refusing every command would be worse than
 		// accepting a leading mention, so that is what is left; the warning is
 		// logged once, when the openid is looked for.
-		return command.botOpenID != ""
+		return cmd.BotOpenID != ""
 	}
-	return command.botOpenID == h.botOpenID
+	return cmd.BotOpenID == h.botOpenID
 }
 
 // readBotOpenID asks the platform who the bot is, using one of the configured
@@ -603,78 +630,112 @@ func (h *handler) whois(ctx context.Context, data *qqbotsdk.GroupMessageCreateDa
 	h.reply(ctx, data, strings.Join(lines, "\n"))
 }
 
-// run dispatches one command.
-func (h *handler) run(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
-	group GroupConfig, command parsedCommand) error {
-	// The target is resolved inside the branches that need one. Resolving it
-	// here made every command answer "请 @ 目标成员" before its own logic could
-	// run, which is what turned /菜单 into a complaint about a missing target
-	// instead of the command list.
-	switch command.name {
-	case "禁言", "mute":
-		target, err := targetOf(data, command)
-		if err != nil {
-			h.reply(ctx, data, err.Error())
-			return nil
-		}
-		limit, err := group.longestMute()
-		if err != nil {
-			return err
-		}
-		return h.mute(ctx, data, command, target, limit)
-	case "重新验证", "reverify", "verify":
-		target, err := targetOf(data, command)
-		if err != nil {
-			h.reply(ctx, data, err.Error())
-			return nil
-		}
-		if h.verifier == nil {
-			h.reply(ctx, data, "本机器人没有启用入群验证功能。")
-			return nil
-		}
-		if err := h.verifier.Reverify(ctx, data.GroupOpenID, target); err != nil {
-			h.deps.Logger.Error("re-verification failed", "error", err)
-			h.reply(ctx, data, "重新验证失败："+err.Error())
-			return nil
-		}
-		h.reply(ctx, data, "已重新发出验证。")
-		return nil
-	case "解禁", "unmute":
-		target, err := targetOf(data, command)
-		if err != nil {
-			h.reply(ctx, data, err.Error())
-			return nil
-		}
-		return h.unmute(ctx, data, target)
-	case "重新发送验证", "重发验证", "resend":
-		target, err := targetOf(data, command)
-		if err != nil {
-			h.reply(ctx, data, err.Error())
-			return nil
-		}
-		return h.resendVerification(ctx, data, target)
-	case "黑名单", "blacklist":
-		return h.blacklistCommand(ctx, data, command)
-	case "debug":
-		return h.debug(ctx, data, command)
-	default:
-		h.reply(ctx, data, usage(h.cfg.Prefix))
+// The runners below are what the table points at, one per command. They are
+// separate functions rather than branches of one switch because the table names
+// them: a command's definition and what the command does are written together,
+// and neither can be added without the other.
+//
+// The target is resolved inside the runner that needs one. Resolving it for
+// every command made every command answer "请 @ 目标成员" before its own logic
+// could run, which is what turned /菜单 into a complaint about a missing target
+// instead of the command list.
+
+// menuCommand answers with the list of what the bot does.
+func (h *handler) menuCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	_ command.Parsed) error {
+	h.reply(ctx, data, h.usageText())
+	return nil
+}
+
+// whoisCommand reports the group, the bot's own standing in it, and the
+// identifiers of this message.
+//
+// It asks whether the sender administers the group rather than being told, and it
+// asks about a group the bot manages: /whois is the one command answered in a
+// group that is not configured at all, and nobody administers a group the bot
+// does not manage. Without that half, an administrator list written for a group
+// the bot is not in would be enough to have this command name other members
+// there.
+func (h *handler) whoisCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	_ command.Parsed) error {
+	isAdmin := h.deps.InGroup(data.GroupOpenID) &&
+		h.IsAdmin(data.GroupOpenID, senderOpenID(data))
+	h.whois(ctx, data, isAdmin)
+	return nil
+}
+
+// muteCommand applies a command mute.
+func (h *handler) muteCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	cmd command.Parsed) error {
+	target, err := targetOf(data, cmd)
+	if err != nil {
+		h.reply(ctx, data, err.Error())
 		return nil
 	}
+	// The group is known here, because only its administrators reach this and
+	// that list is where the check read them from.
+	limit, err := h.cfg.Groups[data.GroupOpenID].longestMute()
+	if err != nil {
+		return err
+	}
+	return h.mute(ctx, data, cmd, target, limit)
+}
+
+// unmuteCommand lifts a member's mute.
+func (h *handler) unmuteCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	cmd command.Parsed) error {
+	target, err := targetOf(data, cmd)
+	if err != nil {
+		h.reply(ctx, data, err.Error())
+		return nil
+	}
+	return h.unmute(ctx, data, target)
+}
+
+// reverifyCommand holds a member again and sends a fresh prompt.
+func (h *handler) reverifyCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	cmd command.Parsed) error {
+	target, err := targetOf(data, cmd)
+	if err != nil {
+		h.reply(ctx, data, err.Error())
+		return nil
+	}
+	if h.verifier == nil {
+		h.reply(ctx, data, "本机器人没有启用入群验证功能。")
+		return nil
+	}
+	if err := h.verifier.Reverify(ctx, data.GroupOpenID, target); err != nil {
+		h.deps.Logger.Error("re-verification failed", "error", err)
+		h.reply(ctx, data, "重新验证失败："+err.Error())
+		return nil
+	}
+	h.reply(ctx, data, "已重新发出验证。")
+	return nil
+}
+
+// resendCommand posts the verification prompt again for a member already waiting.
+func (h *handler) resendCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	cmd command.Parsed) error {
+	target, err := targetOf(data, cmd)
+	if err != nil {
+		h.reply(ctx, data, err.Error())
+		return nil
+	}
+	return h.resendVerification(ctx, data, target)
 }
 
 // debug handles the /debug subcommands.
 func (h *handler) debug(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
-	command parsedCommand) error {
+	cmd command.Parsed) error {
 	if !h.cfg.Debug {
 		h.reply(ctx, data, "调试功能未开启。")
 		return nil
 	}
-	if len(command.args) == 0 {
+	if len(cmd.Args) == 0 {
 		h.reply(ctx, data, "用法："+h.cfg.Prefix+"debug 超时测试 [@目标]")
 		return nil
 	}
-	sub := command.args[0]
+	sub := cmd.Args[0]
 	switch sub {
 	case "超时测试", "timeout":
 		if h.verifier == nil {
@@ -683,7 +744,7 @@ func (h *handler) debug(ctx context.Context, data *qqbotsdk.GroupMessageCreateDa
 		}
 		// Only this subcommand needs a target, so it is resolved here rather
 		// than for the debug command as a whole.
-		target, err := targetOf(data, command)
+		target, err := targetOf(data, cmd)
 		if err != nil {
 			h.reply(ctx, data, err.Error())
 			return nil
@@ -712,7 +773,7 @@ func durationIn(args []string) (time.Duration, error) {
 	}
 	var lastErr error
 	for _, arg := range args {
-		if mentionInText.MatchString(arg) {
+		if _, mentioned := command.FirstMention(arg); mentioned {
 			continue
 		}
 		parsed, err := parseDuration(arg)
@@ -798,19 +859,19 @@ func (h *handler) resendVerification(ctx context.Context,
 // accepted because the two cases are genuinely different: somebody in the group
 // can be mentioned, while an entry for somebody who never applied here has an
 // openid from somewhere else and no way to be mentioned at all.
-func blacklistTarget(command parsedCommand) (string, string, error) {
-	if len(command.args) < 2 {
+func blacklistTarget(cmd command.Parsed) (string, string, error) {
+	if len(cmd.Args) < 2 {
 		return "", "", errors.New("请 @ 目标成员，或直接给出 openid：" +
-			command.name + " <@目标|openid> [原因]")
+			cmd.Name + " <@目标|openid> [原因]")
 	}
-	key := command.args[1]
-	if match := mentionInText.FindStringSubmatch(key); match != nil {
-		key = match[1]
+	key := cmd.Args[1]
+	if mentioned, found := command.FirstMention(key); found {
+		key = mentioned
 	}
 	if strings.TrimSpace(key) == "" {
 		return "", "", errors.New("没有识别出 openid")
 	}
-	return key, strings.Join(command.args[2:], " "), nil
+	return key, strings.Join(cmd.Args[2:], " "), nil
 }
 
 // blacklistCommand manages the list of applicants barred from joining.
@@ -819,21 +880,21 @@ func blacklistTarget(command parsedCommand) (string, string, error) {
 // who is already in one, and nothing here undoes anything by itself: the list
 // only decides how a join request is answered.
 func (h *handler) blacklistCommand(ctx context.Context,
-	data *qqbotsdk.GroupMessageCreateData, command parsedCommand) error {
+	data *qqbotsdk.GroupMessageCreateData, cmd command.Parsed) error {
 	if h.blacklist == nil {
 		h.reply(ctx, data, "本机器人没有可用的数据层，黑名单命令不可用。")
 		return nil
 	}
 	prefix := h.cfg.Prefix
-	if len(command.args) == 0 {
+	if len(cmd.Args) == 0 {
 		h.reply(ctx, data, "用法：\n"+prefix+"黑名单 add <@目标|openid> [原因]\n"+
 			prefix+"黑名单 remove <@目标|openid>\n"+prefix+"黑名单 list")
 		return nil
 	}
 
-	switch command.args[0] {
+	switch cmd.Args[0] {
 	case "add", "添加", "加":
-		key, reason, err := blacklistTarget(command)
+		key, reason, err := blacklistTarget(cmd)
 		if err != nil {
 			h.reply(ctx, data, err.Error())
 			return nil
@@ -864,7 +925,7 @@ func (h *handler) blacklistCommand(ctx context.Context,
 		return nil
 
 	case "remove", "移除", "删除", "del":
-		key, _, err := blacklistTarget(command)
+		key, _, err := blacklistTarget(cmd)
 		if err != nil {
 			h.reply(ctx, data, err.Error())
 			return nil
@@ -925,7 +986,7 @@ func (h *handler) blacklistCommand(ctx context.Context,
 		return nil
 
 	default:
-		h.reply(ctx, data, "未知的黑名单子命令："+command.args[0]+
+		h.reply(ctx, data, "未知的黑名单子命令："+cmd.Args[0]+
 			"。可用：add / remove / list")
 		return nil
 	}
@@ -943,13 +1004,13 @@ func blacklistHas(entries []store.Barred, key string) bool {
 
 // mute applies a command mute to the target.
 func (h *handler) mute(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
-	command parsedCommand, target string, limit time.Duration) error {
+	cmd command.Parsed, target string, limit time.Duration) error {
 	// The duration may come before or after the target: both orders read
 	// naturally, and the target itself comes from the mention rather than from
 	// an argument, so its position carries no meaning. An argument that is a
 	// mention is skipped instead of being read as a duration, which is what
 	// made "/禁言 @某人 5d" fail with 无法识别的时长 "@某人".
-	wanted, err := durationIn(command.args)
+	wanted, err := durationIn(cmd.Args)
 	if err != nil {
 		h.reply(ctx, data, err.Error())
 		return nil
@@ -978,9 +1039,6 @@ func (h *handler) mute(ctx context.Context, data *qqbotsdk.GroupMessageCreateDat
 	return nil
 }
 
-// mentionInText matches a mention left in the message text as markup.
-var mentionInText = regexp.MustCompile(`<@!?([0-9A-Za-z_-]{8,})>`)
-
 // targetOf returns the member a command acts on.
 //
 // The target must be mentioned: the platform exposes a member to the bot only
@@ -999,18 +1057,18 @@ var mentionInText = regexp.MustCompile(`<@!?([0-9A-Za-z_-]{8,})>`)
 // mention-only group delivered "/重新验证 @某人" as content " /重新验证  " with an
 // empty mentions list, so the mention was removed entirely and neither of the
 // first two shapes could work.
-func targetOf(data *qqbotsdk.GroupMessageCreateData, command parsedCommand) (string, error) {
+func targetOf(data *qqbotsdk.GroupMessageCreateData, cmd command.Parsed) (string, error) {
 	// The text comes first: the mention of the bot has already been removed
 	// from it, so anything still mentioned is the target.
-	if match := mentionInText.FindStringSubmatch(command.tail); match != nil {
-		return match[1], nil
+	if mentioned, found := command.FirstMention(cmd.Tail); found {
+		return mentioned, nil
 	}
 	// Then the list, skipping the bot's own mention. A full receive event lists
 	// every mention in the order they appear, so the bot is usually first and
 	// taking the first entry would try to act on the bot itself, which the
 	// platform refuses with 40103004.
 	for _, mention := range data.Mentions {
-		if mention.MemberOpenID == "" || mention.MemberOpenID == command.botOpenID {
+		if mention.MemberOpenID == "" || mention.MemberOpenID == cmd.BotOpenID {
 			continue
 		}
 		return mention.MemberOpenID, nil
@@ -1022,7 +1080,7 @@ func targetOf(data *qqbotsdk.GroupMessageCreateData, command parsedCommand) (str
 	}
 	return "", fmt.Errorf("请 @ 目标成员，或**回复引用**目标的消息。平台限制：机器人无法用 QQ 号"+
 		"指定成员；而在本群的“仅 @ 时接收”模式下，@ 目标的名字会被平台抹掉（命令 %s）",
-		command.name)
+		cmd.Name)
 }
 
 // replyWithKeyboard answers in the group with buttons under the answer.
@@ -1068,46 +1126,6 @@ func (h *handler) replyPrivatelyWithKeyboard(ctx context.Context,
 		h.deps.Logger.Warn("could not answer a private command",
 			"member", data.Author.UserOpenID, "error", err)
 	}
-}
-
-// parsedCommand is one recognised command.
-type parsedCommand struct {
-	// name is the command word, as written.
-	name string
-	// args are the words after it.
-	args []string
-	// tail is the message with the leading mention of the bot removed.
-	//
-	// The target is searched for in here rather than in the raw content,
-	// because a message that starts by mentioning the bot would otherwise offer
-	// the bot itself as the first candidate.
-	tail string
-	// botOpenID is the member the message opened by mentioning, which is the
-	// bot itself. It has to be named explicitly because a full receive event
-	// lists every mention, the bot included, whatever the documentation says.
-	botOpenID string
-}
-
-// mentionMarkup matches the mention the platform leaves in the text when the
-// bot runs in full receive mode.
-var mentionMarkup = regexp.MustCompile(`^\s*<@!?([0-9A-Za-z_-]+)>\s*`)
-
-// parseCommand reads a command out of a message.
-func parseCommand(content, prefix string) (parsedCommand, bool) {
-	botOpenID := ""
-	if match := mentionMarkup.FindStringSubmatch(content); match != nil {
-		botOpenID = match[1]
-	}
-	text := mentionMarkup.ReplaceAllString(content, "")
-	text = strings.TrimSpace(text)
-	if !strings.HasPrefix(text, prefix) {
-		return parsedCommand{}, false
-	}
-	words := strings.Fields(strings.TrimPrefix(text, prefix))
-	if len(words) == 0 {
-		return parsedCommand{}, false
-	}
-	return parsedCommand{name: words[0], args: words[1:], tail: text, botOpenID: botOpenID}, true
 }
 
 // durationPattern matches a number with a unit, in either script.

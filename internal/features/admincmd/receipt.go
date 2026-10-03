@@ -12,6 +12,7 @@ import (
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -73,13 +74,6 @@ func (h *handler) receiptSentence(judgementID string) string {
 	return "回执单号 " + commandInput(h.cfg.Prefix+"违规查询 "+receipt, receipt) + "。"
 }
 
-// receiptNames are the command names that ask for one receipt.
-//
-// Written once because the group path and the private path have to answer to
-// exactly the same words: a name that worked in a group and not in a single
-// chat would look like the feature being broken rather than being scoped.
-var receiptNames = []string{"违规查询", "回执", "receipt", "violation"}
-
 // receiptCommand answers /违规查询 in the group it was asked in.
 //
 // Any member may ask. That is the point of the summary being what it is: it holds
@@ -92,8 +86,8 @@ var receiptNames = []string{"违规查询", "回执", "receipt", "violation"}
 // in this group" rather than where the record really is: the second sentence would
 // tell an ordinary member that the number exists somewhere.
 func (h *handler) receiptCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
-	command parsedCommand) error {
-	ask := strings.TrimSpace(strings.Join(command.args, " "))
+	cmd command.Parsed) error {
+	ask := strings.TrimSpace(strings.Join(cmd.Args, " "))
 	if ask == "" {
 		h.reply(ctx, data, "用法：/违规查询 <回执单号>。回执单号在每次判定为违规时会一起发出来。")
 		return nil
@@ -138,37 +132,54 @@ func (h *handler) onPrivateMessage(ctx context.Context, event *qqbotsdk.Event) e
 	// a message that is dropped would otherwise leave no trace at all.
 	h.deps.Logger.Debug("a private message arrived",
 		"member", data.Author.UserOpenID, "message", data.ID, "content", data.Content)
-	if !h.firstSight(data.ID) {
+	if !h.router.Seen.First(data.ID) {
 		return nil
 	}
 	return h.privateCommand(ctx, data)
 }
 
-// privateCommand answers the same command in a single chat.
+// privateCommand answers a command in a single chat.
 //
-// Private is where a receipt can be read in full without the group seeing it,
-// which is the point of allowing it at all -- and it is also the reason the
-// check here is per record rather than a flat "is an administrator somewhere":
-// what the sender may see is exactly the records of the groups they administer,
-// and nothing else.
+// Which commands a single chat answers is the table's business, not a list kept
+// here: a command that answers in a group and in a single chat says so once, in
+// its own definition, and one that does not is not offered there.
 func (h *handler) privateCommand(ctx context.Context, data *qqbotsdk.C2CMessageCreateData) error {
-	command, ok := parseCommand(data.Content, h.cfg.Prefix)
+	cmd, ok := command.Parse(data.Content, h.cfg.Prefix)
 	if !ok {
 		// A single chat with the bot is not a place to answer everything that is
 		// typed into it. Only something that is plainly a command gets an answer.
 		return nil
 	}
-	switch command.name {
-	case "菜单", "menu", "help", "帮助":
-		h.replyPrivately(ctx, data, privateUsage(h.cfg.Prefix))
-		return nil
+	if def, listed := h.commands().Lookup(cmd.Name); listed && def.Private != nil {
+		return def.Private(ctx, data, cmd)
 	}
+	h.replyPrivately(ctx, data, "私聊只支持："+h.privateUsageText())
+	return nil
+}
 
-	ask := strings.TrimSpace(strings.Join(command.args, " "))
-	if !contains(receiptNames, command.name) {
-		h.replyPrivately(ctx, data, "私聊只支持："+privateUsage(h.cfg.Prefix))
-		return nil
-	}
+// privateMenu answers the command list in a single chat.
+//
+// What comes back is the single chat's own list and not the group's: a group
+// command typed into a single chat is not answered at all, so listing it would
+// advertise something that does not work. The words are the same ones anyway,
+// because a member who has learnt /菜单 should not have to learn a second name to
+// find out what a single chat can do.
+func (h *handler) privateMenu(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
+	_ command.Parsed) error {
+	h.replyPrivately(ctx, data, h.privateUsageText())
+	return nil
+}
+
+// privateReceipt answers /违规查询 in a single chat.
+//
+// Private is where a receipt can be read in full without the group seeing it,
+// which is the point of allowing it at all -- and it is also the reason the
+// check behind the buttons is per record rather than a flat "is an administrator
+// somewhere": what the sender may see is exactly the records of the groups they
+// administer, and nothing else.
+func (h *handler) privateReceipt(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
+	cmd command.Parsed) error {
+	ask := strings.TrimSpace(strings.Join(cmd.Args, " "))
 	if ask == "" {
 		h.replyPrivately(ctx, data, "用法：/违规查询 <回执单号>。")
 		return nil
@@ -486,11 +497,6 @@ func orNone(value string) string {
 		return "无"
 	}
 	return value
-}
-
-// privateUsage is what a single chat can be asked for.
-func privateUsage(prefix string) string {
-	return prefix + "违规查询 <回执单号> —— 查看一条违规判定的详细记录"
 }
 
 // The button payloads that mark a keyboard as this feature's, and as which of

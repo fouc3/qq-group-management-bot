@@ -12,6 +12,7 @@ import (
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
@@ -559,7 +560,7 @@ func TestTheGroupReplyCarriesTheReceiptNumber(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	waitFor(t, func() bool { return h.lastReply() != reportWaiting })
@@ -615,7 +616,7 @@ func TestAMessageThatCouldNotBeWithdrawnIsNotMarked(t *testing.T) {
 	h := reportHarness(t, judge)
 	h.failDeletes = true
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	waitFor(t, func() bool { return h.lastReply() != reportWaiting })
@@ -650,7 +651,7 @@ func TestADryRunCarriesTheSameTappableReceipt(t *testing.T) {
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
-		parsedCommand{}); err != nil {
+		command.Parsed{}); err != nil {
 		t.Fatalf("reportCommand: %v", err)
 	}
 	waitFor(t, func() bool { return h.lastReply() != reportWaiting })
