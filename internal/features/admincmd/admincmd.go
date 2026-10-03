@@ -147,7 +147,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter()}
+	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(deps.Buttons)}
 	// The table is validated here, so that a word invoking two commands stops the
 	// bot at startup rather than leaving one of them answering nothing at all.
 	if _, err := command.NewCatalog(h.commandDefs()); err != nil {
@@ -306,11 +306,26 @@ func (h *handler) Register(_ context.Context) error {
 	// A message that arrives twice, as both group types, is handled once: the
 	// record the router hands over drops the second delivery, and each path below
 	// asks it at the point where dropping is safe.
-	h.router.Register(h.deps.Client, command.Handlers{
-		Group:       h.onMessage,
-		Private:     h.onPrivateMessage,
-		Interaction: h.onInteraction,
-	})
+	//
+	// The two keyboards are claimed by name rather than looked for in every
+	// press: the button's own data is the only thing that says whose it is, and
+	// a press now reaches this feature only when it carries one of these
+	// namespaces. Both are answered wherever a press arrives, which is what this
+	// feature did before the claim was written down -- a claim says where a press
+	// is answered, not where the button is put, and the detail button really is
+	// under a summary in a single chat as well as in a group.
+	if err := h.router.Register(h.deps.Client, command.Handlers{
+		Group:   h.onMessage,
+		Private: h.onPrivateMessage,
+		Buttons: []command.ButtonClaim{
+			{Namespace: receiptDetailPrefix, Scenes: command.InGroup | command.InPrivate,
+				Handle: h.showDetailsPress},
+			{Namespace: receiptRecallPrefix, Scenes: command.InGroup | command.InPrivate,
+				Handle: h.recallDetailsPress},
+		},
+	}); err != nil {
+		return err
+	}
 	h.deps.Logger.Info("administrator commands are ready",
 		"prefix", h.cfg.Prefix, "debug", h.cfg.Debug,
 		"require_mention", h.mentionsRequired(),

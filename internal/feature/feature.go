@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/fouc3/onebot-ext/onebot"
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -53,6 +54,14 @@ type Deps struct {
 	// Lifted out of the configuration the way Groups and JoinTolerance are, so
 	// that a feature which caches something does not have to read the file.
 	Redis config.Redis
+	// Buttons is where the feature claims the button presses it answers.
+	//
+	// One registry is shared by every feature of a bot, because a bot has one
+	// connection and therefore one dispatcher: a feature that made its own would
+	// answer presses the others also see, and a press carries nothing but its
+	// button's data to say whose it is. Build hands one over, and a feature built
+	// without it -- which is what a test builds -- gets one of its own.
+	Buttons *command.Buttons
 }
 
 // InGroup reports whether the feature should act on a group.
@@ -133,6 +142,13 @@ func (r *Registry) Build(cfg *config.Config, deps Deps) ([]Feature, error) {
 	}
 
 	built := make([]Feature, 0, len(r.order))
+	// One registry of button namespaces for the features of one bot. The presses
+	// arrive on the single connection they share, so the dispatcher that routes
+	// them is shared too, and it has to exist before the first of them registers
+	// a claim in it.
+	if deps.Buttons == nil {
+		deps.Buttons = command.NewButtons()
+	}
 	for _, name := range r.order {
 		section, configured := cfg.Feature(name)
 		if !configured {

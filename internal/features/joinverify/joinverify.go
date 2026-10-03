@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/fouc3/onebot-ext/onebot"
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -504,7 +505,6 @@ func (v *verifier) Intents() qqbotsdk.Intent {
 func (v *verifier) Register(_ context.Context) error {
 	v.registrations = append(v.registrations,
 		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberAdd, v.onMemberAdd),
-		v.deps.Client.RegisterFunc(qqbotsdk.EventInteractionCreate, v.onInteraction),
 		// A held member can still speak for as long as their hold takes to
 		// apply, so their messages are watched as well as their joins. Both
 		// event types are registered because which one carries a group message
@@ -512,6 +512,26 @@ func (v *verifier) Register(_ context.Context) error {
 		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, v.onHeldMemberMessage),
 		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, v.onHeldMemberMessage),
 	)
+	// The verification button is claimed by the namespace its data carries rather
+	// than looked for in every press. A press arrives with nothing but its
+	// button's data to say whose it is, so the registry is what settles that once
+	// instead of every feature deciding for itself.
+	//
+	// The dispatcher it declares is deliberately not in v.registrations: it is
+	// shared with the other features that claim buttons, so cancelling it here
+	// would take their presses with it. Nothing removes a feature from a running
+	// bot, which is the only case where that would matter.
+	buttons := command.ButtonsOrOwn(v.deps.Buttons)
+	if err := buttons.Claim(command.ButtonClaim{
+		Namespace: buttonPrefix,
+		// A verification button is only ever put in a group, and a press the
+		// platform reports as coming from a single chat is not ours to act on.
+		Scenes: command.InGroup,
+		Handle: v.onInteractionPress,
+	}); err != nil {
+		return err
+	}
+	buttons.Register(v.deps.Client)
 	v.warnAboutRemoval()
 	go v.sweep()
 	// One line per group, because the rules are per group now.
@@ -1017,12 +1037,16 @@ func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, 
 	return nil
 }
 
-// onInteraction handles INTERACTION_CREATE.
-func (v *verifier) onInteraction(ctx context.Context, event *qqbotsdk.Event) error {
-	token, data, ours := verificationClick(event)
-	if !ours {
-		// Another feature's button, a private chat press, or an interaction
-		// that is not a button press at all.
+// onInteractionPress answers a press of the verification button.
+//
+// The routing happened before this was called: a press reaches here when its
+// button carries this feature's namespace and came from a group. What is left for
+// this handler to decide is whether the press names anything it is holding.
+func (v *verifier) onInteractionPress(ctx context.Context, press command.Press) error {
+	token, data := press.Payload, press.Data
+	if token == "" {
+		// The namespace and nothing after it. There is no member to look up, and
+		// answering would report a failure for a button nobody made.
 		return nil
 	}
 	log := v.deps.Logger.With("group", data.GroupOpenID, "member", data.GroupMemberOpenID)
@@ -1035,7 +1059,7 @@ func (v *verifier) onInteraction(ctx context.Context, event *qqbotsdk.Event) err
 		return v.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
 	}
 	if data.GroupOpenID != entry.groupOpenID || data.GroupMemberOpenID != entry.memberOpenID {
-		return v.foreignPress(ctx, event, data, entry)
+		return v.foreignPress(ctx, data, press.EventID, entry)
 	}
 
 	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings.DryRun); err != nil {
@@ -1050,7 +1074,7 @@ func (v *verifier) onInteraction(ctx context.Context, event *qqbotsdk.Event) err
 	if err := v.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
 		log.Error("the member verified but the press went unanswered", "error", err)
 	}
-	v.greet(ctx, event, entry)
+	v.greet(ctx, press.EventID, entry)
 	return nil
 }
 
@@ -1062,8 +1086,8 @@ func (v *verifier) onInteraction(ctx context.Context, event *qqbotsdk.Event) err
 // other presser is refused, and the entry stays alive so the member the button
 // belongs to can still verify: otherwise anybody could lock another member out
 // by pressing their button once.
-func (v *verifier) foreignPress(ctx context.Context, event *qqbotsdk.Event,
-	data *qqbotsdk.InteractionCreateData, entry *pending) error {
+func (v *verifier) foreignPress(ctx context.Context,
+	data *qqbotsdk.InteractionCreateData, eventID string, entry *pending) error {
 	log := v.deps.Logger.With("group", entry.groupOpenID, "member", entry.memberOpenID)
 
 	if v.admins == nil || !v.admins.IsAdmin(entry.groupOpenID, data.GroupMemberOpenID) {
@@ -1085,19 +1109,19 @@ func (v *verifier) foreignPress(ctx context.Context, event *qqbotsdk.Event,
 	if err := v.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
 		log.Error("the skip went unanswered", "error", err)
 	}
-	v.notify(ctx, event, entry.groupOpenID, renderTemplate(entry.settings.SkipMessage,
+	v.notify(ctx, eventID, entry.groupOpenID, renderTemplate(entry.settings.SkipMessage,
 		map[string]string{"{target}": atTag(entry.memberOpenID)}))
 	return nil
 }
 
 // notify posts a message as a passive reply to an interaction event.
-func (v *verifier) notify(ctx context.Context, event *qqbotsdk.Event, groupOpenID, text string) {
+func (v *verifier) notify(ctx context.Context, eventID, groupOpenID, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
 	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
-	if _, err := v.sendMarkdown(notifyCtx, groupOpenID, text, event.ID); err != nil {
+	if _, err := v.sendMarkdown(notifyCtx, groupOpenID, text, eventID); err != nil {
 		v.deps.Logger.Warn("could not post a notice", "error", err)
 	}
 }
@@ -1123,11 +1147,11 @@ func (v *verifier) answer(ctx context.Context, interactionID string, code qqbots
 // It replies to the interaction event rather than starting a new conversation,
 // which the send documentation allows for INTERACTION_CREATE and which keeps
 // the message inside the passive quota.
-func (v *verifier) greet(ctx context.Context, event *qqbotsdk.Event, entry *pending) {
+func (v *verifier) greet(ctx context.Context, eventID string, entry *pending) {
 	if strings.TrimSpace(entry.settings.PassMessage) == "" {
 		return
 	}
-	v.notify(ctx, event, entry.groupOpenID, entry.settings.PassMessage)
+	v.notify(ctx, eventID, entry.groupOpenID, entry.settings.PassMessage)
 }
 
 // ask sends the prompt with the verification button.
@@ -1346,32 +1370,4 @@ func renderTemplate(text string, values map[string]string) string {
 		rendered = strings.ReplaceAll(rendered, placeholder, value)
 	}
 	return strings.TrimSpace(rendered)
-}
-
-// verificationClick reports whether an event is a press of one of our buttons
-// in a group, and returns the token it carries.
-func verificationClick(event *qqbotsdk.Event) (string, *qqbotsdk.InteractionCreateData, bool) {
-	value, err := event.Decode()
-	if err != nil {
-		return "", nil, false
-	}
-	data, ok := value.(*qqbotsdk.InteractionCreateData)
-	if !ok {
-		return "", nil, false
-	}
-	if data.Scene != qqbotsdk.InteractionSceneGroup {
-		return "", nil, false
-	}
-	if data.Data == nil || data.Data.Resolved == nil {
-		return "", nil, false
-	}
-	buttonData := data.Data.Resolved.ButtonData
-	if !strings.HasPrefix(buttonData, buttonPrefix) {
-		return "", nil, false
-	}
-	token := strings.TrimPrefix(buttonData, buttonPrefix)
-	if token == "" || data.GroupMemberOpenID == "" || data.GroupOpenID == "" {
-		return "", nil, false
-	}
-	return token, data, true
 }

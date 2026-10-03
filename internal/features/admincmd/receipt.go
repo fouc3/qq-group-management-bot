@@ -630,24 +630,18 @@ func (h *handler) dropExpiredReceipts() {
 	}
 }
 
-// onInteraction handles a press of one of this feature's buttons.
-func (h *handler) onInteraction(ctx context.Context, event *qqbotsdk.Event) error {
-	data, ok := receiptClick(event)
-	if !ok {
-		// Another feature's button, a single chat press, or an interaction that
-		// is not a button press at all.
-		return nil
-	}
-	buttonData := data.Data.Resolved.ButtonData
-	switch {
-	case strings.HasPrefix(buttonData, receiptDetailPrefix):
-		return h.showDetails(ctx, data,
-			strings.TrimPrefix(buttonData, receiptDetailPrefix))
-	case strings.HasPrefix(buttonData, receiptRecallPrefix):
-		return h.recallDetails(ctx, data,
-			strings.TrimPrefix(buttonData, receiptRecallPrefix))
-	}
-	return nil
+// showDetailsPress answers the button that asks for the rest of a receipt.
+//
+// The routing happened before this was called: a press reaches here when its
+// button carries the detail namespace, and what the payload holds is the receipt
+// the button was made for.
+func (h *handler) showDetailsPress(ctx context.Context, press command.Press) error {
+	return h.showDetails(ctx, press.Data, press.Payload)
+}
+
+// recallDetailsPress answers the button that takes a detailed receipt back.
+func (h *handler) recallDetailsPress(ctx context.Context, press command.Press) error {
+	return h.recallDetails(ctx, press.Data, press.Payload)
 }
 
 // showDetails answers the button that asks for the rest of a receipt.
@@ -770,46 +764,6 @@ func (h *handler) answer(ctx context.Context, interactionID string,
 		return fmt.Errorf("answering the interaction: %w", err)
 	}
 	return nil
-}
-
-// receiptClick reports whether an event is a press of one of this feature's
-// buttons.
-//
-// A receipt is read in a group and in a single chat, so both scenes are ours. The
-// scene is what says where the answer goes and who the presser is, which is why it
-// is checked here rather than assumed later.
-func receiptClick(event *qqbotsdk.Event) (*qqbotsdk.InteractionCreateData, bool) {
-	value, err := event.Decode()
-	if err != nil {
-		return nil, false
-	}
-	data, ok := value.(*qqbotsdk.InteractionCreateData)
-	if !ok {
-		return nil, false
-	}
-	switch data.Scene {
-	case qqbotsdk.InteractionSceneGroup:
-		// The presser and the group are both required: without them there is
-		// nothing to check the permission against and nowhere to answer.
-		if data.GroupOpenID == "" || data.GroupMemberOpenID == "" {
-			return nil, false
-		}
-	case qqbotsdk.InteractionSceneC2C:
-		if data.UserOpenID == "" {
-			return nil, false
-		}
-	default:
-		return nil, false
-	}
-	if data.Data == nil || data.Data.Resolved == nil {
-		return nil, false
-	}
-	buttonData := data.Data.Resolved.ButtonData
-	if !strings.HasPrefix(buttonData, receiptDetailPrefix) &&
-		!strings.HasPrefix(buttonData, receiptRecallPrefix) {
-		return nil, false
-	}
-	return data, true
 }
 
 // interactionPresser is who pressed a button.
