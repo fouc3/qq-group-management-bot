@@ -160,7 +160,7 @@ func TestABroadcastCanBeWrittenInASingleChat(t *testing.T) {
 	var posted []string
 	for _, message := range p.sent[before:] {
 		markdown, _ := message["markdown"].(map[string]any)
-		if text, _ := markdown["content"].(string); strings.Contains(text, divider) {
+		if text, _ := markdown["content"].(string); strings.HasPrefix(text, "来自") {
 			posted = append(posted, text)
 		}
 	}

@@ -16,11 +16,19 @@ import (
 // the press arrives with no other clue.
 const buttonPrefix = "qgb-broadcast:"
 
-// divider is the line between what a broadcast says about itself and what it says.
+// markdownRule is the divider the platform draws itself.
 //
-// A run of characters rather than the markdown rule, which the platform's subset
-// does not promise to draw.
-const divider = "————————————"
+// Three dashes alone on a line are a horizontal rule in markdown, so a message the
+// platform renders gets the divider it draws rather than one made of characters.
+const markdownRule = "---"
+
+// plainDivider is the divider for a message the platform does not render.
+//
+// A run of characters, because the rule above is only a rule when markdown is rendered:
+// taken literally it is three dashes, which looks like a mistake rather than a divider.
+// Rich text would be the third case and is not supported, so the rule here is the one a
+// message that is not rendered needs.
+const plainDivider = "————————————"
 
 // labelLimit is what a button's label holds.
 //
@@ -250,8 +258,13 @@ func (h *handler) broadcastText(s *session) string {
 	if s.anonymous == off {
 		header = "来自 <@" + s.chat + "> 的广播"
 	}
+	// The divider follows the same switch the body does: a message the platform renders
+	// gets the divider the platform draws, and one it does not gets characters instead,
+	// because the rule would come out as three literal dashes there.
+	divider := markdownRule
 	body := s.content
 	if s.markdown == off {
+		divider = plainDivider
 		body = escapeMarkdown(body)
 	}
 	return header + "\n" + divider + "\n" + body

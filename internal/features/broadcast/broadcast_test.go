@@ -116,23 +116,57 @@ func TestTheBroadcastIsPostedAsWritten(t *testing.T) {
 	p.press(t, "发送", theAdmin)
 
 	// What was posted, told from what was said about it: the answer the administrator
-	// reads afterwards is a message as well.
+	// reads afterwards is a message as well. Told apart by the header, which only a posted
+	// notice has.
 	var posted []string
 	for _, message := range p.sent[before:] {
 		markdown, _ := message["markdown"].(map[string]any)
-		if text, _ := markdown["content"].(string); strings.Contains(text, divider) {
+		if text, _ := markdown["content"].(string); strings.HasPrefix(text, "来自") {
 			posted = append(posted, text)
 		}
 	}
 	if len(posted) != 1 {
 		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
 	}
-	want := "来自管理员的广播\n" + divider + "\n第一行\n第二行"
+	// Rendered as markdown, so the divider is the rule the platform draws rather than a
+	// line of characters.
+	want := "来自管理员的广播\n" + markdownRule + "\n第一行\n第二行"
 	if posted[0] != want {
 		t.Errorf("the group reads:\n%q\nwant:\n%q", posted[0], want)
 	}
 	if len(p.recalls) == 0 {
 		t.Error("the card and the preview were left behind in the group")
+	}
+}
+
+// TestTheDividerFollowsTheRendering covers what separates the two dividers: the rule the
+// platform draws only is a rule when markdown is rendered, and the same message taken
+// literally would show it as three dashes.
+func TestTheDividerFollowsTheRendering(t *testing.T) {
+	rendered := newPlatform(t)
+	rendered.start(t, theAdmin)
+	rendered.choose(t, true, true)
+	rendered.press(t, "确认", theAdmin)
+	rendered.press(t, "继续", theAdmin)
+	rendered.say(t, theAdmin, "正文")
+
+	if preview := rendered.lastText(); !strings.Contains(preview, "\n"+markdownRule+"\n") {
+		t.Errorf("a rendered notice does not use the platform's own divider:\n%s", preview)
+	}
+
+	literal := newPlatform(t)
+	literal.start(t, theAdmin)
+	literal.choose(t, false, true)
+	literal.press(t, "确认", theAdmin)
+	literal.press(t, "继续", theAdmin)
+	literal.say(t, theAdmin, "正文")
+
+	preview := literal.lastText()
+	if strings.Contains(preview, "\n"+markdownRule+"\n") {
+		t.Errorf("a notice that is not rendered uses the markdown rule:\n%s", preview)
+	}
+	if !strings.Contains(preview, "\n"+plainDivider+"\n") {
+		t.Errorf("a notice that is not rendered has no divider at all:\n%s", preview)
 	}
 }
 
