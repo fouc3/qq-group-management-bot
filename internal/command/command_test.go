@@ -1,8 +1,11 @@
 package command
 
 import (
+	"context"
 	"reflect"
 	"testing"
+
+	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 )
 
 // table is a small catalog that exercises every way a definition is shown.
@@ -10,7 +13,7 @@ func table(t *testing.T) *Catalog {
 	t.Helper()
 	catalog, err := NewCatalog([]Def{
 		{Name: "菜单", Aliases: []string{"menu", "help"}, Usage: "{prefix}菜单", Desc: "显示可用命令",
-			Audience: Everyone, PrivateUsage: "{prefix}菜单",
+			Audience: Everyone, PrivateUsage: "{prefix}菜单", Private: privateRunner,
 			Panels: []PanelPlacement{{Scene: InGroup}, {Scene: InPrivate}}},
 		{Name: "禁言", Aliases: []string{"mute"}, Usage: "{prefix}禁言 <时长>", Desc: "禁言成员",
 			Audience: Admins, Panels: []PanelPlacement{{Scene: InGroup}}},
@@ -19,12 +22,22 @@ func table(t *testing.T) *Catalog {
 			Panels:    []PanelPlacement{{Scene: InGroup}}},
 		{Name: "回执", Usage: "{prefix}回执 <单号>", Desc: "查看回执", Audience: Everyone,
 			Panels: []PanelPlacement{{Scene: InPrivate}}},
+		// A help line with nothing behind it: what a single chat shows as available and
+		// what it answers have to be the same list, so this one is left out.
+		{Name: "只有说明", Usage: "{prefix}只有说明", Desc: "没有实现", Audience: Everyone,
+			PrivateUsage: "{prefix}只有说明 —— 没有实现"},
 		{Name: "debug", Usage: "{prefix}debug", Desc: "调试用", Audience: Admins},
 	})
 	if err != nil {
 		t.Fatalf("building the table: %v", err)
 	}
 	return catalog
+}
+
+// privateRunner is a single-chat answer that does nothing, for the definitions that have
+// to say one exists.
+func privateRunner(context.Context, *qqbotsdk.C2CMessageCreateData, Parsed) error {
+	return nil
 }
 
 // TestEveryWordReachesItsCommand covers the point of the index: a word written

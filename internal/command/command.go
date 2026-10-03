@@ -229,10 +229,15 @@ func (c *Catalog) Usage(prefix string) []string {
 }
 
 // PrivateUsage lists what a single chat shows as available.
+//
+// A line and a way to answer it are the same claim, so both are required: a command a
+// single chat does not answer has no line here, however it is written. Otherwise the
+// help would advertise something the dispatcher refuses, which is the one thing this
+// list exists to prevent.
 func (c *Catalog) PrivateUsage(prefix string) []string {
 	lines := make([]string, 0, len(c.defs))
 	for _, def := range c.defs {
-		if def.PrivateUsage == "" {
+		if def.PrivateUsage == "" || def.Private == nil {
 			continue
 		}
 		lines = append(lines, fillPrefix(def.PrivateUsage, prefix))

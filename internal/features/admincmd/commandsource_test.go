@@ -135,3 +135,34 @@ func TestASourceThatStopsOfferingIsGone(t *testing.T) {
 		t.Errorf("a command whose feature stopped offering it still ran: %v", ran)
 	}
 }
+
+// TestWhoisInASingleChatNamesYourOwnOpenID covers the private half of /whois.
+//
+// A group's event carries the member_openid and never the user_openid, and a setting that
+// is only read in a single chat is written with the second one. Somebody who has to be
+// named there has no other way to read it, which is why this answers for anybody rather
+// than behind the group's administrator list -- it tells them nothing but their own id.
+func TestWhoisInASingleChatNamesYourOwnOpenID(t *testing.T) {
+	h := newHarness(t, baseSection)
+	h.deliverPrivate("/whois", "USER-OPENID")
+
+	reply := h.lastPrivateReply()
+	if !strings.Contains(reply, "USER-OPENID") {
+		t.Errorf("whois in a single chat does not name the asker's own openid:\n%s", reply)
+	}
+	if !strings.Contains(reply, "member_openid") {
+		t.Errorf("whois in a single chat does not say the group's id is a different "+
+			"value:\n%s", reply)
+	}
+}
+
+// TestTheSingleChatListsWhois covers the other half of publishing it: a command nobody
+// knows can be asked in a single chat is a command that is not there.
+func TestTheSingleChatListsWhois(t *testing.T) {
+	h := newHarness(t, baseSection)
+	h.deliverPrivate("/菜单", "USER-OPENID")
+
+	if listed := h.lastPrivateReply(); !strings.Contains(listed, "whois") {
+		t.Errorf("the single chat does not offer whois:\n%s", listed)
+	}
+}

@@ -784,6 +784,31 @@ func (h *handler) whoisCommand(ctx context.Context, data *qqbotsdk.GroupMessageC
 	return nil
 }
 
+// privateWhois answers /whois in a single chat.
+//
+// There is no group to describe there, and what a single chat is good for is the one
+// identifier a group's own event never carries: the openid this member has in a private
+// conversation, which is a different value from the member_openid their group knows them
+// by. Whoever has to be named in a configuration that is read in private needs this one
+// and has no other way to read it -- the broadcast trial's whitelist is the case that
+// asked for this.
+//
+// It answers for anybody, and says only what the asker already owns: their own openid.
+// Refusing it to somebody the bot cannot place would make the one value they need
+// unreadable, and it reveals nothing about anybody else.
+func (h *handler) privateWhois(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
+	_ command.Parsed) error {
+	lines := []string{
+		"**私聊**",
+		"你的 user_openid：`" + data.Author.UserOpenID + "`",
+		"",
+		"这是你在私聊里的 openid。你在群里被认出的 member_openid 是另一个值，" +
+			"两个不能互换：填只在私聊生效的配置（比如广播内测名单）用上面这个。",
+	}
+	h.replyPrivately(ctx, data, strings.Join(lines, "\n"))
+	return nil
+}
+
 // muteCommand applies a command mute.
 func (h *handler) muteCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 	cmd command.Parsed) error {
