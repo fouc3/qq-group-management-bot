@@ -2,6 +2,8 @@ package admincmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -80,11 +82,15 @@ var receiptNames = []string{"违规查询", "回执", "receipt", "violation"}
 
 // receiptCommand answers /违规查询 in the group it was asked in.
 //
-// It is reached only from run(), which is already behind the administrator
-// check, and it answers about this group's records and no others: an
-// administrator of one group has no business reading another group's
-// punishments, and a group is the one place where a reply is read by people who
-// are not administrators at all.
+// Any member may ask. That is the point of the summary being what it is: it holds
+// nothing a model wrote about anybody, and the punishment it describes was already
+// public -- it happened in this group, in front of these people. The half that is
+// a model's words about a member stays behind a button that only an administrator
+// may press.
+//
+// It answers about this group's records and no others, and the refusal says "not
+// in this group" rather than where the record really is: the second sentence would
+// tell an ordinary member that the number exists somewhere.
 func (h *handler) receiptCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 	command parsedCommand) error {
 	ask := strings.TrimSpace(strings.Join(command.args, " "))
@@ -99,16 +105,13 @@ func (h *handler) receiptCommand(ctx context.Context, data *qqbotsdk.GroupMessag
 		return nil
 	}
 	if entry.GroupOpenID != data.GroupOpenID {
-		// Said as "no such record here" rather than "that is another group's":
-		// the second sentence tells an ordinary member that the number exists.
-		// The administrator asking is logged either way.
 		h.deps.Logger.Warn("refused a receipt from another group",
 			"group", data.GroupOpenID, "member", data.Author.MemberOpenID,
 			"receipt", ask, "belongs_to", entry.GroupOpenID)
 		h.reply(ctx, data, "本群没有这条记录。回执单号只能在它所属的群里查，或者私聊机器人查。")
 		return nil
 	}
-	h.reply(ctx, data, h.receiptText(entry))
+	h.replyWithKeyboard(ctx, data, h.receiptSummary(entry), detailKeyboard(entry.ID))
 	return nil
 }
 
@@ -176,18 +179,19 @@ func (h *handler) privateCommand(ctx context.Context, data *qqbotsdk.C2CMessageC
 		return nil
 	}
 	sender := data.Author.UserOpenID
-	if !h.IsAdmin(entry.GroupOpenID, sender) {
-		// One answer for "not an administrator anywhere" and for "an
-		// administrator of a different group", because telling them apart tells
-		// the sender which group the record belongs to.
-		h.deps.Logger.Warn("refused a private receipt for a member who does not administer it",
-			"member", sender, "receipt", ask, "group", entry.GroupOpenID)
-		h.replyPrivately(ctx, data, "你没有权限查看这条记录：只有该群的管理员可以查。")
-		return nil
+	// The summary is for anybody, for the same reason it is in a group: it is
+	// what the group was already told.
+	answer := h.receiptSummary(entry)
+	if h.IsAdmin(entry.GroupOpenID, sender) {
+		// The details go in the same message rather than behind a button. There
+		// is one reader here and they have already been checked, so a button
+		// would add a step and a way for it to fail with nothing gained -- and a
+		// keyboard in a single chat is not what this feature is here to test.
+		h.deps.Logger.Info("an administrator read a receipt privately",
+			"member", sender, "receipt", entry.ID, "group", entry.GroupOpenID)
+		answer += "\n" + h.receiptDetails(entry)
 	}
-	h.deps.Logger.Info("an administrator read a receipt privately",
-		"member", sender, "receipt", entry.ID, "group", entry.GroupOpenID)
-	h.replyPrivately(ctx, data, h.receiptText(entry))
+	h.replyPrivately(ctx, data, answer)
 	return nil
 }
 
@@ -235,15 +239,14 @@ func receiptProblem(ask string, err error) string {
 	}
 }
 
-// receiptText is one judgement written out for an administrator.
+// receiptSummary is the part of a receipt anybody may read.
 //
-// Everything the record holds is here, including the model's reason and the chain
-// of thought behind it, which are the things that never go to a group: they are
-// free text about a member, and free text from a model is not something to
-// publish. Administrators are the people a punishment has to be answerable to, so
-// they get all of it -- and the part they need most is the withdrawn message
-// itself, which no longer exists anywhere else.
-func (h *handler) receiptText(entry store.Judgement) string {
+// It is written to be short on purpose: who was judged, what was found and what
+// was done about it. Nothing a model wrote about a member is here -- no reason, no
+// chain of thought, no withdrawn text -- because this is the version a group gets,
+// and a group is the one place where free text from a model must not be published.
+// Everything else is in receiptDetails, which an administrator asks for.
+func (h *handler) receiptSummary(entry store.Judgement) string {
 	var out strings.Builder
 	out.WriteString("违规回执 " + entry.ID + "\n")
 	fmt.Fprintf(&out, "时间：%s\n",
@@ -255,8 +258,8 @@ func (h *handler) receiptText(entry store.Judgement) string {
 		verdict = "违规·" + h.categoryLabel(entry.Category)
 	}
 	fmt.Fprintf(&out, "判定：%s\n", verdict)
-	fmt.Fprintf(&out, "被判定人：%s\n", orNone(entry.SubjectOpenID))
-	fmt.Fprintf(&out, "举报人：%s\n", orNone(entry.ReporterOpenID))
+	fmt.Fprintf(&out, "被判定人：%s\n", atUser(entry.SubjectOpenID))
+	fmt.Fprintf(&out, "举报人：%s\n", atUser(entry.ReporterOpenID))
 	if entry.Model != "" {
 		fmt.Fprintf(&out, "模型：%s\n", entry.Model)
 	}
@@ -266,6 +269,19 @@ func (h *handler) receiptText(entry store.Judgement) string {
 		fmt.Fprintf(&out, "禁言时长：%s\n",
 			humanDuration(time.Duration(entry.MuteSeconds)*time.Second))
 	}
+	return out.String()
+}
+
+// receiptDetails is what an administrator asks for by pressing a button.
+//
+// This is the half that has to be kept away from a group: the model's own words
+// about a member, and the text of what was taken back. The last one is the reason
+// the record exists at all -- after a successful withdrawal nobody can read the
+// message again, not the group, not an administrator, not this bot, so the copy
+// here is the only one left anywhere.
+func (h *handler) receiptDetails(entry store.Judgement) string {
+	var out strings.Builder
+	out.WriteString("违规回执 " + entry.ID + " 详细信息\n")
 	if entry.Reason != "" {
 		fmt.Fprintf(&out, "理由：%s\n", entry.Reason)
 	}
@@ -274,6 +290,22 @@ func (h *handler) receiptText(entry store.Judgement) string {
 		fmt.Fprintf(&out, "思考过程：\n%s\n", oneBlock(entry.Reasoning, receiptReasoningLimit))
 	}
 	return out.String()
+}
+
+// atUser renders a member the way the platform's markdown expects a mention.
+//
+// An openid is not something a person can read: "被判定人：F9BBF0F4311C..." tells an
+// administrator nothing at a glance, and those two fields are exactly the two
+// facts a receipt is about. A mention renders as the member's own name.
+//
+// An empty openid becomes a word rather than an empty mention, because an empty
+// mention renders as nothing at all and would leave the line looking truncated.
+func atUser(openID string) string {
+	trimmed := strings.TrimSpace(openID)
+	if trimmed == "" {
+		return "无"
+	}
+	return `<qqbot-at-user id="` + trimmed + `"/>`
 }
 
 // writeRecalls writes what was taken back, and what was not.
@@ -386,4 +418,267 @@ func orNone(value string) string {
 // privateUsage is what a single chat can be asked for.
 func privateUsage(prefix string) string {
 	return prefix + "违规查询 <回执单号> —— 查看一条违规判定的详细记录"
+}
+
+// The button payloads that mark a keyboard as this feature's, and as which of
+// its two actions. A feature that shares a connection with another has to be able
+// to recognise its own buttons: a press is delivered to whoever listens.
+const (
+	receiptDetailPrefix = "qgb-receipt-detail:"
+	receiptRecallPrefix = "qgb-receipt-recall:"
+)
+
+// receiptRecallWindow is how long a recall button stays meaningful.
+//
+// The platform only lets a bot take back its own message for a couple of minutes,
+// so a button older than that cannot work however long the record is kept. The
+// window is generous because what matters is that the entry is gone before the
+// map grows, not that it is gone the moment the button stops working.
+const receiptRecallWindow = 30 * time.Minute
+
+// detailKeyboard is the button under a summary receipt.
+func detailKeyboard(judgementID string) *qqbotsdk.Keyboard {
+	return receiptKeyboard("receipt_detail", "显示详细信息", receiptDetailPrefix+judgementID)
+}
+
+// recallKeyboard is the button under a detailed receipt.
+func recallKeyboard(token string) *qqbotsdk.Keyboard {
+	return receiptKeyboard("receipt_recall", "撤回详细信息", receiptRecallPrefix+token)
+}
+
+// receiptKeyboard builds the one-button keyboard a receipt carries.
+//
+// PermissionTypeAdmin is the platform's own gate, and it is on the button rather
+// than only in the handler: a button somebody may not press is greyed out, which
+// answers "who is this for" before it is pressed. The handler checks the
+// configured administrator list as well, because the platform's idea of an
+// administrator and this bot's are two different lists and only one of them
+// decides what this bot will do.
+func receiptKeyboard(id, label, data string) *qqbotsdk.Keyboard {
+	button := qqbotsdk.Button{
+		ID: id,
+		RenderData: &qqbotsdk.RenderData{
+			Label:        label,
+			VisitedLabel: label,
+			Style:        qqbotsdk.KeyboardStyleBlue,
+		},
+		Action: &qqbotsdk.Action{
+			Type:          qqbotsdk.ActionTypeCallback,
+			Data:          data,
+			Permission:    &qqbotsdk.Permission{Type: qqbotsdk.PermissionTypeAdmin},
+			UnsupportTips: "请升级 QQ 客户端",
+		},
+	}
+	return &qqbotsdk.Keyboard{
+		Content: &qqbotsdk.KeyboardContent{
+			Rows: []qqbotsdk.Row{{Buttons: []qqbotsdk.Button{button}}},
+		},
+	}
+}
+
+// receiptRecall is one sent detailed receipt, waiting to be taken back.
+type receiptRecall struct {
+	groupOpenID string
+	messageID   string
+	expires     time.Time
+}
+
+// newReceiptToken returns the short name a recall button carries.
+//
+// A token rather than the message id: a message id is about a hundred characters
+// of opaque text, and how much a button's data field holds is not something to
+// find out in production.
+func newReceiptToken() (string, error) {
+	buffer := make([]byte, 8)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generating a receipt token: %w", err)
+	}
+	return hex.EncodeToString(buffer), nil
+}
+
+// rememberRecall records what a recall button will take back.
+func (h *handler) rememberRecall(token, groupOpenID, messageID string) {
+	h.receiptsMu.Lock()
+	defer h.receiptsMu.Unlock()
+	if h.receipts == nil {
+		h.receipts = map[string]receiptRecall{}
+	}
+	h.dropExpiredReceipts()
+	h.receipts[token] = receiptRecall{
+		groupOpenID: groupOpenID,
+		messageID:   messageID,
+		expires:     time.Now().Add(receiptRecallWindow),
+	}
+}
+
+// lookupRecall returns what a recall button points at.
+func (h *handler) lookupRecall(token string) (receiptRecall, bool) {
+	h.receiptsMu.Lock()
+	defer h.receiptsMu.Unlock()
+	h.dropExpiredReceipts()
+	target, found := h.receipts[token]
+	return target, found
+}
+
+// forgetRecall drops a button that has been used, so that pressing it twice
+// cannot take back a message that has already gone -- or, worse, a second message
+// that happens to hold the same token.
+func (h *handler) forgetRecall(token string) {
+	h.receiptsMu.Lock()
+	defer h.receiptsMu.Unlock()
+	delete(h.receipts, token)
+}
+
+// dropExpiredReceipts forgets the buttons that can no longer work.
+//
+// Called under the lock, from both the write and the read, because a map that is
+// only pruned on the way in grows with every receipt a group ever reads.
+func (h *handler) dropExpiredReceipts() {
+	now := time.Now()
+	for token, target := range h.receipts {
+		if now.After(target.expires) {
+			delete(h.receipts, token)
+		}
+	}
+}
+
+// onInteraction handles a press of one of this feature's buttons.
+func (h *handler) onInteraction(ctx context.Context, event *qqbotsdk.Event) error {
+	data, ok := receiptClick(event)
+	if !ok {
+		// Another feature's button, a single chat press, or an interaction that
+		// is not a button press at all.
+		return nil
+	}
+	buttonData := data.Data.Resolved.ButtonData
+	switch {
+	case strings.HasPrefix(buttonData, receiptDetailPrefix):
+		return h.showDetails(ctx, data,
+			strings.TrimPrefix(buttonData, receiptDetailPrefix))
+	case strings.HasPrefix(buttonData, receiptRecallPrefix):
+		return h.recallDetails(ctx, data,
+			strings.TrimPrefix(buttonData, receiptRecallPrefix))
+	}
+	return nil
+}
+
+// showDetails answer the button that asks for the rest of a receipt.
+func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCreateData,
+	judgementID string) error {
+	log := h.deps.Logger.With("group", data.GroupOpenID,
+		"member", data.GroupMemberOpenID, "receipt", judgementID)
+
+	entry, err := h.findJudgement(ctx, judgementID)
+	if err != nil {
+		log.Warn("a receipt button was pressed for a record that cannot be read",
+			"error", err)
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+	}
+	if entry.GroupOpenID != data.GroupOpenID ||
+		!h.IsAdmin(entry.GroupOpenID, data.GroupMemberOpenID) {
+		// The platform greys the button out for a group member who is not an
+		// administrator, and this is the check that actually decides: the
+		// configured list is this bot's, and it is not the same list.
+		log.Warn("refused the details of a receipt to a member who may not read them")
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeAdminOnly)
+	}
+
+	// The details are a message of their own rather than an edit: the summary is
+	// what the group asked for and stays where it is, and the details have to
+	// carry their own button to be taken back again.
+	token, err := newReceiptToken()
+	if err != nil {
+		log.Error("could not make a recall token", "error", err)
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+	}
+	response, err := h.sendMessageWithKeyboard(ctx, data.GroupOpenID,
+		h.receiptDetails(entry), "", recallKeyboard(token))
+	if err != nil {
+		log.Error("could not send the details of a receipt", "error", err)
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+	}
+	if response != nil {
+		h.rememberRecall(token, data.GroupOpenID, response.ID)
+	}
+	log.Info("an administrator read the details of a receipt")
+	return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess)
+}
+
+// recallDetails answers the button that takes a detailed receipt back.
+//
+// Nothing is said in the group afterwards. The button said what it would do, the
+// person who pressed it is watching the message disappear, and an announcement
+// would be the bot talking to itself in front of everybody.
+func (h *handler) recallDetails(ctx context.Context, data *qqbotsdk.InteractionCreateData,
+	token string) error {
+	log := h.deps.Logger.With("group", data.GroupOpenID,
+		"member", data.GroupMemberOpenID, "token", token)
+
+	target, found := h.lookupRecall(token)
+	if !found {
+		// Unknown or expired: answering with a failure leaves the button
+		// pressable, which is what somebody retrying needs.
+		log.Info("a recall button was pressed after its window closed")
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+	}
+	if target.groupOpenID != data.GroupOpenID ||
+		!h.IsAdmin(target.groupOpenID, data.GroupMemberOpenID) {
+		log.Warn("refused a recall to a member who may not press it")
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeNoPermission)
+	}
+	if err := h.deps.Client.RecallGroupMessage(ctx, target.groupOpenID,
+		target.messageID); err != nil {
+		// A failure the platform decides, and the most likely one by far is the
+		// two-minute limit on taking back a bot's own message.
+		log.Warn("could not take back a detailed receipt", "error", err)
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+	}
+	h.forgetRecall(token)
+	log.Info("a detailed receipt was taken back")
+	return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess)
+}
+
+// answer reports the outcome to the client that pressed the button.
+//
+// Every path through a button press has to answer, because an unanswered
+// interaction leaves the presser on a spinner until it times out.
+func (h *handler) answer(ctx context.Context, interactionID string,
+	code qqbotsdk.InteractionCode) error {
+	if interactionID == "" {
+		return errors.New("the interaction event carried no id to answer")
+	}
+	answerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := h.deps.Client.RespondInteraction(answerCtx, interactionID, code); err != nil {
+		return fmt.Errorf("answering the interaction: %w", err)
+	}
+	return nil
+}
+
+// receiptClick reports whether an event is a press of one of this feature's
+// buttons in a group.
+func receiptClick(event *qqbotsdk.Event) (*qqbotsdk.InteractionCreateData, bool) {
+	value, err := event.Decode()
+	if err != nil {
+		return nil, false
+	}
+	data, ok := value.(*qqbotsdk.InteractionCreateData)
+	if !ok {
+		return nil, false
+	}
+	if data.Scene != qqbotsdk.InteractionSceneGroup {
+		return nil, false
+	}
+	if data.Data == nil || data.Data.Resolved == nil {
+		return nil, false
+	}
+	buttonData := data.Data.Resolved.ButtonData
+	if !strings.HasPrefix(buttonData, receiptDetailPrefix) &&
+		!strings.HasPrefix(buttonData, receiptRecallPrefix) {
+		return nil, false
+	}
+	if data.GroupOpenID == "" || data.GroupMemberOpenID == "" {
+		return nil, false
+	}
+	return data, true
 }

@@ -88,18 +88,18 @@ func aJudgement(id string) store.Judgement {
 	}
 }
 
-// TestAnAdministratorReadsAReceipt covers the whole point of the number the group
-// is shown: what it stood for, including the parts that are gone.
+// TestAnyoneReadsTheSummaryOfAReceipt covers the half a group gets, which any
+// member may now ask for.
 //
-// The two things that cannot be found anywhere else afterwards are here -- the
-// text of a message that was withdrawn, and the model's own reasoning -- so the
-// test asserts on them rather than on the shape of the reply.
-func TestAnAdministratorReadsAReceipt(t *testing.T) {
+// What must not be in it is the point: a reason, a chain of thought and the text
+// of a withdrawn message are all a model's or a member's own words about somebody,
+// and none of them belongs in a group.
+func TestAnyoneReadsTheSummaryOfAReceipt(t *testing.T) {
 	entry := aJudgement("a1b2c3d4e5f60718")
 	h, _ := receiptHarness(t, entry)
 
-	// Half a receipt, the way somebody types one back off a screen.
-	h.send("/违规查询 a1b2c3d4", testAdmin, receiptGroup)
+	// An ordinary member, asking in a group, about a record of that group.
+	h.send("/违规查询 a1b2c3d4", "ORDINARY-MEMBER", receiptGroup)
 
 	reply := h.lastReply()
 	if reply == "" {
@@ -109,78 +109,199 @@ func TestAnAdministratorReadsAReceipt(t *testing.T) {
 		"违规回执 " + entry.ID,
 		receiptGroup,
 		"违规·广告",
-		entry.Reason,
-		entry.Reasoning,
+		`<qqbot-at-user id="` + entry.SubjectOpenID + `"/>`,
+		`<qqbot-at-user id="` + entry.ReporterOpenID + `"/>`,
+		"stub-model",
+		"送检消息：2 条",
 		"已撤回 2 条消息",
-		"💰 本站价目",     // the message that is gone, kept
-		"未撤回（无操作权限）", // and the one that stayed, with why
-		"加群送皮肤",
+		"10分钟",
 	} {
 		if !strings.Contains(reply, want) {
-			t.Errorf("the receipt does not mention %q:\n%s", want, reply)
+			t.Errorf("the summary does not mention %q:\n%s", want, reply)
 		}
 	}
-	// The label, not the configuration key: the group was told 「广告」, so the
-	// administrator reads the same word back.
+	for _, forbidden := range []string{
+		entry.Reason, entry.Reasoning, "本站价目", "加群送皮肤", "思考过程",
+	} {
+		if strings.Contains(reply, forbidden) {
+			t.Errorf("the summary leaks %q:\n%s", forbidden, reply)
+		}
+	}
+	// The label, not the configuration key: the group was told 「广告」.
 	if strings.Contains(reply, "违规·ad") {
-		t.Errorf("the receipt shows the category key rather than its label:\n%s", reply)
+		t.Errorf("the summary shows the category key rather than its label:\n%s", reply)
+	}
+	// And the rest is behind a button, which the platform greys out for anybody
+	// who is not an administrator.
+	if data := h.buttonOf(); data != receiptDetailPrefix+entry.ID {
+		t.Errorf("button data = %q, want the details button for this record", data)
+	}
+}
+
+// TestTheDetailsAreBehindAnAdministratorOnlyButton covers the other half.
+//
+// The details are the model's own words about a member and the message that was
+// withdrawn, so they need an administrator -- and the check is made again when
+// the press arrives, because the platform's greyed-out button and this bot's
+// administrator list are two different things.
+func TestTheDetailsAreBehindAnAdministratorOnlyButton(t *testing.T) {
+	entry := aJudgement("a1b2c3d4e5f60718")
+	h, _ := receiptHarness(t, entry)
+	button := receiptDetailPrefix + entry.ID
+
+	t.Run("an administrator gets the details", func(t *testing.T) {
+		before := h.groupReplies()
+		h.press("INTERACTION-1", button, testAdmin, receiptGroup)
+
+		if code, ok := h.lastAnswer(); !ok || code != float64(qqbotsdk.InteractionCodeSuccess) {
+			t.Fatalf("answer = %v, want success", code)
+		}
+		if h.groupReplies() != before+1 {
+			t.Fatal("no detailed receipt was sent")
+		}
+		details := h.lastReply()
+		for _, want := range []string{entry.Reason, entry.Reasoning, "本站价目"} {
+			if !strings.Contains(details, want) {
+				t.Errorf("the details do not mention %q:\n%s", want, details)
+			}
+		}
+		// The details carry their own button, which is what takes them back.
+		if data := h.buttonOf(); !strings.HasPrefix(data, receiptRecallPrefix) {
+			t.Errorf("button data = %q, want a recall button on the details", data)
+		}
+	})
+
+	t.Run("an ordinary member is refused", func(t *testing.T) {
+		before := h.groupReplies()
+		h.press("INTERACTION-2", button, "ORDINARY-MEMBER", receiptGroup)
+
+		if code, ok := h.lastAnswer(); !ok ||
+			code != float64(qqbotsdk.InteractionCodeAdminOnly) {
+			t.Fatalf("answer = %v, want the administrator-only code", code)
+		}
+		if h.groupReplies() != before {
+			t.Error("the details were sent to somebody who may not read them")
+		}
+	})
+
+	t.Run("another group's administrator is refused", func(t *testing.T) {
+		before := h.groupReplies()
+		h.press("INTERACTION-3", button, "SOMEONE-ELSE", receiptOtherGroup)
+		if code, ok := h.lastAnswer(); !ok ||
+			code != float64(qqbotsdk.InteractionCodeAdminOnly) {
+			t.Fatalf("answer = %v, want the administrator-only code", code)
+		}
+		if h.groupReplies() != before {
+			t.Error("the details were sent into the wrong group")
+		}
+	})
+}
+
+// TestTheRecallButtonTakesTheDetailsBack covers the button that cleans up after
+// itself.
+//
+// A detailed receipt is the one message in a group that must not stay: it holds
+// the model's reasoning and the text of a message that was withdrawn. The button
+// exists so that whoever read it can make it go away, and nothing is announced
+// afterwards -- the button said what it would do.
+func TestTheRecallButtonTakesTheDetailsBack(t *testing.T) {
+	entry := aJudgement("a1b2c3d4e5f60718")
+	h, _ := receiptHarness(t, entry)
+
+	h.press("INTERACTION-1", receiptDetailPrefix+entry.ID, testAdmin, receiptGroup)
+	recall := h.buttonOf()
+	if !strings.HasPrefix(recall, receiptRecallPrefix) {
+		t.Fatalf("button data = %q, want a recall button on the details", recall)
+	}
+	details := h.lastSentID()
+	if details == "" {
+		t.Fatal("the detailed receipt was never sent")
+	}
+
+	before := h.groupReplies()
+	h.press("INTERACTION-2", recall, testAdmin, receiptGroup)
+
+	if code, ok := h.lastAnswer(); !ok || code != float64(qqbotsdk.InteractionCodeSuccess) {
+		t.Fatalf("answer = %v, want success", code)
+	}
+	taken := h.recalledMessages()
+	if len(taken) != 1 || taken[0] != details {
+		t.Fatalf("recalled = %v, want the detailed receipt %q itself", taken, details)
+	}
+	// Silent: the group is told nothing, because the message disappearing is the
+	// answer and an announcement would be the bot talking to itself.
+	if h.groupReplies() != before {
+		t.Errorf("a message was sent into the group about the recall:\n%s", h.lastReply())
+	}
+	// The button is spent. Pressing it again must not take back whatever message
+	// happens to hold the same token next.
+	h.press("INTERACTION-3", recall, testAdmin, receiptGroup)
+	if code, _ := h.lastAnswer(); code != float64(qqbotsdk.InteractionCodeFailed) {
+		t.Errorf("answer = %v for a spent button, want failure", code)
+	}
+	if len(h.recalledMessages()) != 1 {
+		t.Errorf("a second message was taken back: %v", h.recalledMessages())
+	}
+}
+
+// TestARecallButtonOnlyForItsOwnAdministrator covers the second button's
+// permission, which is checked the same way as the first.
+func TestARecallButtonOnlyForItsOwnAdministrator(t *testing.T) {
+	entry := aJudgement("a1b2c3d4e5f60718")
+	h, _ := receiptHarness(t, entry)
+	h.press("INTERACTION-1", receiptDetailPrefix+entry.ID, testAdmin, receiptGroup)
+	recall := h.buttonOf()
+
+	h.press("INTERACTION-2", recall, "ORDINARY-MEMBER", receiptGroup)
+	if code, _ := h.lastAnswer(); code != float64(qqbotsdk.InteractionCodeNoPermission) {
+		t.Errorf("answer = %v, want the no-permission code", code)
+	}
+	if len(h.recalledMessages()) != 0 {
+		t.Errorf("a message was taken back for somebody who may not: %v",
+			h.recalledMessages())
 	}
 }
 
 // TestAReceiptIsRefusedOutsideItsOwnGroup covers the boundary a group needs.
 //
-// An administrator of one group has no business reading another group's
-// punishments, and the refusal deliberately does not say where the record really
-// is: that would tell an ordinary member who happened to type the command that
-// the number exists somewhere.
+// A member of one group has no business reading another group's punishments, and
+// the refusal deliberately does not say where the record really is: that would
+// tell them the number exists somewhere.
 func TestAReceiptIsRefusedOutsideItsOwnGroup(t *testing.T) {
 	h, _ := receiptHarness(t, aJudgement("a1b2c3d4e5f60718"))
 
-	// The same administrator, asking in a group that is not the record's.
 	h.send("/违规查询 a1b2c3d4", testAdmin, receiptOtherGroup)
 
 	reply := h.lastReply()
 	if !strings.Contains(reply, "本群没有这条记录") {
 		t.Errorf("reply = %q, want a refusal that does not name the other group", reply)
 	}
-	if strings.Contains(reply, "价目") || strings.Contains(reply, "招揽") {
+	if strings.Contains(reply, "价目") || strings.Contains(reply, "招揽") ||
+		strings.Contains(reply, "被判定人") {
 		t.Errorf("the refusal leaked the record:\n%s", reply)
 	}
 }
 
-// TestAReceiptIsRefusedForAMemberWhoIsNotAnAdministrator covers the group side of
-// the permission: the command is behind the administrator list, and unlike
-// /whois there is no setting that opens it.
-func TestAReceiptIsRefusedForAMemberWhoIsNotAnAdministrator(t *testing.T) {
-	h, _ := receiptHarness(t, aJudgement("a1b2c3d4e5f60718"))
-
-	h.send("/违规查询 a1b2c3d4", "ORDINARY-MEMBER", receiptGroup)
-
-	reply := h.lastReply()
-	if !strings.Contains(reply, "你没有权限使用管理命令") {
-		t.Errorf("reply = %q, want the ordinary refusal", reply)
-	}
-	if strings.Contains(reply, "价目") {
-		t.Errorf("an ordinary member was shown the record:\n%s", reply)
-	}
-}
-
-// TestAReceiptIsReadInPrivate covers the second way in, which is the point of
-// allowing it at all: the model's words about a member can be read without the
-// group reading them too.
+// TestAReceiptIsReadInPrivate covers the second way in: the details can be read
+// without the group reading them too, which is the whole reason a single chat is
+// wired up at all.
 func TestAReceiptIsReadInPrivate(t *testing.T) {
 	entry := aJudgement("a1b2c3d4e5f60718")
 	h, _ := receiptHarness(t, entry)
 
+	// The administrator of the record's own group.
 	h.deliverPrivate("/违规查询 a1b2c3d4", testAdmin)
 
 	reply := h.lastPrivateReply()
 	if reply == "" {
 		t.Fatal("the private command was not answered")
 	}
-	if !strings.Contains(reply, entry.Reasoning) ||
-		!strings.Contains(reply, "💰 本站价目") {
-		t.Errorf("the private receipt is missing what it is for:\n%s", reply)
+	for _, want := range []string{
+		entry.Reason, entry.Reasoning, "本站价目", "已撤回 2 条消息",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("the private receipt is missing %q:\n%s", want, reply)
+		}
 	}
 	// The answer goes into the single chat and nowhere else: a receipt in the
 	// group would publish exactly what this path exists to keep quiet.
@@ -189,15 +310,16 @@ func TestAReceiptIsReadInPrivate(t *testing.T) {
 	}
 }
 
-// TestAPrivateReceiptIsOnlyForItsOwnGroup covers the permission on the private
-// path, which is per record rather than per person.
+// TestAPrivateReceiptShowsDetailsOnlyToItsOwnAdministrator covers the private
+// permission, which is per record rather than per person.
 //
-// Being an administrator of some group is not enough, and the refusal says the
-// same thing either way -- an administrator of a different group and somebody who
-// administers nothing are told the same sentence, because a different one would
-// say which group the record belongs to.
-func TestAPrivateReceiptIsOnlyForItsOwnGroup(t *testing.T) {
-	h, _ := receiptHarness(t, aJudgement("a1b2c3d4e5f60718"))
+// Everybody may read the summary, here as in a group; the model's words are for
+// the administrator of the group the record belongs to. Being an administrator of
+// some other group is not enough, and the answer says the same thing either way,
+// because a different one would say which group the record belongs to.
+func TestAPrivateReceiptShowsDetailsOnlyToItsOwnAdministrator(t *testing.T) {
+	entry := aJudgement("a1b2c3d4e5f60718")
+	h, _ := receiptHarness(t, entry)
 
 	for name, member := range map[string]string{
 		"an administrator of another group": "SOMEONE-ELSE",
@@ -206,11 +328,15 @@ func TestAPrivateReceiptIsOnlyForItsOwnGroup(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h.deliverPrivate("/违规查询 a1b2c3d4", member)
 			reply := h.lastPrivateReply()
-			if !strings.Contains(reply, "你没有权限查看这条记录") {
-				t.Errorf("reply = %q, want the refusal", reply)
+			if !strings.Contains(reply, "违规回执 "+entry.ID) {
+				t.Fatalf("reply = %q, want the summary", reply)
 			}
-			if strings.Contains(reply, "价目") || strings.Contains(reply, "招揽") {
-				t.Errorf("the refusal leaked the record:\n%s", reply)
+			for _, forbidden := range []string{
+				entry.Reason, entry.Reasoning, "本站价目", "思考过程",
+			} {
+				if strings.Contains(reply, forbidden) {
+					t.Errorf("the summary leaked %q:\n%s", forbidden, reply)
+				}
 			}
 		})
 	}

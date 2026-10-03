@@ -122,9 +122,15 @@ type harness struct {
 	// paths is parallel to calls: the endpoint each request went to, which is how
 	// a test tells an answer to a group apart from one to a single chat.
 	paths []string
+	// methods is parallel to paths too, so a test can tell a send from a
+	// withdrawal.
+	methods []string
 	// failDeletes makes the platform refuse every withdrawal, which is what a
 	// group this application may not take messages down in looks like.
 	failDeletes bool
+	// sentIDs numbers the message ids the stub platform hands back, which is
+	// what a receipt's recall button ends up pointing at.
+	sentIDs int
 	// sent numbers the messages this harness delivers, because the feature
 	// ignores a message id it has already handled.
 	sent int
@@ -215,6 +221,7 @@ func newHarnessWith(t *testing.T, section string, registering bool) *harness {
 			h.mu.Lock()
 			h.calls = append(h.calls, body)
 			h.paths = append(h.paths, r.URL.Path)
+			h.methods = append(h.methods, r.Method)
 			refuse := h.failDeletes && r.Method == http.MethodDelete
 			h.mu.Unlock()
 			if refuse {
@@ -225,6 +232,17 @@ func newHarnessWith(t *testing.T, section string, registering bool) *harness {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// A send is answered with an id, because that is what the platform
+		// returns and what a message's own recall button is built from. Every
+		// other call gets an empty object, which is all any of them read.
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages") {
+			h.mu.Lock()
+			h.sentIDs++
+			id := "SENT-" + strconv.Itoa(h.sentIDs)
+			h.mu.Unlock()
+			_, _ = w.Write([]byte(`{"id":"` + id + `"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	t.Cleanup(server.Close)
@@ -360,6 +378,111 @@ func (h *harness) groupReplies() int {
 		}
 	}
 	return count
+}
+
+// dispatch hands one raw event body to the dispatcher, which is how a test
+// delivers an event this feature does not otherwise build.
+func (h *harness) dispatch(eventType, body string) {
+	h.t.Helper()
+	payload := &qqbotsdk.Payload{
+		ID:   "EVENT-ID",
+		Op:   qqbotsdk.OpDispatch,
+		Type: eventType,
+		Data: json.RawMessage(body),
+	}
+	if err := h.client.Dispatcher().DispatchSync(context.Background(),
+		qqbotsdk.NewEvent(payload, "test")); err != nil {
+		h.t.Fatalf("dispatching %s: %v", eventType, err)
+	}
+}
+
+// press clicks one of the bot's buttons in a group.
+func (h *harness) press(interactionID, buttonData, memberOpenID, groupOpenID string) {
+	h.t.Helper()
+	h.dispatch(qqbotsdk.EventInteractionCreate, `{
+		"id": "`+interactionID+`",
+		"type": 11,
+		"scene": "group",
+		"chat_type": 1,
+		"group_openid": "`+groupOpenID+`",
+		"group_member_openid": "`+memberOpenID+`",
+		"data": {"type": 11, "resolved": {"button_data": `+jsonString(buttonData)+`}}
+	}`)
+}
+
+// lastAnswer returns the code the bot answered the last button press with, which
+// is how the client is told what happened.
+func (h *harness) lastAnswer() (float64, bool) {
+	h.t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := len(h.calls) - 1; i >= 0; i-- {
+		if !strings.HasPrefix(h.paths[i], "/interactions/") {
+			continue
+		}
+		code, ok := h.calls[i]["code"].(float64)
+		return code, ok
+	}
+	return 0, false
+}
+
+// buttonOf returns the data field of the first button of the last message that
+// carried a keyboard.
+func (h *harness) buttonOf() string {
+	h.t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := len(h.calls) - 1; i >= 0; i-- {
+		keyboard, ok := h.calls[i]["keyboard"].(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := keyboard["content"].(map[string]any)
+		rows, _ := content["rows"].([]any)
+		if len(rows) == 0 {
+			continue
+		}
+		row, _ := rows[0].(map[string]any)
+		buttons, _ := row["buttons"].([]any)
+		if len(buttons) == 0 {
+			continue
+		}
+		button, _ := buttons[0].(map[string]any)
+		action, _ := button["action"].(map[string]any)
+		data, _ := action["data"].(string)
+		return data
+	}
+	return ""
+}
+
+// lastSentID returns the id the stub platform handed back for the most recent
+// message sent, which is what a message's own recall button points at.
+func (h *harness) lastSentID() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.sentIDs == 0 {
+		return ""
+	}
+	return "SENT-" + strconv.Itoa(h.sentIDs)
+}
+
+// recalledMessages returns the message ids the bot asked the platform to take
+// back, in order.
+func (h *harness) recalledMessages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ids []string
+	for i, path := range h.paths {
+		if !strings.Contains(path, "/messages/") {
+			continue
+		}
+		if method := h.methods[i]; method != http.MethodDelete {
+			continue
+		}
+		parts := strings.Split(path, "/messages/")
+		ids = append(ids, parts[len(parts)-1])
+	}
+	return ids
 }
 
 // lastReply returns the markdown of the last message sent, which is how the

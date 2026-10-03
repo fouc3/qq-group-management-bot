@@ -194,6 +194,13 @@ type handler struct {
 	// acting twice would mute twice and answer twice.
 	seen map[string]time.Time
 
+	// receiptsMu guards receipts, which is what a receipt's buttons point at:
+	// the detailed message a recall button will take back. It is held separately
+	// from mu because the two are never wanted at once, and one lock over both
+	// would make a button press wait behind a message dispatch.
+	receiptsMu sync.Mutex
+	receipts   map[string]receiptRecall
+
 	// blacklist is the list of applicants barred from joining, or nil when there
 	// is no data layer behind the command.
 	blacklist Blacklist
@@ -257,8 +264,10 @@ func (h *handler) Name() string { return Name }
 // Intents implements feature.Feature.
 func (h *handler) Intents() qqbotsdk.Intent {
 	// Commands arrive as ordinary group messages, so both the mention event
-	// and the full receive event can carry one.
-	return qqbotsdk.IntentGroupAndC2CEvent
+	// and the full receive event can carry one. Interactions are the buttons
+	// under a receipt: a press is delivered on the same connection, and without
+	// the intent the button answers nothing at all.
+	return qqbotsdk.IntentGroupAndC2CEvent | qqbotsdk.IntentInteraction
 }
 
 // SetVerifier implements feature.VerifierAware.
@@ -299,6 +308,10 @@ func (h *handler) Register(_ context.Context) error {
 	// configuration says about receipts, because the handler decides what to
 	// answer rather than the registration.
 	h.deps.Client.RegisterFunc(qqbotsdk.EventC2CMessageCreate, h.onPrivateMessage)
+	// The buttons under a receipt. Every feature that listens for interactions
+	// is handed every press, so the handler starts by asking whether the button
+	// is one of ours.
+	h.deps.Client.RegisterFunc(qqbotsdk.EventInteractionCreate, h.onInteraction)
 	h.deps.Logger.Info("administrator commands are ready",
 		"prefix", h.cfg.Prefix, "debug", h.cfg.Debug,
 		"require_mention", h.mentionsRequired(),
@@ -416,6 +429,13 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		// already see when an administrator mistypes a command.
 		h.reply(ctx, data, usage(h.cfg.Prefix))
 		return nil
+	case "违规查询", "回执", "receipt", "violation":
+		// Any member may ask. What comes back without the button is the summary:
+		// who was judged, what was found, what was done -- all of which this
+		// group already saw. The model's own words about a member are behind a
+		// button that only an administrator may press, and that press is checked
+		// again when it arrives.
+		return h.receiptCommand(ctx, data, command)
 	case "违规举报", "违规反馈", "report":
 		// Reporting is for every member, which is the point of it: the people who
 		// see an advertisement are not only the administrators. What follows a
@@ -635,11 +655,6 @@ func (h *handler) run(ctx context.Context, data *qqbotsdk.GroupMessageCreateData
 		return h.resendVerification(ctx, data, target)
 	case "黑名单", "blacklist":
 		return h.blacklistCommand(ctx, data, command)
-	case "违规查询", "回执", "receipt", "violation":
-		// Reached only from here, which is already behind the administrator
-		// check: a receipt holds the model's words about a member, so it is not
-		// something an ordinary member may ask for in the group.
-		return h.receiptCommand(ctx, data, command)
 	case "debug":
 		return h.debug(ctx, data, command)
 	default:
@@ -1008,6 +1023,19 @@ func targetOf(data *qqbotsdk.GroupMessageCreateData, command parsedCommand) (str
 	return "", fmt.Errorf("请 @ 目标成员，或**回复引用**目标的消息。平台限制：机器人无法用 QQ 号"+
 		"指定成员；而在本群的“仅 @ 时接收”模式下，@ 目标的名字会被平台抹掉（命令 %s）",
 		command.name)
+}
+
+// replyWithKeyboard answers in the group with buttons under the answer.
+//
+// It is a passive reply like every other command answer, so the buttons arrive
+// attached to the message the group asked about rather than as a second message
+// out of nowhere.
+func (h *handler) replyWithKeyboard(ctx context.Context,
+	data *qqbotsdk.GroupMessageCreateData, text string, keyboard *qqbotsdk.Keyboard) {
+	if _, err := h.sendMessageWithKeyboard(ctx, data.GroupOpenID, text, data.ID,
+		keyboard); err != nil {
+		h.deps.Logger.Warn("could not answer a command", "error", err)
+	}
 }
 
 // reply answers in the group, as a passive reply to the command.

@@ -39,10 +39,23 @@ const (
 // platform only lets a bot reply to an event within its own message, and a
 // command's answer has to be that.
 func (h *handler) sendMessage(ctx context.Context, groupOpenID, text, replyTo string) error {
-	return h.sendWithRetry(ctx, text, replyTo, func(message *qqbotsdk.Message) error {
-		_, err := h.deps.Client.SendGroupMessage(ctx, groupOpenID, message)
-		return err
-	})
+	_, err := h.sendMessageWithKeyboard(ctx, groupOpenID, text, replyTo, nil)
+	return err
+}
+
+// sendMessageWithKeyboard is sendMessage with buttons under the message.
+//
+// The response is returned because a keyboard can offer to take its own message
+// back, and that needs the id the platform gave the message. A keyboard hangs off
+// a markdown message -- the platform drops buttons on a plain text one without
+// saying so, and the SDK refuses that combination before the request is made --
+// which every message this feature sends already is.
+func (h *handler) sendMessageWithKeyboard(ctx context.Context, groupOpenID, text,
+	replyTo string, keyboard *qqbotsdk.Keyboard) (*qqbotsdk.MessageResponse, error) {
+	return h.sendWithRetry(ctx, text, replyTo, keyboard,
+		func(message *qqbotsdk.Message) (*qqbotsdk.MessageResponse, error) {
+			return h.deps.Client.SendGroupMessage(ctx, groupOpenID, message)
+		})
 }
 
 // sendPrivateMessage is the same thing into a single chat.
@@ -53,10 +66,11 @@ func (h *handler) sendMessage(ctx context.Context, groupOpenID, text, replyTo st
 // as everything else, because the reasons a send fails are the transport's and
 // have nothing to do with where the message is going.
 func (h *handler) sendPrivateMessage(ctx context.Context, userOpenID, text, replyTo string) error {
-	return h.sendWithRetry(ctx, text, replyTo, func(message *qqbotsdk.Message) error {
-		_, err := h.deps.Client.SendC2CMessage(ctx, userOpenID, message)
-		return err
-	})
+	_, err := h.sendWithRetry(ctx, text, replyTo, nil,
+		func(message *qqbotsdk.Message) (*qqbotsdk.MessageResponse, error) {
+			return h.deps.Client.SendC2CMessage(ctx, userOpenID, message)
+		})
+	return err
 }
 
 // sendWithRetry is the retry and the back-off, in one place.
@@ -65,10 +79,13 @@ func (h *handler) sendPrivateMessage(ctx context.Context, userOpenID, text, repl
 // loop would be a second set of numbers to keep in step, and the one that was
 // not being looked at would be the one that drifted.
 func (h *handler) sendWithRetry(ctx context.Context, text, replyTo string,
-	deliver func(*qqbotsdk.Message) error) error {
+	keyboard *qqbotsdk.Keyboard,
+	deliver func(*qqbotsdk.Message) (*qqbotsdk.MessageResponse, error)) (
+	*qqbotsdk.MessageResponse, error) {
 	message := &qqbotsdk.Message{
 		MsgType:  qqbotsdk.MsgTypeMarkdown,
 		Markdown: &qqbotsdk.MessageMarkdown{Content: text},
+		Keyboard: keyboard,
 	}
 	if replyTo != "" {
 		message.MsgID = replyTo
@@ -78,8 +95,9 @@ func (h *handler) sendWithRetry(ctx context.Context, text, replyTo string,
 	wait := sendBackoff
 	var failure error
 	for attempt := 1; attempt <= sendAttempts; attempt++ {
-		if failure = deliver(message); failure == nil {
-			return nil
+		var response *qqbotsdk.MessageResponse
+		if response, failure = deliver(message); failure == nil {
+			return response, nil
 		}
 
 		// The last attempt has nothing left to wait for, and a cancelled context
@@ -89,10 +107,10 @@ func (h *handler) sendWithRetry(ctx context.Context, text, replyTo string,
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(wait):
 		}
 		wait *= 2
 	}
-	return failure
+	return nil, failure
 }

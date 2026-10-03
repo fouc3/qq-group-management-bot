@@ -99,10 +99,9 @@ func commands(prefix string) []command {
 			// for. It answers in a group -- about that group's records -- and in a
 			// private message with the bot, where the model's own words can be
 			// read without the group reading them too.
-			name:      "违规查询",
-			usage:     prefix + "违规查询 <回执单号> —— 查看一条违规判定的详细记录（群里只能查本群的，也可私聊机器人查）",
-			desc:      "查看违规判定详情",
-			adminOnly: true,
+			name:  "违规查询",
+			usage: prefix + "违规查询 <回执单号> —— 查看一条违规回执（任何成员可用；详细内容需管理员点击按钮）",
+			desc:  "查看违规回执",
 		},
 		{
 			name:         "debug",
