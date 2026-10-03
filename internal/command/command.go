@@ -64,6 +64,29 @@ type Runner func(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 type PrivateRunner func(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
 	cmd Parsed) error
 
+// PanelPlacement is one command's place in one instruction panel.
+type PanelPlacement struct {
+	// Scene is the panel: the group instruction panel, or the one a single chat
+	// shows.
+	Scene Scene
+
+	// OnlyPlatformAdmins asks the platform to show this entry only to the
+	// administrators the platform knows -- a QQ group's owner and whoever they
+	// appointed -- and not to the administrators the configuration names.
+	//
+	// The two sets differ in both directions, so a command whose gate is the
+	// configured list should leave this off: sending it hides a management
+	// command from exactly the people the configuration names, whenever one of
+	// them holds no platform role, and shows it to whoever holds one without
+	// being named. The check that matters happens when the command arrives; the
+	// panel is a menu, not a lock.
+	//
+	// It is declared rather than dropped because a deployment whose configured
+	// administrators are its groups' real ones can ask for the hiding too, one
+	// command at a time.
+	OnlyPlatformAdmins bool
+}
+
 // Def is one command a bot answers.
 type Def struct {
 	// Name invokes it. It is written with the prefix wherever it is shown, so
@@ -85,10 +108,19 @@ type Def struct {
 	// Audience decides who may run it.
 	Audience Audience
 
-	// Unregistered keeps the command out of the panel while leaving it in the
-	// help: a tool for whoever runs the bot is not an entry to put in front of a
-	// group, and the help is where it can say so.
-	Unregistered bool
+	// Panels are the instruction panels this command is offered in, and which
+	// they are is the plugin's decision rather than something worked out from
+	// the runners.
+	//
+	// A command can work in a place without being worth a signpost there -- a
+	// lookup still needs its argument typed after it, so the entry only
+	// advertises a question -- and it can be worth a signpost where not every
+	// reader may run it, because the panel is how a group learns that a
+	// management command exists at all.
+	//
+	// Empty means no panel holds it. The help still lists it, which is where it
+	// can say what it is for.
+	Panels []PanelPlacement
 
 	// Available hides the panel entry when it reports false, and is asked rather
 	// than assumed.
@@ -208,34 +240,44 @@ func (c *Catalog) PrivateUsage(prefix string) []string {
 	return lines
 }
 
-// Panel renders the instruction panel's entries, which is the menu a member
+// Panel renders one instruction panel's entries, which is the menu a member
 // opens.
 //
-// only_admin is deliberately left unset, even for the commands that really are
-// administrative. The platform reads that flag as "the group or channel
-// administrators", which is its own notion of the role -- the group owner and
-// whoever they appointed. What this bot obeys is the administrator list in the
-// configuration, and the two are different sets. Sending the flag would hide
-// management commands from exactly the people the configuration names, whenever
-// one of them holds no platform role. The bot refuses an ordinary member when
-// the command arrives, which is the check that matters; the panel is a menu, not
-// a lock.
-func (c *Catalog) Panel(prefix string) []qqbotsdk.PanelItem {
+// What a panel holds is what the table declares for that scene, so the group
+// panel and the single-chat one are two readings of one list rather than two
+// lists. only_admin is left unset for every entry unless a command asks for it by
+// name: see PanelPlacement.OnlyPlatformAdmins for why the flag is not the gate.
+func (c *Catalog) Panel(scene Scene, prefix string) []qqbotsdk.PanelItem {
 	var items []qqbotsdk.PanelItem
 	for _, def := range c.defs {
-		if def.Unregistered {
+		place, offered := def.panelPlace(scene)
+		if !offered {
 			continue
 		}
+		// An entry is only worth a place in the menu when there is something
+		// behind it: a command whose only answer is that it is not configured is
+		// worse than no command at all.
 		if def.Available != nil && !def.Available() {
 			continue
 		}
 		items = append(items, qqbotsdk.PanelItem{
-			Name: prefix + def.Name,
-			Desc: def.Desc,
-			Type: qqbotsdk.PanelItemCommand,
+			Name:      prefix + def.Name,
+			Desc:      def.Desc,
+			Type:      qqbotsdk.PanelItemCommand,
+			OnlyAdmin: place.OnlyPlatformAdmins,
 		})
 	}
 	return items
+}
+
+// panelPlace reports where this command is offered in one scene.
+func (d Def) panelPlace(scene Scene) (PanelPlacement, bool) {
+	for _, place := range d.Panels {
+		if place.Scene == scene {
+			return place, true
+		}
+	}
+	return PanelPlacement{}, false
 }
 
 // fillPrefix puts the configured prefix where a show line asked for it.

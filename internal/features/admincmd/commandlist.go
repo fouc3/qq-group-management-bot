@@ -20,12 +20,35 @@ import (
 // to the dispatch, the help and the panel at once, and a word that would invoke
 // two of them is refused at startup instead of quietly shadowing one.
 
-// panelRemark marks the panel this bot owns.
+// panelRemark marks the panel this bot owns in groups.
 //
 // The panel is found by its remark instead of by an id kept somewhere: the
 // remark travels with the panel, so a bot restarted on a fresh machine still
 // finds the panel it published rather than leaving a second one behind.
 const panelRemark = "qq-group-management-bot 指令面板"
+
+// panelPrivateRemark marks the panel shown in a single chat.
+//
+// A separate remark from the group panel, because they are separate panels: the
+// platform keys them by scope and this bot keeps the two in step by looking each
+// one up by its own remark.
+const panelPrivateRemark = panelRemark + "（私聊）"
+
+// groupPanel is where most of these commands are offered.
+//
+// Written as a function so that the table below still reads as what each command
+// is, rather than as a list of repeated declarations.
+func groupPanel() []command.PanelPlacement {
+	return []command.PanelPlacement{{Scene: command.InGroup}}
+}
+
+// bothPanels is for the commands a single chat answers as well as a group.
+func bothPanels() []command.PanelPlacement {
+	return []command.PanelPlacement{
+		{Scene: command.InGroup},
+		{Scene: command.InPrivate},
+	}
+}
 
 // commandDefs is what the bot answers, in the order it is shown.
 func (h *handler) commandDefs() []command.Def {
@@ -41,10 +64,11 @@ func (h *handler) commandDefs() []command.Def {
 			// member could not already see when an administrator mistypes a
 			// command.
 			Audience: command.Everyone,
-			Run:      h.menuCommand,
-			// A single chat answers it with its own list rather than a line of
-			// its own, which is why PrivateUsage is left out: a line here would
-			// be a line added to that list.
+			// Offered in both panels: a single chat answers it with its own list
+			// rather than a line of its own, which is why PrivateUsage is left
+			// out -- a line here would be a line added to that list.
+			Panels:  bothPanels(),
+			Run:     h.menuCommand,
 			Private: h.privateMenu,
 		},
 		{
@@ -56,6 +80,7 @@ func (h *handler) commandDefs() []command.Def {
 			// and until that is written down nothing else can be configured.
 			Audience:            command.Whois,
 			InUnconfiguredGroup: true,
+			Panels:              groupPanel(),
 			Run:                 h.whoisCommand,
 		},
 		{
@@ -65,6 +90,7 @@ func (h *handler) commandDefs() []command.Def {
 				"\n（@ 取不到目标时，可改为回复引用目标的消息）",
 			Desc:     "禁言成员，最长 29 天",
 			Audience: command.Admins,
+			Panels:   groupPanel(),
 			Run:      h.muteCommand,
 		},
 		{
@@ -73,6 +99,7 @@ func (h *handler) commandDefs() []command.Def {
 			Usage:    "{prefix}解禁 [@目标] —— 解除禁言；正在验证中的成员不受此命令影响",
 			Desc:     "解除禁言",
 			Audience: command.Admins,
+			Panels:   groupPanel(),
 			Run:      h.unmuteCommand,
 		},
 		{
@@ -81,6 +108,7 @@ func (h *handler) commandDefs() []command.Def {
 			Usage:    "{prefix}重新发送验证 [@目标] —— 给正在验证中的成员重发验证通知",
 			Desc:     "重发验证通知",
 			Audience: command.Admins,
+			Panels:   groupPanel(),
 			Run:      h.resendCommand,
 		},
 		{
@@ -89,6 +117,7 @@ func (h *handler) commandDefs() []command.Def {
 			Usage:    "{prefix}重新验证 [@目标]",
 			Desc:     "重新发起验证",
 			Audience: command.Admins,
+			Panels:   groupPanel(),
 			Run:      h.reverifyCommand,
 		},
 		{
@@ -97,6 +126,7 @@ func (h *handler) commandDefs() []command.Def {
 			Usage:    "{prefix}黑名单 add|remove|list —— 管理禁止加群名单（只影响加群申请，不踢人）",
 			Desc:     "管理禁止加群名单",
 			Audience: command.Admins,
+			Panels:   groupPanel(),
 			Run:      h.blacklistCommand,
 		},
 		{
@@ -113,6 +143,7 @@ func (h *handler) commandDefs() []command.Def {
 			Usage:    "{prefix}违规举报 —— 引用一条消息举报（任何成员可用；也可写作{prefix}违规反馈）",
 			Desc:     "引用消息举报违规",
 			Audience: command.Everyone,
+			Panels:   groupPanel(),
 			Run:      h.reportCommand,
 			// Offered only when there is something behind it. The judge is handed
 			// over after this table is built, which is why it is asked rather
@@ -135,6 +166,7 @@ func (h *handler) commandDefs() []command.Def {
 			Usage:        "{prefix}违规查询 <回执单号> —— 查看一条违规回执（任何成员可用；详细内容需管理员点击按钮）",
 			Desc:         "查看违规回执",
 			Audience:     command.Everyone,
+			Panels:       bothPanels(),
 			Run:          h.receiptCommand,
 			Private:      h.privateReceipt,
 			PrivateUsage: "{prefix}违规查询 <回执单号> —— 查看一条违规判定的详细记录",
@@ -144,11 +176,11 @@ func (h *handler) commandDefs() []command.Def {
 			Usage: "{prefix}debug 超时测试 [@目标]（需开启调试）",
 			Desc:  "调试用",
 			// A tool for whoever runs the bot, not an entry to put in front of a
-			// group. The help still lists it, because there it can say what it
-			// is.
-			Unregistered: true,
-			Audience:     command.Admins,
-			Run:          h.debug,
+			// group. It declares no panel, which is the only way a command stays
+			// out of one; the help still lists it, because there it can say what
+			// it is.
+			Audience: command.Admins,
+			Run:      h.debug,
 		},
 	}
 }
@@ -168,16 +200,38 @@ func (h *handler) privateUsageText() string {
 	return strings.Join(h.commands().PrivateUsage(h.cfg.Prefix), "\n")
 }
 
-// panelItems renders the table as panel entries.
+// panelItems renders one scene's panel from the table.
 //
-// Why the panel is a menu rather than a lock -- only_admin is never sent, and an
-// entry with nothing behind it is left out -- is documented where the panel is
-// rendered, in the command package.
-func (h *handler) panelItems() []qqbotsdk.PanelItem {
-	return h.commands().Panel(h.cfg.Prefix)
+// Which commands appear where is what the table declares, so the group panel and
+// the single-chat one are two readings of one list rather than two lists that
+// drift. Why the panel is a menu rather than a lock -- only_admin is never sent
+// unless a command asks for it -- is documented in the command package.
+func (h *handler) panelItems(scene command.Scene) []qqbotsdk.PanelItem {
+	return h.commands().Panel(scene, h.cfg.Prefix)
 }
 
-// publishCommands registers the command list as the group instruction panel.
+// panelPlace is one panel this bot keeps: where it is shown, which scene's
+// commands it holds, and the remark it is found by.
+type panelPlace struct {
+	scope  string
+	remark string
+	scene  command.Scene
+}
+
+// panelPlaces are the panels this bot publishes.
+//
+// Both, always: a member who never writes in a group can still be shown what the
+// bot answers, and the single-chat panel is the only place that says so. Each is
+// published on its own, so one failing does not take the other with it.
+func (h *handler) panelPlaces() []panelPlace {
+	return []panelPlace{
+		{scope: qqbotsdk.PanelScopeGroup, remark: panelRemark, scene: command.InGroup},
+		{scope: qqbotsdk.PanelScopeC2C, remark: panelPrivateRemark, scene: command.InPrivate},
+	}
+}
+
+// publishCommands registers the command list as the instruction panel, once for
+// each place it is shown: in a group, and in a single chat.
 //
 // A failure is reported and swallowed. The panel is how a member discovers the
 // commands; it is not what makes them work, and a bot that refused to start
@@ -186,53 +240,84 @@ func (h *handler) publishCommands(ctx context.Context) {
 	if !h.registersCommands() {
 		return
 	}
-
-	panel := &qqbotsdk.Panel{Remark: panelRemark, Items: h.panelItems()}
-	existing, err := h.findPanel(ctx)
-	switch {
-	case err != nil:
-		h.deps.Logger.Warn("could not look for an existing instruction panel, "+
-			"so the commands are not published", "error", err)
-		return
-	case existing != nil:
-		if err := h.updatePanel(ctx, existing, panel); err != nil {
-			h.deps.Logger.Warn("could not update the instruction panel", "error", err)
-			return
-		}
-		h.deps.Logger.Info("the instruction panel was updated",
-			"panel_id", existing.PanelID, "items", len(panel.Items))
-	default:
-		openIDs := h.panelGroupOpenIDs()
-		panelID, err := h.deps.Client.CreatePanel(ctx, &qqbotsdk.PanelCreateRequest{
-			Scope:        qqbotsdk.PanelScopeGroup,
-			TargetType:   h.panelTargetType(),
-			GroupOpenIDs: openIDs,
-			Panel:        panel,
-		})
-		if err != nil {
-			h.deps.Logger.Warn("could not publish the instruction panel", "error", err)
-			return
-		}
-		h.deps.Logger.Info("the instruction panel was published",
-			"panel_id", panelID, "items", len(panel.Items), "groups", len(openIDs))
+	for _, place := range h.panelPlaces() {
+		h.publishPanel(ctx, place)
 	}
 }
 
-// findPanel returns the panel this bot owns, or nil when there is none.
-func (h *handler) findPanel(ctx context.Context) (*qqbotsdk.PanelRecord, error) {
+// publishPanel brings one panel up to date, creating it when the bot has not
+// published it yet.
+func (h *handler) publishPanel(ctx context.Context, place panelPlace) {
+	items := h.panelItems(place.scene)
+	if len(items) == 0 {
+		// Nothing to offer there, so there is nothing to publish. A panel with no
+		// entries would be an empty menu in front of every member.
+		return
+	}
+	panel := &qqbotsdk.Panel{Remark: place.remark, Items: items}
+
+	existing, err := h.findPanel(ctx, place)
+	switch {
+	case err != nil:
+		h.deps.Logger.Warn("could not look for an existing instruction panel, "+
+			"so the commands are not published", "scope", place.scope, "error", err)
+		return
+	case existing != nil:
+		if err := h.updatePanel(ctx, existing, panel); err != nil {
+			h.deps.Logger.Warn("could not update the instruction panel",
+				"scope", place.scope, "error", err)
+			return
+		}
+		h.deps.Logger.Info("the instruction panel was updated",
+			"scope", place.scope, "panel_id", existing.PanelID, "items", len(panel.Items))
+	default:
+		targetType, groupOpenIDs := h.panelTargets(place.scope)
+		panelID, err := h.deps.Client.CreatePanel(ctx, &qqbotsdk.PanelCreateRequest{
+			Scope:        place.scope,
+			TargetType:   targetType,
+			GroupOpenIDs: groupOpenIDs,
+			Panel:        panel,
+		})
+		if err != nil {
+			h.deps.Logger.Warn("could not publish the instruction panel",
+				"scope", place.scope, "error", err)
+			return
+		}
+		h.deps.Logger.Info("the instruction panel was published",
+			"scope", place.scope, "panel_id", panelID, "items", len(panel.Items),
+			"groups", len(groupOpenIDs))
+	}
+}
+
+// panelTargets says what a panel applies to.
+//
+// The group panel applies to the groups being managed, which is the list that
+// changes between starts. The single-chat panel applies to everybody who writes
+// to the bot, because there is no list of users to keep -- the people who may use
+// it are whoever the platform lets open a conversation with it.
+func (h *handler) panelTargets(scope string) (string, []string) {
+	if scope != qqbotsdk.PanelScopeGroup {
+		return qqbotsdk.PanelTargetAll, nil
+	}
+	return h.panelTargetType(), h.panelGroupOpenIDs()
+}
+
+// findPanel returns the panel this bot owns in one scope, or nil when there is
+// none.
+func (h *handler) findPanel(ctx context.Context, place panelPlace) (*qqbotsdk.PanelRecord, error) {
 	cursor := ""
 	// Bounded rather than unbounded: a bot with more panels than this is not a
 	// case worth looping forever over, and the one being looked for would have
 	// been found in the first pages.
 	for page := 0; page < 10; page++ {
-		list, err := h.deps.Client.ListPanels(ctx, qqbotsdk.PanelScopeGroup,
-			cursor, qqbotsdk.MaxPanelPageSize)
+		list, err := h.deps.Client.ListPanels(ctx, place.scope, cursor,
+			qqbotsdk.MaxPanelPageSize)
 		if err != nil {
 			return nil, err
 		}
 		for index := range list.Records {
 			record := &list.Records[index]
-			if record.Panel != nil && record.Panel.Remark == panelRemark {
+			if record.Panel != nil && record.Panel.Remark == place.remark {
 				return record, nil
 			}
 		}

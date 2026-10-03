@@ -10,13 +10,16 @@ func table(t *testing.T) *Catalog {
 	t.Helper()
 	catalog, err := NewCatalog([]Def{
 		{Name: "菜单", Aliases: []string{"menu", "help"}, Usage: "{prefix}菜单", Desc: "显示可用命令",
-			Audience: Everyone, PrivateUsage: "{prefix}菜单"},
+			Audience: Everyone, PrivateUsage: "{prefix}菜单",
+			Panels: []PanelPlacement{{Scene: InGroup}, {Scene: InPrivate}}},
 		{Name: "禁言", Aliases: []string{"mute"}, Usage: "{prefix}禁言 <时长>", Desc: "禁言成员",
-			Audience: Admins},
+			Audience: Admins, Panels: []PanelPlacement{{Scene: InGroup}}},
 		{Name: "违规举报", Usage: "{prefix}违规举报", Desc: "引用消息举报", Audience: Everyone,
-			Available: func() bool { return false }},
-		{Name: "debug", Usage: "{prefix}debug", Desc: "调试用", Audience: Admins,
-			Unregistered: true},
+			Available: func() bool { return false },
+			Panels:    []PanelPlacement{{Scene: InGroup}}},
+		{Name: "回执", Usage: "{prefix}回执 <单号>", Desc: "查看回执", Audience: Everyone,
+			Panels: []PanelPlacement{{Scene: InPrivate}}},
+		{Name: "debug", Usage: "{prefix}debug", Desc: "调试用", Audience: Admins},
 	})
 	if err != nil {
 		t.Fatalf("building the table: %v", err)
@@ -66,33 +69,56 @@ func TestTwoCommandsCannotShareAWord(t *testing.T) {
 	}
 }
 
-// TestThePanelAndTheHelpComeFromTheSameTable covers the drift this table exists
-// to prevent: what the menu offers and what the bot answers are read from one
-// place, so the menu cannot advertise something that is not there.
-func TestThePanelAndTheHelpComeFromTheSameTable(t *testing.T) {
+// TestEveryPanelIsReadOffTheTable covers what each panel holds: the commands that
+// declare that scene, and nothing else.
+//
+// The two panels are deliberately not each other's complement -- one command
+// declares only the group panel, another only the single-chat one -- because what
+// a panel offers is the plugin's decision per scene, and a command can be worth a
+// signpost in one place and not in the other.
+func TestEveryPanelIsReadOffTheTable(t *testing.T) {
 	catalog := table(t)
 
-	var names []string
-	for _, item := range catalog.Panel("/") {
-		names = append(names, item.Name)
+	var group []string
+	for _, item := range catalog.Panel(InGroup, "/") {
+		group = append(group, item.Name)
 	}
-	// The unregistered command and the unavailable one are both left out.
-	if want := []string{"/菜单", "/禁言"}; !reflect.DeepEqual(names, want) {
-		t.Errorf("panel = %v, want %v", names, want)
+	// The command that declares no panel is left out, and so is the one that
+	// declares only the single-chat panel, and the one with nothing behind it.
+	if want := []string{"/菜单", "/禁言"}; !reflect.DeepEqual(group, want) {
+		t.Errorf("the group panel = %v, want %v", group, want)
+	}
+
+	var private []string
+	for _, item := range catalog.Panel(InPrivate, "/") {
+		private = append(private, item.Name)
+	}
+	if want := []string{"/菜单", "/回执"}; !reflect.DeepEqual(private, want) {
+		t.Errorf("the single-chat panel = %v, want %v", private, want)
+	}
+
+	// Nothing is hidden from anybody unless a command asks for it by name.
+	for _, scene := range []Scene{InGroup, InPrivate} {
+		for _, item := range catalog.Panel(scene, "/") {
+			if item.OnlyAdmin {
+				t.Errorf("%s is restricted to the platform's administrators", item.Name)
+			}
+		}
 	}
 
 	help := catalog.Usage("/")
 	if len(help) != len(catalog.Definitions()) {
 		t.Errorf("help lists %d of %d commands", len(help), len(catalog.Definitions()))
 	}
-	// The unregistered one is in the help, which is where it can say what it is.
+	// The command that declares no panel is in the help, which is where it can
+	// say what it is.
 	if want := "/debug"; help[len(help)-1] != want {
 		t.Errorf("the last help line = %q, want %q", help[len(help)-1], want)
 	}
 
 	// A single chat lists only what it answers: one line, and not the group's.
-	private := catalog.PrivateUsage("/")
-	if want := []string{"/菜单"}; !reflect.DeepEqual(private, want) {
-		t.Errorf("private usage = %v, want %v", private, want)
+	privateUsage := catalog.PrivateUsage("/")
+	if want := []string{"/菜单"}; !reflect.DeepEqual(privateUsage, want) {
+		t.Errorf("private usage = %v, want %v", privateUsage, want)
 	}
 }

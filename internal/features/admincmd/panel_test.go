@@ -1,21 +1,45 @@
 package admincmd
 
-import "testing"
+import (
+	"testing"
 
-// publishedPanel returns the panel this start published, or nil.
+	"github.com/fouc3/qq-group-management-bot/internal/command"
+)
+
+// publishedPanel returns the panel this start published in one scope, or nil.
 //
 // Read out of the recorded call rather than from a client the harness would have
 // had to fake: what the platform receives is the thing worth asserting, and this
-// is that body.
-func (h *harness) publishedPanel() map[string]any {
+// is that body. The scope is in the body of the call that creates a panel, which
+// is how one is told from the other -- and the single-chat panel is the one this
+// bot has only started publishing.
+func (h *harness) publishedPanel(scope string) map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, call := range h.calls {
+		if call["scope"] != scope {
+			continue
+		}
 		if panel, ok := call["panel"].(map[string]any); ok {
 			return panel
 		}
 	}
 	return nil
+}
+
+// panelScopes returns the scopes this start published a panel in.
+func (h *harness) panelScopes() map[string]bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	scopes := map[string]bool{}
+	for _, call := range h.calls {
+		if scope, ok := call["scope"].(string); ok {
+			if _, panel := call["panel"].(map[string]any); panel {
+				scopes[scope] = true
+			}
+		}
+	}
+	return scopes
 }
 
 // panelEntries returns the published entries by name.
@@ -37,17 +61,17 @@ func panelEntries(t *testing.T, panel map[string]any) map[string]map[string]any 
 	return entries
 }
 
-// TestThePanelPublishesEveryCommandButDebug covers what the panel is for: a
+// TestTheGroupPanelPublishesEveryCommandButDebug covers what the panel is for: a
 // member opening the command menu sees what the bot answers.
 //
 // /debug is the exception the configuration asks for. It is a tool for whoever
 // runs the bot, and putting it in front of a group invites somebody to press it.
-func TestThePanelPublishesEveryCommandButDebug(t *testing.T) {
+func TestTheGroupPanelPublishesEveryCommandButDebug(t *testing.T) {
 	h := newHarnessWithRegistering(t, baseSection)
 
-	panel := h.publishedPanel()
+	panel := h.publishedPanel("group")
 	if panel == nil {
-		t.Fatal("no instruction panel was published")
+		t.Fatal("no group instruction panel was published")
 	}
 	entries := panelEntries(t, panel)
 
@@ -75,6 +99,64 @@ func TestThePanelPublishesEveryCommandButDebug(t *testing.T) {
 	}
 }
 
+// TestASingleChatGetsItsOwnPanel covers the panel that only a single chat shows.
+//
+// It is not the group's panel under another name. The platform keeps them apart by
+// scope, and what belongs in it is what a single chat answers -- a group's panel
+// put here would offer commands that cannot run without a group, and the member
+// pressing one would learn that by being refused.
+func TestASingleChatGetsItsOwnPanel(t *testing.T) {
+	h := newHarnessWithRegistering(t, baseSection)
+
+	panel := h.publishedPanel("c2c")
+	if panel == nil {
+		t.Fatal("no single-chat instruction panel was published")
+	}
+	entries := panelEntries(t, panel)
+	for _, want := range []string{"/菜单", "/违规查询"} {
+		if _, ok := entries[want]; !ok {
+			t.Errorf("the single-chat panel does not offer %q, which is answered there", want)
+		}
+	}
+	for _, unwanted := range []string{"/禁言", "/whois", "/黑名单", "/debug"} {
+		if _, ok := entries[unwanted]; ok {
+			t.Errorf("the single-chat panel offers %q, which a single chat does not answer",
+				unwanted)
+		}
+	}
+
+	// Everybody who can write to the bot: there is no list of users to keep, and a
+	// panel applying to nobody would be a menu nobody ever sees.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, call := range h.calls {
+		if call["scope"] != "c2c" {
+			continue
+		}
+		if call["target_type"] != "all" {
+			t.Errorf("the single-chat panel applies to %v, want all", call["target_type"])
+		}
+		if groups, ok := call["group_openids"].([]any); ok && len(groups) > 0 {
+			t.Errorf("the single-chat panel was given %d group(s)", len(groups))
+		}
+	}
+}
+
+// TestBothPanelsArePublished covers the pair: one start keeps one panel in each
+// place, so a bot that has been running for a while does not leave the single-chat
+// panel behind when the group one is updated.
+func TestBothPanelsArePublished(t *testing.T) {
+	h := newHarnessWithRegistering(t, baseSection)
+
+	scopes := h.panelScopes()
+	if !scopes["group"] || !scopes["c2c"] {
+		t.Errorf("the panels published were %v, want one in each of group and c2c", scopes)
+	}
+	if len(scopes) != 2 {
+		t.Errorf("the panels published were %v, want exactly two", scopes)
+	}
+}
+
 // TestThePanelRestrictsNobody covers the flag that is deliberately left unset.
 //
 // The platform reads only_admin as its own notion of the role -- the group owner
@@ -87,20 +169,27 @@ func TestThePanelPublishesEveryCommandButDebug(t *testing.T) {
 func TestThePanelRestrictsNobody(t *testing.T) {
 	h := newHarnessWithRegistering(t, baseSection)
 
-	entries := panelEntries(t, h.publishedPanel())
-	if len(entries) == 0 {
-		t.Fatal("the panel is empty")
-	}
-	for name, entry := range entries {
-		if entry["only_admin"] == true {
-			t.Errorf("entry %q is restricted to the platform's own administrators, "+
-				"which is not the list this bot obeys", name)
+	for _, scope := range []string{"group", "c2c"} {
+		panel := h.publishedPanel(scope)
+		if panel == nil {
+			t.Fatalf("no panel was published in %s", scope)
+		}
+		entries := panelEntries(t, panel)
+		if len(entries) == 0 {
+			t.Fatalf("the panel published in %s is empty", scope)
+		}
+		for name, entry := range entries {
+			if entry["only_admin"] == true {
+				t.Errorf("entry %q in %s is restricted to the platform's own "+
+					"administrators, which is not the list this bot obeys", name, scope)
+			}
 		}
 	}
+
 	// The management commands are still offered: refusing them at run time is
 	// what keeps them out of the wrong hands, and a menu nobody can see is a
 	// command nobody knows exists.
-	if _, ok := entries["/黑名单"]; !ok {
+	if _, ok := panelEntries(t, h.publishedPanel("group"))["/黑名单"]; !ok {
 		t.Error("the panel does not offer the blacklist command")
 	}
 }
@@ -110,8 +199,8 @@ func TestThePanelRestrictsNobody(t *testing.T) {
 func TestThePanelIsNotPublishedWhenTheSectionSaysSo(t *testing.T) {
 	h := newHarness(t, baseSection)
 
-	if panel := h.publishedPanel(); panel != nil {
-		t.Error("a panel was published even though register_commands is off")
+	if scopes := h.panelScopes(); len(scopes) != 0 {
+		t.Errorf("panels were published in %v even though register_commands is off", scopes)
 	}
 }
 
@@ -123,7 +212,7 @@ func TestThePanelIsNotPublishedWhenTheSectionSaysSo(t *testing.T) {
 // with and without a judge behind it.
 func TestTheReportCommandIsOnlyOfferedWhenItWorks(t *testing.T) {
 	offered := func(h *handler) bool {
-		for _, item := range h.panelItems() {
+		for _, item := range h.panelItems(command.InGroup) {
 			if item.Name == "/违规举报" {
 				return true
 			}
