@@ -118,9 +118,15 @@ func TestAJudgementIsWrittenDown(t *testing.T) {
 		t.Errorf("action = %q before anybody acted", entry.Action)
 	}
 
-	// The caller closes it once it has acted.
-	if err := h.RecordOutcome(context.Background(), report.JudgementID,
-		"mute+recall", 600); err != nil {
+	// The caller closes it once it has acted, with what was taken back and why.
+	if err := h.RecordOutcome(context.Background(), report.JudgementID, store.Outcome{
+		Action:       "已撤回 1 条消息 已禁言 10分钟",
+		MuteSeconds:  600,
+		RecallReason: "已撤回 1 条消息",
+		Recalls: []store.RecallOutcome{
+			{ID: "QUOTED-MESSAGE", Number: 1, Text: "卖号广告", Recalled: true},
+		},
+	}); err != nil {
 		t.Fatalf("RecordOutcome: %v", err)
 	}
 	entries, err = judgements.Recent(context.Background(), group, report.SubjectOpenID,
@@ -128,9 +134,14 @@ func TestAJudgementIsWrittenDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recent after the outcome: %v", err)
 	}
-	if entries[0].Action != "mute+recall" || entries[0].MuteSeconds != 600 {
+	if entries[0].Action != "已撤回 1 条消息 已禁言 10分钟" ||
+		entries[0].MuteSeconds != 600 {
 		t.Errorf("outcome = %q, %d; want what the caller did",
 			entries[0].Action, entries[0].MuteSeconds)
+	}
+	if entries[0].RecallReason == "" || len(entries[0].Recalls) != 1 {
+		t.Errorf("recall = %+v, %q; want what went and why",
+			entries[0].Recalls, entries[0].RecallReason)
 	}
 }
 

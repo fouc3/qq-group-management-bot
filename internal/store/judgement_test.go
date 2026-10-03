@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -49,7 +50,16 @@ func TestAJudgementIsRecorded(t *testing.T) {
 
 	// What followed is recorded separately, because deciding and doing happen in
 	// different places.
-	if err := opened.Judgements().SetOutcome(ctx, "JUDGE-1", "mute+recall", 600); err != nil {
+	outcome := Outcome{
+		Action:       "已撤回 1 条消息 已禁言 10分钟",
+		MuteSeconds:  600,
+		RecallReason: "已撤回 1 条",
+		Recalls: []RecallOutcome{
+			{ID: "M-1", Number: 1, Text: "加群送皮肤", Recalled: true},
+			{ID: "M-2", Number: 2, Text: "私聊我", Recalled: false, Reason: "无操作权限"},
+		},
+	}
+	if err := opened.Judgements().SetOutcome(ctx, "JUDGE-1", outcome); err != nil {
 		t.Fatalf("SetOutcome: %v", err)
 	}
 	entries, err = opened.Judgements().Recent(ctx, "GROUP-1", "SUBJECT-1",
@@ -57,9 +67,25 @@ func TestAJudgementIsRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recent after the outcome: %v", err)
 	}
-	if entries[0].Action != "mute+recall" || entries[0].MuteSeconds != 600 {
-		t.Errorf("outcome = %q, %d; want what was done",
-			entries[0].Action, entries[0].MuteSeconds)
+	got = entries[0]
+	if got.Action != outcome.Action || got.MuteSeconds != 600 {
+		t.Errorf("outcome = %q, %d; want what was done", got.Action, got.MuteSeconds)
+	}
+	if got.RecallReason != "已撤回 1 条" {
+		t.Errorf("recall reason = %q, want why it was taken back", got.RecallReason)
+	}
+	// Which messages went and which stayed is the question the whole column
+	// exists for, and the text is why: the message is gone from the group.
+	if len(got.Recalls) != 2 {
+		t.Fatalf("recalls = %+v, want one line per message", got.Recalls)
+	}
+	if !got.Recalls[0].Recalled || got.Recalls[0].Text != "加群送皮肤" {
+		t.Errorf("recalls[0] = %+v, want the one that was taken back, with its text",
+			got.Recalls[0])
+	}
+	if got.Recalls[1].Recalled || got.Recalls[1].Reason != "无操作权限" {
+		t.Errorf("recalls[1] = %+v, want the one that stayed, with the reason",
+			got.Recalls[1])
 	}
 }
 
@@ -104,7 +130,75 @@ func TestARecordNeedsAnID(t *testing.T) {
 		Judgement{GroupOpenID: "GROUP-1"}); err == nil {
 		t.Error("a judgement without an id must be refused")
 	}
-	if err := opened.Judgements().SetOutcome(context.Background(), "", "none", 0); err == nil {
+	if err := opened.Judgements().SetOutcome(context.Background(), "", Outcome{}); err == nil {
 		t.Error("an outcome without a judgement id must be refused")
+	}
+}
+
+// TestAJudgementIsFoundByItsReceipt covers the lookup a receipt number is for.
+//
+// The number in a group is short so it can be read off a screen and typed back,
+// which means the lookup has to accept a prefix -- and has to refuse one that
+// means more than one record rather than pick.
+func TestAJudgementIsFoundByItsReceipt(t *testing.T) {
+	opened := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	for _, entry := range []Judgement{
+		{ID: "a1b2c3d4e5f60718", GroupOpenID: "GROUP-1", Category: "ad",
+			Verdict: JudgementViolation, Reason: "卖号广告", CreatedAt: now.Unix()},
+		{ID: "a1b2c3ffffffffff", GroupOpenID: "GROUP-2", Category: "fraud",
+			Verdict: JudgementViolation, Reason: "骗钱", CreatedAt: now.Unix()},
+		{ID: "ffffffffffffffff", GroupOpenID: "GROUP-2", Verdict: JudgementOK,
+			Reason: "只是推荐链接", CreatedAt: now.Unix()},
+	} {
+		if err := opened.Judgements().Record(ctx, entry); err != nil {
+			t.Fatalf("Record(%s): %v", entry.ID, err)
+		}
+	}
+
+	cases := map[string]struct {
+		ask     string
+		want    string
+		wantErr error
+	}{
+		"the whole id":            {ask: "a1b2c3d4e5f60718", want: "a1b2c3d4e5f60718"},
+		"a prefix that is unique": {ask: "a1b2c3d", want: "a1b2c3d4e5f60718"},
+		"the other one":           {ask: "a1b2c3fff", want: "a1b2c3ffffffffff"},
+		"surrounded by spaces":    {ask: "  a1b2c3d  ", want: "a1b2c3d4e5f60718"},
+		"a prefix of both":        {ask: "a1b2c3", wantErr: ErrAmbiguousJudgement},
+		"nothing at all":          {ask: "zzzz", wantErr: ErrJudgementNotFound},
+		"an empty receipt":        {ask: "   ", wantErr: ErrJudgementNotFound},
+		// A pattern, not a prefix: without escaping this would match every row.
+		"a pattern character": {ask: "%", wantErr: ErrJudgementNotFound},
+		"an underscore":       {ask: "_", wantErr: ErrJudgementNotFound},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			entry, err := opened.Judgements().Find(ctx, testCase.ask)
+			if testCase.wantErr != nil {
+				if !errors.Is(err, testCase.wantErr) {
+					t.Fatalf("Find(%q) err = %v, want %v", testCase.ask, err, testCase.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Find(%q): %v", testCase.ask, err)
+			}
+			if entry.ID != testCase.want {
+				t.Errorf("Find(%q) = %s, want %s", testCase.ask, entry.ID, testCase.want)
+			}
+		})
+	}
+
+	// The rest of the row travels with it: the reason is the whole point of
+	// looking a receipt up.
+	entry, err := opened.Judgements().Find(ctx, "ffffffff")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if entry.Reason != "只是推荐链接" || entry.GroupOpenID != "GROUP-2" {
+		t.Errorf("found %+v, want the record that id belongs to", entry)
 	}
 }

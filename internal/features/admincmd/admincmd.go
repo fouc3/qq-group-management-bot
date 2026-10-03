@@ -293,6 +293,12 @@ func (h *handler) Register(_ context.Context) error {
 	// because handler.firstSight drops the second delivery.
 	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, h.onMessage)
 	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, h.onMessage)
+	// A single chat carries one command and nothing else: reading a receipt,
+	// which is the only way an administrator can see the model's own words about
+	// a member without the group reading them too. It is registered whatever the
+	// configuration says about receipts, because the handler decides what to
+	// answer rather than the registration.
+	h.deps.Client.RegisterFunc(qqbotsdk.EventC2CMessageCreate, h.onPrivateMessage)
 	h.deps.Logger.Info("administrator commands are ready",
 		"prefix", h.cfg.Prefix, "debug", h.cfg.Debug,
 		"require_mention", h.mentionsRequired(),
@@ -629,6 +635,11 @@ func (h *handler) run(ctx context.Context, data *qqbotsdk.GroupMessageCreateData
 		return h.resendVerification(ctx, data, target)
 	case "黑名单", "blacklist":
 		return h.blacklistCommand(ctx, data, command)
+	case "违规查询", "回执", "receipt", "violation":
+		// Reached only from here, which is already behind the administrator
+		// check: a receipt holds the model's words about a member, so it is not
+		// something an ordinary member may ask for in the group.
+		return h.receiptCommand(ctx, data, command)
 	case "debug":
 		return h.debug(ctx, data, command)
 	default:
@@ -1006,6 +1017,14 @@ func (h *handler) reply(ctx context.Context, data *qqbotsdk.GroupMessageCreateDa
 	// group's side, from a bot that ignored them.
 	if err := h.sendMessage(ctx, data.GroupOpenID, text, data.ID); err != nil {
 		h.deps.Logger.Warn("could not answer a command", "error", err)
+	}
+}
+
+// replyPrivately answers in a single chat, as a passive reply to the command.
+func (h *handler) replyPrivately(ctx context.Context, data *qqbotsdk.C2CMessageCreateData, text string) {
+	if err := h.sendPrivateMessage(ctx, data.Author.UserOpenID, text, data.ID); err != nil {
+		h.deps.Logger.Warn("could not answer a private command",
+			"member", data.Author.UserOpenID, "error", err)
 	}
 }
 

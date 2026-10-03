@@ -120,6 +120,14 @@ func temporaryIndex(index string) bool {
 func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	quotedText, reporterOpenID string) (feature.ModerationVerdict, error) {
 	report, err := h.judgeQuoted(ctx, groupOpenID, quotedIndex, quotedText)
+	if errors.Is(err, feature.ErrAlreadyPunished) {
+		// A second record would say a second judgement happened, and none did:
+		// the answer is that this message was dealt with already, which the
+		// record of the first judgement already says. Writing a row of errors
+		// here would make "nobody looked" out of "there was nothing left to
+		// look at", which is the confusion the verdict column exists to avoid.
+		return report, err
+	}
 	return h.recordJudgement(ctx, groupOpenID, reporterOpenID, report, err), err
 }
 
@@ -156,6 +164,12 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	// return value exists to prevent.
 	chain, anchor, err := h.resolveWindow(ctx, groupOpenID, quotedIndex, quotedText)
 	if err != nil {
+		// Already taken back is not a failure to judge, so it goes out as itself
+		// rather than wrapped in the "nobody looked" error, which would tell the
+		// group the opposite of what happened.
+		if errors.Is(err, feature.ErrAlreadyPunished) {
+			return feature.ModerationVerdict{}, err
+		}
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 	}
 
@@ -205,9 +219,9 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	}
 	report.Category = verdict.Category
 	report.Reason = verdict.Reason
+	report.Reasoning = verdict.Reasoning
 	report.Model = verdict.Model
-	report.RecallMessageIDs, report.RecallNumbers =
-		resolveRecall(chain, subject, verdict.Recall, quotedID, anchor)
+	report.RecallMessages = resolveRecall(chain, subject, verdict.Recall, quotedID, anchor)
 	if !verdict.Violation() {
 		return report, nil
 	}

@@ -2,6 +2,7 @@ package moderation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
 
 // timeline builds messages spaced evenly from start.
@@ -300,5 +302,79 @@ func TestPruningDropsWhatIsTooOld(t *testing.T) {
 	}
 	if _, err := cache.Context(ctx, group, "IDX-OLD", 10, 10, time.Minute); err != ErrNotCached {
 		t.Errorf("err = %v for a pruned message, want ErrNotCached", err)
+	}
+}
+
+// TestATakenBackMessageNeverComesBack covers the mark, which is the difference
+// between one punishment and three.
+//
+// A message that was withdrawn cannot be read again by anybody, so judging it
+// again is punishing somebody for words the group can no longer see. Measured in
+// production: one advertisement was withdrawn twice and its author was silenced
+// three times in three minutes, because each report brought the whole window back
+// in front of the judge as if nothing had happened to it.
+func TestATakenBackMessageNeverComesBack(t *testing.T) {
+	cache := testCache(t, 6*time.Hour)
+	ctx := context.Background()
+	group := "G-TestATakenBackMessageNeverComesBack"
+	start := time.Now().Add(-time.Hour)
+
+	// Five of the same member's messages a minute apart, so the window is theirs
+	// and not somebody else's.
+	ordered := timeline(start, time.Minute, 5)
+	for index := range ordered {
+		ordered[index].Text = fmt.Sprintf("第 %d 条", index+1)
+	}
+	for _, message := range ordered {
+		if err := cache.Record(ctx, group, message); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	// Two of them are taken back -- the middle one and the last one.
+	if err := cache.MarkPunished(ctx, group, []string{"IDX-02", "IDX-04"}); err != nil {
+		t.Fatalf("MarkPunished: %v", err)
+	}
+
+	// The marked ones are gone from the window and the rest are still there.
+	chain, err := cache.Context(ctx, group, "IDX-01", 10, 10, time.Hour)
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	got := chainIdx(chain)
+	want := []string{"IDX-00", "IDX-01", "IDX-03"}
+	if len(got) != len(want) {
+		t.Fatalf("window = %v, want %v: the two that were taken back are gone",
+			got, want)
+	}
+	for index, idx := range want {
+		if got[index] != idx {
+			t.Fatalf("window = %v, want %v", got, want)
+		}
+	}
+
+	// A report about a message that is already gone is refused as its own kind of
+	// answer, not as a failure to judge: the caller has to be able to tell the
+	// group which of the two happened.
+	_, err = cache.Context(ctx, group, "IDX-02", 10, 10, time.Hour)
+	if !errors.Is(err, feature.ErrAlreadyPunished) {
+		t.Errorf("err = %v for a message that was taken back, want ErrAlreadyPunished",
+			err)
+	}
+
+	// The mark is a fact about the message rather than about this call: it is
+	// still there when the same thing is asked again, and marking twice is not an
+	// error.
+	if err := cache.MarkPunished(ctx, group, []string{"IDX-02"}); err != nil {
+		t.Fatalf("MarkPunished a second time: %v", err)
+	}
+	if _, err := cache.Context(ctx, group, "IDX-02", 10, 10, time.Hour); !errors.Is(err,
+		feature.ErrAlreadyPunished) {
+		t.Errorf("err = %v after marking twice, want ErrAlreadyPunished", err)
+	}
+	// An index that is not in the cache is not a failure: it was cached, it was
+	// withdrawn, and then it aged out, which is the ordinary ending here.
+	if err := cache.MarkPunished(ctx, group, []string{"IDX-GONE", ""}); err != nil {
+		t.Errorf("MarkPunished on an unknown index: %v", err)
 	}
 }

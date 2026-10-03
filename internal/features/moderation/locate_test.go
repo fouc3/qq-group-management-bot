@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,8 +119,15 @@ func TestATemporaryQuoteIsResolvedEndToEnd(t *testing.T) {
 	}
 	// The recall list is the located message, by its own id -- the message the
 	// judgement actually saw, not the temporary name the quote carried.
-	if len(report.RecallMessageIDs) != 1 || report.RecallMessageIDs[0] ==
-		"TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4" {
-		t.Errorf("recall = %v, want the located message", report.RecallMessageIDs)
+	if len(report.RecallMessages) != 1 ||
+		report.RecallMessages[0].ID == "TMP_94e31996-8fcd-4b2e-bdd3-09e9d23bb5e4" {
+		t.Errorf("recall = %v, want the located message", report.RecallMessages)
+	}
+	// The index goes with it, because the caller has to find the message in the
+	// cache again to mark it as taken back, and the temporary one finds nothing.
+	if report.RecallMessages[0].Index == "" ||
+		strings.HasPrefix(report.RecallMessages[0].Index, "TMP_") {
+		t.Errorf("index = %q, want the located message's own index",
+			report.RecallMessages[0].Index)
 	}
 }

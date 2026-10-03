@@ -14,16 +14,42 @@ import (
 func (h *handler) JudgingEnabled() bool { return h.config().JudgingEnabled() }
 
 // RecordOutcome implements feature.Moderation.
-func (h *handler) RecordOutcome(ctx context.Context, judgementID, action string,
-	muteSeconds int64) error {
+func (h *handler) RecordOutcome(ctx context.Context, judgementID string,
+	outcome store.Outcome) error {
 	judgements := h.judgementStore()
 	if judgements == nil {
 		return nil
 	}
-	if err := judgements.SetOutcome(ctx, judgementID, action, muteSeconds); err != nil {
+	if err := judgements.SetOutcome(ctx, judgementID, outcome); err != nil {
 		return fmt.Errorf("recording what followed a judgement: %w", err)
 	}
 	return nil
+}
+
+// MarkPunished implements feature.Moderation.
+//
+// The messages are marked in the cache this feature owns, and the marking is the
+// reason the cache can be trusted to answer "has this been dealt with": a message
+// that was taken back never comes back in a window.
+//
+// A failure here is reported and not fatal. It costs the next report about the
+// same messages some accuracy, which is where things already were; refusing to
+// finish the punishment because the mark could not be written would trade a small
+// future problem for a real one now.
+func (h *handler) MarkPunished(ctx context.Context, groupOpenID string,
+	messageIndexes []string) error {
+	if h.cache == nil {
+		return nil
+	}
+	if err := h.cache.MarkPunished(ctx, groupOpenID, messageIndexes); err != nil {
+		return fmt.Errorf("marking messages as taken back: %w", err)
+	}
+	return nil
+}
+
+// LabelFor implements feature.Moderation.
+func (h *handler) LabelFor(category string) string {
+	return h.config().LabelFor(category)
 }
 
 // judgementStore is the record, or nil when this deployment has none.
@@ -61,6 +87,7 @@ func (h *handler) recordJudgement(ctx context.Context, groupOpenID, reporterOpen
 		Model:          report.Model,
 		MessageIDs:     report.JudgedMessageIDs,
 		Reason:         report.Reason,
+		Reasoning:      report.Reasoning,
 	}
 	switch {
 	case judgeErr != nil:

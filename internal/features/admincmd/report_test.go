@@ -10,6 +10,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // stubJudge stands in for the moderation feature.
@@ -33,6 +34,14 @@ type stubJudge struct {
 	quotedText  string
 	outcome     string
 	outcomeMute int64
+	// lastOutcome is the whole thing the command recorded, and punished is what it
+	// asked to be marked as dealt with. Both are here because they are the two
+	// halves an administrator reads back afterwards.
+	lastOutcome   store.Outcome
+	punished      []string
+	punishedGroup string
+	// label is what LabelFor answers with, for the receipt tests.
+	label string
 }
 
 func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
@@ -59,11 +68,31 @@ func (s *stubJudge) JudgingEnabled() bool { return true }
 
 // RecordOutcome keeps what it was told, so that the record and the act can be
 // asserted to have happened together.
-func (s *stubJudge) RecordOutcome(_ context.Context, judgementID, action string,
-	muteSeconds int64) error {
-	s.outcome = action
-	s.outcomeMute = muteSeconds
+func (s *stubJudge) RecordOutcome(_ context.Context, judgementID string,
+	outcome store.Outcome) error {
+	s.outcome = outcome.Action
+	s.outcomeMute = outcome.MuteSeconds
+	s.lastOutcome = outcome
 	return nil
+}
+
+// MarkPunished keeps the indexes it was told about.
+//
+// Only messages that were really taken back may arrive here, which is what the
+// tests assert: a message that stayed in the group is still something to judge.
+func (s *stubJudge) MarkPunished(_ context.Context, groupOpenID string,
+	messageIndexes []string) error {
+	s.punishedGroup = groupOpenID
+	s.punished = append(s.punished, messageIndexes...)
+	return nil
+}
+
+// LabelFor answers with the configured label the stub was built with.
+func (s *stubJudge) LabelFor(category string) string {
+	if s.label != "" {
+		return s.label
+	}
+	return category
 }
 
 // reportHarness builds a harness with a stub judge behind the command.
@@ -233,12 +262,14 @@ func TestAViolationIsChangedAndSaid(t *testing.T) {
 			MuteSeconds:     600,
 			SubjectOpenID:   "SUBJECT-OPENID",
 			QuotedMessageID: "QUOTED-MESSAGE",
-			// The judge names the messages to take back, and the group is told which
-			// ones they were by the numbers the judge was shown.
-			RecallMessageIDs: []string{"QUOTED-MESSAGE", "SECOND-MESSAGE"},
-			RecallNumbers:    []int{2, 5},
-			Reason:           "卖号广告", // the model's words, which must not be published
-			Model:            "stub-model",
+			// The judge names the messages to take back, and each one arrives with
+			// what the caller needs to act on it and to record it afterwards.
+			RecallMessages: []feature.JudgedMessage{
+				{ID: "QUOTED-MESSAGE", Index: "IDX-QUOTED", Number: 2, Text: "加群送皮肤"},
+				{ID: "SECOND-MESSAGE", Index: "IDX-SECOND", Number: 5, Text: "私聊我"},
+			},
+			Reason: "卖号广告", // the model's words, which must not be published
+			Model:  "stub-model",
 		},
 	}
 	h := reportHarness(t, judge)

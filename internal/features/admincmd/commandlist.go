@@ -94,6 +94,17 @@ func commands(prefix string) []command {
 			desc: "引用消息举报违规",
 		},
 		{
+			// The receipt number is what a group is told when somebody is
+			// punished, and this is how an administrator finds out what it stood
+			// for. It answers in a group -- about that group's records -- and in a
+			// private message with the bot, where the model's own words can be
+			// read without the group reading them too.
+			name:      "违规查询",
+			usage:     prefix + "违规查询 <回执单号> —— 查看一条违规判定的详细记录（群里只能查本群的，也可私聊机器人查）",
+			desc:      "查看违规判定详情",
+			adminOnly: true,
+		},
+		{
 			name:         "debug",
 			usage:        prefix + "debug 超时测试 [@目标]（需开启调试）",
 			desc:         "调试用",

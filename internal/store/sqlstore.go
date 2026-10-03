@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -106,6 +106,27 @@ CREATE TABLE IF NOT EXISTS moderation_judgements (
 );
 CREATE INDEX IF NOT EXISTS judgements_by_subject ON moderation_judgements (group_openid, subject_openid, created_at);
 CREATE INDEX IF NOT EXISTS judgements_by_age ON moderation_judgements (created_at);
+`,
+	// 4: what was taken back, and how the judge got there.
+	//
+	// The first version of this table recorded one sentence about the outcome,
+	// written by whoever acted, and a count. That answers "was anything done"
+	// and nothing else: after a report that recalled the wrong message, or
+	// recalled one that had already been taken back, there was no way to tell
+	// from the record -- which is how the same message came to be withdrawn
+	// twice and punished three times in three minutes.
+	//
+	//   - reasoning is the model's own chain of thought, when it was kept;
+	//   - recall_reason says why the messages were or were not taken back;
+	//   - recalls is one JSON object per message that was to be taken back,
+	//     carrying its text and whether it actually was.
+	//
+	// Added with a default rather than by rebuilding the table: the rows already
+	// there are real punishments, and the new columns are things nobody knew yet.
+	`
+ALTER TABLE moderation_judgements ADD COLUMN reasoning TEXT NOT NULL DEFAULT '';
+ALTER TABLE moderation_judgements ADD COLUMN recall_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE moderation_judgements ADD COLUMN recalls TEXT NOT NULL DEFAULT '[]';
 `,
 }
 

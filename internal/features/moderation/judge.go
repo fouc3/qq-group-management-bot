@@ -13,6 +13,8 @@ import (
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
+
+	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
 
 // JudgeSystemPrompt is the task, and the only instruction the model ever gets.
@@ -99,6 +101,11 @@ type Verdict struct {
 	// audit table, and never for the group: it is the one piece of the answer
 	// that is free text.
 	Reason string
+	// Reasoning is the model's chain of thought, empty when none was asked for or
+	// none came back. It goes to the same two places Reason does and for the same
+	// reason: a verdict is much easier to argue with when the argument that led
+	// to it is on the record.
+	Reasoning string
 	// Confidence is the model's own claim, kept for the audit.
 	Confidence float64
 	// Model names what answered, for the audit.
@@ -177,14 +184,20 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 				return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 			}
 			if h.config().Model.Thinking == "show" && strings.TrimSpace(reasoning) != "" {
-				// Kept because a surprising verdict has to be explainable afterwards. It
+				// Logged because a surprising verdict has to be explainable afterwards. It
 				// is never shown to the group: it is free text from a model, and the group
 				// gets the configured category name and nothing else.
 				h.deps.Logger.Info("the judge reasoned before answering",
 					"group", groupOpenID, "characters", len(reasoning),
 					"reasoning", oneLine(reasoning))
 			}
-			return h.answer(content, categories)
+			verdict, err := h.answer(content, categories)
+			// The chain is carried back whatever the answer was read as, including
+			// an answer that could not be read at all: "it reasoned and then
+			// produced something unreadable" is a different problem from "it
+			// never answered", and only the chain tells the two apart.
+			verdict.Reasoning = reasoning
+			return verdict, err
 		}
 
 		response, err := h.modelClient().CreateChatCompletion(callCtx, request)
@@ -198,6 +211,7 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	}
 
 	var lastErr error
+	lastReasoning := ""
 	for attempt := 1; attempt <= h.config().judgeRetries()+1; attempt++ {
 		verdict, err := onceOver()
 		if err == nil {
@@ -208,19 +222,22 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 			return verdict, nil
 		}
 		lastErr = err
+		if verdict.Reasoning != "" {
+			lastReasoning = verdict.Reasoning
+		}
 		if !errors.Is(err, errUnreadable) || attempt > h.config().judgeRetries() {
-			return Verdict{}, err
+			return Verdict{Reasoning: lastReasoning}, err
 		}
 		h.deps.Logger.Warn("the model's answer could not be read, asking again",
 			"group", groupOpenID, "attempt", attempt, "of", h.config().judgeRetries()+1,
 			"error", err)
 		select {
 		case <-callCtx.Done():
-			return Verdict{}, err
+			return Verdict{Reasoning: lastReasoning}, err
 		case <-time.After(judgeRetryDelay):
 		}
 	}
-	return Verdict{}, lastErr
+	return Verdict{Reasoning: lastReasoning}, lastErr
 }
 
 // judgeRetryDelay is how long the model is given before being asked again.
@@ -539,7 +556,7 @@ func isCategory(categories []string, name string) bool {
 }
 
 // resolveRecall turns the numbers a judge named into messages that may be taken
-// back, and into the numbers worth saying out loud.
+// back.
 //
 // A number is only a pointer, and it is checked against the window before anything
 // happens. A number the judge invented points at nothing; a number that points at
@@ -549,11 +566,24 @@ func isCategory(categories []string, name string) bool {
 //
 // When nothing usable was named, the reported message stands. A violation with
 // nothing taken back would leave the advertisement exactly where it was.
+//
+// Each message comes back whole -- id, index and text -- because the caller needs
+// all three and only one of them can be looked up afterwards: the id takes the
+// message back, the index finds it in the cache to mark it, and the text is what
+// is left of it once it is gone.
 func resolveRecall(chain []CachedMessage, subject string, numbers []int,
-	quotedID, quotedIndex string) ([]string, []int) {
+	quotedID, quotedIndex string) []feature.JudgedMessage {
 	seen := map[string]bool{}
-	var ids []string
-	var kept []int
+	var kept []feature.JudgedMessage
+	take := func(index int, number int) {
+		message := chain[index]
+		kept = append(kept, feature.JudgedMessage{
+			ID:     message.ID,
+			Index:  message.Idx,
+			Number: number,
+			Text:   message.Text,
+		})
+	}
 	for _, number := range numbers {
 		if number < 1 || number > len(chain) {
 			continue
@@ -563,19 +593,19 @@ func resolveRecall(chain []CachedMessage, subject string, numbers []int,
 			continue
 		}
 		seen[message.ID] = true
-		ids = append(ids, message.ID)
-		kept = append(kept, number)
+		take(number-1, number)
 	}
-	if len(ids) > 0 {
-		return ids, kept
+	if len(kept) > 0 {
+		return kept
 	}
 	if quotedID == "" {
-		return nil, nil
+		return nil
 	}
 	for index, message := range chain {
 		if message.Idx == quotedIndex && message.ID == quotedID {
-			return []string{quotedID}, []int{index + 1}
+			return []feature.JudgedMessage{{ID: quotedID, Index: message.Idx,
+				Number: index + 1, Text: message.Text}}
 		}
 	}
-	return []string{quotedID}, nil
+	return []feature.JudgedMessage{{ID: quotedID}}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
 
 // Cache keeps recent group messages in Redis, so that a reported message can be
@@ -336,7 +337,91 @@ func (c *Cache) Context(ctx context.Context, groupOpenID, quotedIdx string,
 	if position < 0 {
 		return nil, ErrNotCached
 	}
+	// The reported message itself having been taken back is the one case this
+	// cannot answer with a window at all. It is refused rather than judged
+	// without it, and refused with its own error, so that the group is told the
+	// report was already dealt with instead of being told the judgement failed.
+	if window[position].Punished {
+		return nil, feature.ErrAlreadyPunished
+	}
 
 	c.succeeded()
 	return expandChain(window, position, before, after, span), nil
+}
+
+// MarkPunished records that messages have been taken back.
+//
+// The mark goes into the cached message itself rather than into a second key,
+// because that is what makes it impossible to read a message without also
+// seeing that it is gone: every path that decodes a window gets the answer for
+// free, and no path can forget to ask.
+//
+// A message that is not in the cache any more is not an error. It was cached,
+// it was withdrawn, and then it aged out, which is the ordinary ending of
+// everything here; there is nothing left to mark and nothing to report.
+func (c *Cache) MarkPunished(ctx context.Context, groupOpenID string, indexes []string) error {
+	if groupOpenID == "" || len(indexes) == 0 {
+		return nil
+	}
+	if c.paused() {
+		return ErrUnavailable
+	}
+	set, index := c.keys(groupOpenID)
+
+	marked := 0
+	for _, idx := range indexes {
+		if strings.TrimSpace(idx) == "" {
+			continue
+		}
+		// The score is what finds the message again: the index entry carries the
+		// same score as the message it points at, which is the invariant the
+		// whole cache is built on.
+		score, err := c.client.ZScore(ctx, index, idx).Result()
+		switch {
+		case errors.Is(err, redis.Nil):
+			continue
+		case err != nil:
+			c.failed(err)
+			return fmt.Errorf("finding a message to mark: %w", err)
+		}
+		when := strconv.FormatFloat(score, 'f', -1, 64)
+		sharing, err := c.client.ZRangeByScore(ctx, set, &redis.ZRangeBy{
+			Min: when,
+			Max: when,
+		}).Result()
+		if err != nil {
+			c.failed(err)
+			return fmt.Errorf("reading a message to mark: %w", err)
+		}
+		for _, raw := range sharing {
+			var decoded CachedMessage
+			if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+				continue
+			}
+			if decoded.Idx != idx || decoded.Punished {
+				continue
+			}
+			decoded.Punished = true
+			replacement, err := json.Marshal(decoded)
+			if err != nil {
+				continue
+			}
+			// Removed and added in one transaction: between the two the message
+			// would be missing from a window that is being read right now, and a
+			// window with a hole in it is worse than a stale one.
+			pipe := c.client.TxPipeline()
+			pipe.ZRem(ctx, set, raw)
+			pipe.ZAdd(ctx, set, redis.Z{Score: score, Member: string(replacement)})
+			if _, err := pipe.Exec(ctx); err != nil {
+				c.failed(err)
+				return fmt.Errorf("marking a message as taken back: %w", err)
+			}
+			marked++
+			break
+		}
+	}
+	c.succeeded()
+	c.log.Debug("messages were marked as taken back",
+		"group", groupOpenID, "asked", len(indexes), "marked", marked)
+	return nil
 }

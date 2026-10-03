@@ -237,8 +237,10 @@ features:
       base_url: "https://api.deepseek.com/v1"
       api_key: ""
       name: ""
-      # 思考模式：hide（默认思考开着但不保留思维链）/ show（思维链写进日志，排查误判用）
-      # / off（关掉思考）/ 留空（什么都不发，由服务端默认决定）。
+      # 思考模式：hide（思考开着，思维链只进违规记录不写日志）/ show（连日志一起写，
+      # 排查误判用）/ off（关掉思考）/ 留空（什么都不发，由服务端默认决定）。
+      # 注意：思维链会随违规记录一起落库，管理员用 /违规查询 <回执单号> 就能读到，
+      # 所以它永远不会出现在群里。
       # 实测：不发这个开关时，deepseek-chat 只输出 5 个 token、思维链 0 字符 —— 等于没思考。
       thinking: hide
       reasoning_effort: high       # low / medium / high / max；服务端默认 high

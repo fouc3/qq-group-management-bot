@@ -119,6 +119,12 @@ type harness struct {
 
 	mu    sync.Mutex
 	calls []map[string]any
+	// paths is parallel to calls: the endpoint each request went to, which is how
+	// a test tells an answer to a group apart from one to a single chat.
+	paths []string
+	// failDeletes makes the platform refuse every withdrawal, which is what a
+	// group this application may not take messages down in looks like.
+	failDeletes bool
 	// sent numbers the messages this harness delivers, because the feature
 	// ignores a message id it has already handled.
 	sent int
@@ -208,7 +214,15 @@ func newHarnessWith(t *testing.T, section string, registering bool) *harness {
 		if r.Method != http.MethodGet {
 			h.mu.Lock()
 			h.calls = append(h.calls, body)
+			h.paths = append(h.paths, r.URL.Path)
+			refuse := h.failDeletes && r.Method == http.MethodDelete
 			h.mu.Unlock()
+			if refuse {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"code":40062003,"message":"无操作权限"}`))
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
@@ -331,12 +345,46 @@ func jsonString(text string) string {
 	return string(raw)
 }
 
+// groupReplies counts the messages sent into a group rather than a single chat,
+// which is how a test asserts that something stayed private.
+func (h *harness) groupReplies() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	count := 0
+	for i, call := range h.calls {
+		if _, ok := call["markdown"]; !ok {
+			continue
+		}
+		if !strings.HasPrefix(h.paths[i], "/v2/users/") {
+			count++
+		}
+	}
+	return count
+}
+
 // lastReply returns the markdown of the last message sent, which is how the
 // feature answers a command.
 func (h *harness) lastReply() string {
+	h.t.Helper()
+	return h.replyOn("")
+}
+
+// lastPrivateReply returns the markdown of the last message sent into a single
+// chat, which is where a receipt may be read without the group reading it too.
+func (h *harness) lastPrivateReply() string {
+	h.t.Helper()
+	return h.replyOn("/v2/users/")
+}
+
+// replyOn returns the last message sent to an endpoint starting with prefix, or
+// to anything when the prefix is empty.
+func (h *harness) replyOn(prefix string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for i := len(h.calls) - 1; i >= 0; i-- {
+		if prefix != "" && !strings.HasPrefix(h.paths[i], prefix) {
+			continue
+		}
 		markdown, ok := h.calls[i]["markdown"].(map[string]any)
 		if !ok {
 			continue

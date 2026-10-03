@@ -9,6 +9,7 @@ package feature
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -256,8 +257,54 @@ type Moderation interface {
 	// The decision and the act happen in different places, so the record of the
 	// first is closed by whoever did the second. An empty action is a fact too:
 	// it means nothing was done.
-	RecordOutcome(ctx context.Context, judgementID, action string, muteSeconds int64) error
+	//
+	// The outcome carries one line per message that was to be taken back, because
+	// that is the part of a punishment nobody can check afterwards: the message
+	// itself is gone by the time the question is asked.
+	RecordOutcome(ctx context.Context, judgementID string, outcome store.Outcome) error
+	// MarkPunished records that messages have been dealt with.
+	//
+	// Only messages that were actually taken back belong here, and only those:
+	// one that stayed in the group is still there to be reported and looked at
+	// again, while one that was withdrawn cannot be looked at a second time and
+	// must never be judged again. Without this, a message that has just been
+	// withdrawn arrives in the next report's window as if nothing had happened to
+	// it -- which is how one advertisement came to be withdrawn twice and its
+	// author silenced three times in three minutes.
+	//
+	// messageIndexes are the platform indexes of the messages, which is how the
+	// cache addresses them.
+	MarkPunished(ctx context.Context, groupOpenID string, messageIndexes []string) error
+	// LabelFor is the configured display name for a category.
+	//
+	// The label is the word a group was told, and the configuration that holds it
+	// belongs to this feature, so a caller that has recorded a category can say
+	// that word about it without keeping a second copy of the configuration.
+	LabelFor(category string) string
 }
+
+// JudgedMessage is one message of the window a judge was shown, named the three
+// ways the rest of the bot needs it: by id to act on it, by index to find it in
+// the cache, and by text because a withdrawal leaves nothing else behind.
+type JudgedMessage struct {
+	// ID is the platform message id, which is what a recall takes.
+	ID string
+	// Index is the platform message index, which is what the cache is keyed by.
+	Index string
+	// Number is the position in the window as the judge saw it, for the log.
+	Number int
+	// Text is what the message said.
+	Text string
+}
+
+// ErrAlreadyPunished reports a report about a message that has already been
+// withdrawn.
+//
+// It is a sentinel in this package rather than inside the moderation feature
+// because the caller has to recognise it: "this was dealt with already" is an
+// answer to give the group, and it is not the same answer as "the judgement
+// failed", which is what every other error from the seam means.
+var ErrAlreadyPunished = errors.New("the message has already been taken back")
 
 // ModerationVerdict is what a judgement came to.
 type ModerationVerdict struct {
@@ -277,21 +324,26 @@ type ModerationVerdict struct {
 	SubjectOpenID string
 	// QuotedMessageID is the reported message itself: the one a recall takes back.
 	QuotedMessageID string
-	// RecallMessageIDs are the messages to take back.
+	// RecallMessages are the messages to take back.
 	//
 	// The judge names them, and the feature that owns the cache turns the names
 	// into messages: only ones that exist in the window and belong to the member
 	// being judged survive that, because a model can name a message that is not
 	// there, or one that is somebody else's.
-	RecallMessageIDs []string
-	// RecallNumbers are the same messages by the numbers the judge was shown, so
-	// that the group can be told which ones were taken back.
-	RecallNumbers []int
+	//
+	// Each one carries its text as well as its id: the caller withdraws the
+	// message, and the record of what was withdrawn has to hold the words, since
+	// after a successful withdrawal the group no longer has them either.
+	RecallMessages []JudgedMessage
 	// JudgedMessageIDs is everything that was sent for judgement, for the record.
 	JudgedMessageIDs []string
 	// Reason is the model's own explanation, for the administrators and the audit
 	// table and never for the group.
 	Reason string
+	// Reasoning is the model's chain of thought, when one was kept. Also for the
+	// administrators and the record: it is what makes a surprising verdict
+	// answerable.
+	Reasoning string
 	// Model names what answered.
 	Model string
 }

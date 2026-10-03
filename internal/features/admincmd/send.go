@@ -39,18 +39,46 @@ const (
 // platform only lets a bot reply to an event within its own message, and a
 // command's answer has to be that.
 func (h *handler) sendMessage(ctx context.Context, groupOpenID, text, replyTo string) error {
+	return h.sendWithRetry(ctx, text, replyTo, func(message *qqbotsdk.Message) error {
+		_, err := h.deps.Client.SendGroupMessage(ctx, groupOpenID, message)
+		return err
+	})
+}
+
+// sendPrivateMessage is the same thing into a single chat.
+//
+// A single chat is not a group without a group id: it is a second destination
+// with its own endpoint, and it is the only way an administrator can ask about a
+// receipt without the group reading the answer. It goes through the same retry
+// as everything else, because the reasons a send fails are the transport's and
+// have nothing to do with where the message is going.
+func (h *handler) sendPrivateMessage(ctx context.Context, userOpenID, text, replyTo string) error {
+	return h.sendWithRetry(ctx, text, replyTo, func(message *qqbotsdk.Message) error {
+		_, err := h.deps.Client.SendC2CMessage(ctx, userOpenID, message)
+		return err
+	})
+}
+
+// sendWithRetry is the retry and the back-off, in one place.
+//
+// Both destinations share it rather than each carrying their own copy: a second
+// loop would be a second set of numbers to keep in step, and the one that was
+// not being looked at would be the one that drifted.
+func (h *handler) sendWithRetry(ctx context.Context, text, replyTo string,
+	deliver func(*qqbotsdk.Message) error) error {
+	message := &qqbotsdk.Message{
+		MsgType:  qqbotsdk.MsgTypeMarkdown,
+		Markdown: &qqbotsdk.MessageMarkdown{Content: text},
+	}
+	if replyTo != "" {
+		message.MsgID = replyTo
+		message.MsgSeq = 1
+	}
+
 	wait := sendBackoff
 	var failure error
 	for attempt := 1; attempt <= sendAttempts; attempt++ {
-		message := &qqbotsdk.Message{
-			MsgType:  qqbotsdk.MsgTypeMarkdown,
-			Markdown: &qqbotsdk.MessageMarkdown{Content: text},
-		}
-		if replyTo != "" {
-			message.MsgID = replyTo
-			message.MsgSeq = 1
-		}
-		if _, failure = h.deps.Client.SendGroupMessage(ctx, groupOpenID, message); failure == nil {
+		if failure = deliver(message); failure == nil {
 			return nil
 		}
 

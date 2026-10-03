@@ -2,11 +2,15 @@ package admincmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+
+	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // reportWaiting is what a member is told the moment they report something.
@@ -94,6 +98,15 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 
 	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quotedIndex,
 		quotedText, reporter)
+	if errors.Is(err, feature.ErrAlreadyPunished) {
+		// The message is gone from the group, so there is nothing to judge and
+		// nothing to answer about it. Said plainly, because the other wording --
+		// "the judgement failed" -- would suggest the report was lost.
+		h.deps.Logger.Info("a report was about a message that was already taken back",
+			"group", groupOpenID, "reporter", reporter)
+		h.sayInGroup(ctx, groupOpenID, "这条消息已经处理过了（已被撤回），不再重复判定。")
+		return
+	}
 	if err != nil {
 		// No judgement is not a clean verdict: nobody is touched, and the group is
 		// told why rather than left wondering.
@@ -107,7 +120,16 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	// recorded however this function leaves. An outcome that never got written is
 	// the one thing that would leave a punishment unauditable afterwards.
 	action, muteSeconds := "none", int64(0)
-	defer func() { h.recordOutcome(ctx, verdict.JudgementID, action, muteSeconds) }()
+	recallReason := ""
+	var recalls []store.RecallOutcome
+	defer func() {
+		h.recordOutcome(ctx, verdict.JudgementID, store.Outcome{
+			Action:       action,
+			MuteSeconds:  muteSeconds,
+			RecallReason: recallReason,
+			Recalls:      recalls,
+		})
+	}()
 
 	// The reason is the model's own words, so it goes to the log and nowhere else:
 	// the group is told the configured label and nothing more.
@@ -122,12 +144,14 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		"judged_messages", len(verdict.JudgedMessageIDs),
 		"model", verdict.Model,
 		"reason", verdict.Reason,
+		"receipt", verdict.JudgementID,
 		"dry_run", h.moderation.DryRun())
 
 	if verdict.Category == "" {
 		// Nothing was found, so nobody's message was wrong. Whether that costs the
 		// reporter anything is the group's policy, and the default is that it does
 		// not.
+		recallReason = "未发现违规，未执行撤回"
 		penalty := h.moderation.ReportPenaltySeconds()
 		if penalty <= 0 || h.moderation.DryRun() {
 			h.sayInGroup(ctx, groupOpenID, "未发现违规，未采取任何处理。")
@@ -156,8 +180,10 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	}
 	if h.moderation.DryRun() {
 		action = "dry_run"
+		recallReason = "试运行：未执行撤回"
 		h.sayInGroup(ctx, groupOpenID, fmt.Sprintf(
-			"【试运行】判定为【%s】。试运行期间不禁言、不撤回。", verdict.Label))
+			"【试运行】判定为【%s】。试运行期间不禁言、不撤回。回执单号 %s。",
+			verdict.Label, receiptShort(verdict.JudgementID)))
 		return
 	}
 
@@ -166,19 +192,34 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	// that stops the next message.
 	var notes []string
 	recalled, failed := 0, 0
-	for index, messageID := range verdict.RecallMessageIDs {
-		number := 0
-		if index < len(verdict.RecallNumbers) {
-			number = verdict.RecallNumbers[index]
+	var marked []string
+	firstFailure := ""
+	for _, message := range verdict.RecallMessages {
+		outcome := store.RecallOutcome{
+			ID:     message.ID,
+			Number: message.Number,
+			Text:   message.Text,
 		}
-		if err := h.deps.Client.RecallGroupMessage(ctx, groupOpenID, messageID); err != nil {
+		if err := h.deps.Client.RecallGroupMessage(ctx, groupOpenID, message.ID); err != nil {
 			h.deps.Logger.Warn("could not recall a message that was judged",
-				"group", groupOpenID, "message", messageID, "number", number,
+				"group", groupOpenID, "message", message.ID, "number", message.Number,
 				"error", err)
+			outcome.Reason = shortReason(err)
+			if firstFailure == "" {
+				firstFailure = outcome.Reason
+			}
 			failed++
-			continue
+		} else {
+			outcome.Recalled = true
+			recalled++
+			// Only a message that really went is marked as dealt with. One that
+			// stayed is still in the group, still readable, and still something a
+			// later report may legitimately be about.
+			if message.Index != "" {
+				marked = append(marked, message.Index)
+			}
 		}
-		recalled++
+		recalls = append(recalls, outcome)
 	}
 	// The group is told how many were taken back, never which ones.
 	//
@@ -190,11 +231,26 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	switch {
 	case recalled > 0 && failed == 0:
 		notes = append(notes, fmt.Sprintf("已撤回 %d 条消息", recalled))
+		recallReason = fmt.Sprintf("已撤回 %d 条消息", recalled)
 	case recalled > 0:
 		notes = append(notes, fmt.Sprintf("已撤回 %d 条消息，另有 %d 条撤回失败",
 			recalled, failed))
+		recallReason = fmt.Sprintf("已撤回 %d 条，另有 %d 条未撤回：%s",
+			recalled, failed, firstFailure)
 	case failed > 0:
 		notes = append(notes, fmt.Sprintf("撤回失败（%d 条）", failed))
+		recallReason = fmt.Sprintf("撤回失败（%d 条）：%s", failed, firstFailure)
+	default:
+		recallReason = "没有需要撤回的消息"
+	}
+	// Marked after the recall rather than before it, and only what came back
+	// successful: the mark means "the group cannot read this any more", and
+	// nothing else is true of a message that is still standing there.
+	if len(marked) > 0 {
+		if err := h.moderation.MarkPunished(ctx, groupOpenID, marked); err != nil {
+			h.deps.Logger.Warn("could not mark the messages that were taken back",
+				"group", groupOpenID, "error", err)
+		}
 	}
 	if verdict.MuteSeconds > 0 && verdict.SubjectOpenID != "" {
 		duration := time.Duration(verdict.MuteSeconds) * time.Second
@@ -211,22 +267,30 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	if len(notes) > 0 {
 		answer += "，" + strings.Join(notes, "，")
 	}
+	answer += "。"
+	// The receipt number is what makes the punishment answerable to somebody who
+	// did not see this conversation: any administrator can ask the bot what the
+	// number means, in the group or in a private message, and read the reason, the
+	// chain of thought and the message that was taken back.
+	if receipt := receiptShort(verdict.JudgementID); receipt != "" {
+		answer += "回执单号 " + receipt + "。"
+	}
 	action, muteSeconds = strings.Join(notes, " "), verdict.MuteSeconds
-	h.sayInGroup(ctx, groupOpenID, answer+"。")
+	h.sayInGroup(ctx, groupOpenID, answer)
 }
 
 // recordOutcome closes a judgement with what was actually done about it.
 //
 // A failure is reported and swallowed: the group has already been answered, and
 // the record is for reviewing afterwards rather than for deciding now.
-func (h *handler) recordOutcome(ctx context.Context, judgementID, action string,
-	muteSeconds int64) {
+func (h *handler) recordOutcome(ctx context.Context, judgementID string,
+	outcome store.Outcome) {
 	if judgementID == "" || h.moderation == nil {
 		return
 	}
-	if err := h.moderation.RecordOutcome(ctx, judgementID, action, muteSeconds); err != nil {
+	if err := h.moderation.RecordOutcome(ctx, judgementID, outcome); err != nil {
 		h.deps.Logger.Warn("could not record what followed a judgement",
-			"judgement", judgementID, "action", action, "error", err)
+			"judgement", judgementID, "action", outcome.Action, "error", err)
 	}
 }
 

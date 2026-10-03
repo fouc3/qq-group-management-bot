@@ -29,6 +29,16 @@ type CachedMessage struct {
 	// Atts are short descriptions of the attachments, which is all the judge
 	// needs and all that is worth keeping.
 	Atts []string `json:"att,omitempty"`
+	// Punished records that this message has been taken back, and it is set only
+	// once it really has been.
+	//
+	// A message that stays in the group after a failed recall is deliberately
+	// left unmarked: it is still there for anybody to read and report, so it is
+	// still something to judge. A message that was withdrawn is the opposite --
+	// nobody can read it again, so judging it again would be punishing somebody
+	// for words the group can no longer see, which is what happened when one
+	// advertisement was withdrawn twice and its author silenced three times.
+	Punished bool `json:"punished,omitempty"`
 }
 
 // SentAt is when the message was sent.
@@ -42,6 +52,13 @@ func (m CachedMessage) SentAt() time.Time { return time.UnixMilli(m.TS) }
 // members' advertisements in front of the judge where nothing could be done about
 // them, while putting bystanders' words into a judgement that was never about
 // them. One person in, one person out.
+//
+// Messages that have already been taken back are left out, which is the whole
+// point of the mark they carry: they were judged once, the group cannot read them
+// any more, and putting them in front of the judge again can only lead to the
+// same message being withdrawn a second time and its author silenced again. The
+// quoted message itself is not filtered here -- a report about a message that is
+// already gone is refused before this runs, with an answer of its own.
 //
 // The chain grows outward from the quoted message, skipping messages by other
 // people rather than stopping at them. Each side stops when it has collected
@@ -137,7 +154,7 @@ func expandChain(ordered []CachedMessage, rank, before, after int,
 
 	chain := make([]CachedMessage, 0, high-low+1)
 	for _, message := range ordered[low : high+1] {
-		if message.User == author {
+		if message.User == author && !message.Punished {
 			chain = append(chain, message)
 		}
 	}
