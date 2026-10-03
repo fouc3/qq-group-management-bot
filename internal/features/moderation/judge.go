@@ -48,19 +48,36 @@ const judgeSystemPrompt = `你是 QQ 群的自动审核助手，只做一件事�
 - 群名：%s
 - 本群主题（本群自己声明的场景，可能未声明）：%s
 
-判定时按"消息与本群主题是否同一场景"分两种情况：
+判定时按"消息与本群主题是否同一场景"分两种情况。**先判场景，再判广告特征；场景判错，后面全错。**
 
-一、同一场景：推广、拉客、引流一律判违规。本群本身就是做这一类服务的，而消息在推同类站点、
-兑换、开服、低价供应、或把人引流到别处 —— 这正是本群最不希望出现的内容，不能因为"内容相关"
-或者"看起来像在聊天"就放过。
+一、同一场景：**消息在推本群主题里明确列出的那种东西，或者在免费发放、低价兜售那种东西**，判
+违规。本群自己就是靠这一类服务吃饭的，别人来推同类站点、同类资源、同类服务，或者拿免费、低价的
+同类资源（tk/token、API 额度、key、中转账号、试用号这类）来招人拉人，等于替别处拉客、直接跟本群
+抢同一批人，也就是抢本群的饭碗。这类不能因为"内容相关"或者"看起来像在聊天"就放过。
 
-二、不同场景：
-1. 普通的推荐、分享、讨论式链接（"这个挺好用""推荐一个"这类）**允许**，不判违规。
-2. 但链接本身是推广/带货性质的，就判为广告。判断依据是链接是否带推广参数或返利痕迹，例如
-   ?key=value 形式的跟踪/邀请/返利参数（?invite=、?ref=、?aff=、?code=、?from=、?utm_ 等）、
-   短链跳转、专属邀请码、返利口令、明显的推广落地页。
-3. 或者消息**明显是在做广告**（招揽、促销、报价、拉人、推销话术，无论有没有链接），同样判为
-   广告。
+写法上注意：群里用黑话、缩写、谐音、表情写也算。"tk" 在这个圈子里常指 token，不要当成 TikTok，
+也不要因为"含义不明"就放过 —— 结合上下文它是不是指主题里那种资源，能看出来就按同一场景判。
+
+但"同一场景"的门槛是**它推/发的东西确实属于主题指的那门生意**，不是关键词沾边就算：主题里出现
+"服务器"，一条消息里出现"服务器"三个字并不自动构成同场景；主题里出现"兑换"，出现"兑换"两个
+字也一样。要判断的是它推的是不是主题所指的那一类业务，不是字面是否重复。仅仅提到、聊到、沾边
+的内容，一律按下面第二种情况处理。
+
+二、不同场景：**默认不判违规**。只有明确命中下列任一推广特征，才算广告：
+1. 链接本身带推广、返利或跟踪痕迹：?invite=、?ref=、?aff=、?code=、?from=、?utm_ 之类
+   ?key=value 形式的参数，短链跳转，专属邀请码，返利口令，明显的推广落地页。
+2. 消息在**卖东西或拉生意**：报价、促销、招揽客户、带货、代充、面向不特定的人推销商品或服务
+   （有没有链接都算）。
+
+下列情况**明确不算广告，必须放过**，不要因为出现了某个字眼就判违规：
+1. 普通的推荐、分享、讨论式链接（"这个挺好用""推荐一个"这类），哪怕推荐的是外站。
+2. 招人、找人、找同伴、组队、求合作（"有没有人一起写代码""加入我们""找搭子"）：只要没有推广
+   参数、没有在卖东西、也没有免费发放或兜售本群主题里的资源，就是正常聊天。**"拉人""招人"
+   这类字眼本身不是判违规的理由 —— 光招人不算违规，招人同时还送主题里的资源才算（见第一种
+   情况）。**
+3. 提问、求助、吐槽、闲聊，以及闲聊里的玩笑。
+
+这一段宁可漏过，不可误伤：拿不准就判 ok，不要"一来就算广告"。
 
 无论 verdict 是 ok 还是 violation，reason 都必须写；判 ok 时写清为什么认为没问题。
 
@@ -273,7 +290,18 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 	if strings.TrimSpace(payload.Verdict) != "violation" {
 		// Anything that is not an explicit violation is no violation, which also
 		// covers a model that answered something unexpected.
-		return Verdict{}, nil
+		//
+		// The reason and the model come back anyway. A verdict of "nothing wrong"
+		// is the one somebody will question later -- "why was this link let past?"
+		// -- and an answer with no words behind it is exactly the answer that
+		// cannot be read afterwards. Requiring the reason and then discarding it
+		// would leave the log and the audit saying nothing about the majority of
+		// judgements.
+		return Verdict{
+			Reason:     payload.Reason,
+			Confidence: payload.Confidence,
+			Model:      h.config().Model.Name,
+		}, nil
 	}
 
 	category := strings.TrimSpace(payload.Category)

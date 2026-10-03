@@ -134,6 +134,67 @@ func TestAViolationIsRead(t *testing.T) {
 	}
 }
 
+// TestAReasonSurvivesANothingFoundVerdict covers the verdict nobody reads until
+// they disagree with it.
+//
+// "Nothing wrong" is the answer somebody will question weeks later -- why was this
+// link let past? -- so the model's words behind it are kept, in the log and in the
+// audit table. Requiring a reason and then returning an empty struct would satisfy
+// the letter of the rule and answer nothing.
+func TestAReasonSurvivesANothingFoundVerdict(t *testing.T) {
+	stub := &modelStub{answer: `{"reason":"只是推荐一个外站链接，没有推广参数",` +
+		`"verdict":"ok","confidence":0.9}`}
+	h := judgeHarness(t, stub, "")
+
+	verdict, err := h.Judge(context.Background(), "", chainOf("推荐一个 https://example.com 挺好用"))
+	if err != nil {
+		t.Fatalf("Judge: %v", err)
+	}
+	if verdict.Violation() {
+		t.Fatalf("verdict = %+v, want nothing found", verdict)
+	}
+	if verdict.Reason != "只是推荐一个外站链接，没有推广参数" {
+		t.Errorf("reason = %q, want the model's own words", verdict.Reason)
+	}
+	if verdict.Model != "stub-model" {
+		t.Errorf("model = %q, want the model that answered", verdict.Model)
+	}
+}
+
+// TestTheSceneRulesKeepBothRulings covers the two rulings the group owner made after
+// reading two false positives in the log, one per direction.
+//
+// Both were reached by arguing about real messages, and either one quietly reverting
+// would put the same mistake back: a plain recommendation of an unrelated site is not
+// an advertisement, and recruiting on its own is not one either -- what is, is
+// recruiting that also hands out the group's own kind of resource, because the group
+// sells exactly that.
+func TestTheSceneRulesKeepBothRulings(t *testing.T) {
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
+	h := judgeHarness(t, stub, "")
+
+	if _, err := h.Judge(context.Background(), "", chainOf("有没有人一起写代码")); err != nil {
+		t.Fatalf("Judge: %v", err)
+	}
+	system := systemContent(t, stub.lastRequest(t))
+
+	// Recruiting alone is normal chat; only the giveaway is the violation.
+	for _, wording := range []string{"光招人不算违规", "抢同一批人"} {
+		if !strings.Contains(system, wording) {
+			t.Errorf("the scene rules no longer say %q", wording)
+		}
+	}
+	// tk is the local word for token, and the model read it as TikTok once.
+	if !strings.Contains(system, "tk") || !strings.Contains(system, "token") {
+		t.Error("the scene rules no longer explain that tk means token")
+	}
+	// The scene must not be decided by a word appearing in the theme: that was the
+	// first false positive, where 服务器 and 兑换 in the theme carried the verdict.
+	if !strings.Contains(system, "不是关键词沾边就算") {
+		t.Error("the scene rules no longer refuse a verdict reached on a shared word")
+	}
+}
+
 // TestTheMessagesAreData covers the shape of the prompt that keeps a member's
 // text out of the instructions: it is all inside one block, and the system
 // message does not contain it.
@@ -282,6 +343,8 @@ func TestTheAnswerIsRefusedWhenItCannotBeRead(t *testing.T) {
 			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"",` +
 				`"confidence":0.99}`}},
 		"an answer that is not JSON": {stub: &modelStub{answer: "我觉得没问题"}},
+		"nothing wrong, explained with nothing": {
+			stub: &modelStub{answer: `{"verdict":"ok","confidence":0.99}`}},
 		"a model that is not sure": {
 			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 				`"confidence":0.2}`}},
