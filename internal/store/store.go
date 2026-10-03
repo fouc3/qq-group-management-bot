@@ -67,6 +67,11 @@ type Store interface {
 	Blacklist() BlacklistStore
 	// Judgements holds the record of what was judged and what followed.
 	Judgements() JudgementStore
+	// MemberEvents holds who joined a group and who left it.
+	//
+	// It is the only place this is kept: the platform refuses this application
+	// the member-list endpoints, so a group's membership cannot be read back.
+	MemberEvents() MemberEventStore
 	// Meta holds small bookkeeping values that have to survive a restart, such
 	// as whether a one-off import has already run.
 	//

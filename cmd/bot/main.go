@@ -24,6 +24,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinverify"
+	"github.com/fouc3/qq-group-management-bot/internal/features/memberlog"
 	"github.com/fouc3/qq-group-management-bot/internal/features/moderation"
 )
 
@@ -51,6 +52,7 @@ func run() error {
 	registry.Add(joinrequest.Name, joinrequest.New)
 	registry.Add(admincmd.Name, admincmd.New)
 	registry.Add(moderation.Name, moderation.New)
+	registry.Add(memberlog.Name, memberlog.New)
 	logger.Debug("features registered", "features", registry.Names())
 
 	// SIGHUP is deliberately not in this list: it asks for a reload rather than a

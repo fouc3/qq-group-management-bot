@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -128,6 +128,32 @@ ALTER TABLE moderation_judgements ADD COLUMN reasoning TEXT NOT NULL DEFAULT '';
 ALTER TABLE moderation_judgements ADD COLUMN recall_reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE moderation_judgements ADD COLUMN recalls TEXT NOT NULL DEFAULT '[]';
 `,
+	// 5: who joined and who left, for good.
+	//
+	// Nothing else in this bot keeps this. A group's member list cannot be read at
+	// all -- the platform refuses ListGroupMembers and GetGroupMember for this
+	// application -- so a departure is invisible unless it was written down when
+	// the event arrived. The row carries the group's name as well as its openid,
+	// because a name that has to be looked up later will not be: the group may have
+	// been renamed, or left, by then.
+	//
+	// The four columns together are the key, which makes a second delivery of the
+	// same event a no-op rather than a duplicate: the platform sends an event
+	// once, and "once" is a claim worth not relying on.
+	`
+CREATE TABLE IF NOT EXISTS member_events (
+    group_openid  TEXT   NOT NULL,
+    group_name    TEXT   NOT NULL DEFAULT '',
+    group_qq      BIGINT NOT NULL DEFAULT 0,
+    member_openid TEXT   NOT NULL,
+    kind          TEXT   NOT NULL,
+    event_at      BIGINT NOT NULL,
+    recorded_at   BIGINT NOT NULL,
+    PRIMARY KEY (group_openid, member_openid, kind, event_at)
+);
+CREATE INDEX IF NOT EXISTS member_events_by_member ON member_events (member_openid, event_at);
+CREATE INDEX IF NOT EXISTS member_events_by_time ON member_events (event_at);
+`,
 }
 
 // sqlStore is the database/sql implementation, shared by both dialects.
@@ -140,11 +166,12 @@ type sqlStore struct {
 // package goes through it, so the ?/$1 difference lives in exactly one place.
 func (s *sqlStore) query(statement string) string { return s.dialect.rewrite(statement) }
 
-func (s *sqlStore) Pending() PendingStore      { return pendingStore{s} }
-func (s *sqlStore) Blacklist() BlacklistStore  { return blacklistStore{s} }
-func (s *sqlStore) Judgements() JudgementStore { return judgementStore{s} }
-func (s *sqlStore) Meta() MetaStore            { return metaStore{s} }
-func (s *sqlStore) Close() error               { return s.db.Close() }
+func (s *sqlStore) Pending() PendingStore          { return pendingStore{s} }
+func (s *sqlStore) Blacklist() BlacklistStore      { return blacklistStore{s} }
+func (s *sqlStore) Judgements() JudgementStore     { return judgementStore{s} }
+func (s *sqlStore) MemberEvents() MemberEventStore { return memberEventStore{s} }
+func (s *sqlStore) Meta() MetaStore                { return metaStore{s} }
+func (s *sqlStore) Close() error                   { return s.db.Close() }
 
 // metaStore implements MetaStore.
 type metaStore struct{ store *sqlStore }
