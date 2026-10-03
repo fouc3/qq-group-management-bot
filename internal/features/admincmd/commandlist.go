@@ -81,8 +81,11 @@ func (h *handler) commandDefs() []command.Def {
 			// and until that is written down nothing else can be configured.
 			Audience:            command.Whois,
 			InUnconfiguredGroup: true,
-			Panels:              groupPanel(),
-			Run:                 h.whoisCommand,
+			// Both panels, like every other command that is worth offering: a single chat
+			// is where somebody reads their own user_openid, and a command that is only in
+			// the help is one they have to be told about first.
+			Panels: bothPanels(),
+			Run:    h.whoisCommand,
 			// A single chat has no group to describe, but it is the only place the
 			// openid that works in one can be read: the two are different values, and a
 			// configuration read in private is written with the private one.

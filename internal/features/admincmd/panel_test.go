@@ -154,12 +154,14 @@ func TestASingleChatGetsItsOwnPanel(t *testing.T) {
 		t.Fatal("no single-chat instruction panel was published")
 	}
 	entries := panelEntries(t, panel)
-	for _, want := range []string{"/菜单", "/违规查询"} {
+	// /whois is in here as well: a single chat is where somebody reads their own
+	// user_openid, which is the identifier a group's event never carries.
+	for _, want := range []string{"/菜单", "/whois", "/违规查询"} {
 		if _, ok := entries[want]; !ok {
 			t.Errorf("the single-chat panel does not offer %q, which is answered there", want)
 		}
 	}
-	for _, unwanted := range []string{"/禁言", "/whois", "/黑名单", "/debug"} {
+	for _, unwanted := range []string{"/禁言", "/黑名单", "/debug", "/违规举报"} {
 		if _, ok := entries[unwanted]; ok {
 			t.Errorf("the single-chat panel offers %q, which a single chat does not answer",
 				unwanted)
