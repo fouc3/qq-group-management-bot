@@ -14,6 +14,7 @@ import (
 
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/disclaimer"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -90,6 +91,43 @@ func aJudgement(id string) store.Judgement {
 			{ID: "M-2", Number: 2, Text: "加群送皮肤", Recalled: false, Reason: "无操作权限"},
 		},
 		CreatedAt: time.Now().Unix(),
+	}
+}
+
+// TestTheDetailsSayTheBotDidNotWriteThem covers the disclaimer on the half that is mostly
+// other people's words.
+//
+// The reason and the chain of thought are the model's, and the recalled messages are the
+// members' -- and the whole thing goes out under this bot's name, which is the confusion
+// the disclaimer is there to prevent.
+func TestTheDetailsSayTheBotDidNotWriteThem(t *testing.T) {
+	h := newHarness(t, baseSection)
+	details := h.handler.receiptDetails(aJudgement("J-1"))
+
+	// The divider the receipt already draws its own rules with, then the sentence in bold:
+	// one divider style per message, so the disclaimer reads as part of it.
+	if !strings.HasSuffix(details, receiptDivider+"\n**"+disclaimer.Text+"**") {
+		t.Errorf("the details do not end with the disclaimer:\n%s", details)
+	}
+	if !strings.Contains(details, "\n\n"+receiptDivider+"\n**"+disclaimer.Text) {
+		t.Errorf("the disclaimer's divider is not separated from the text above it, which "+
+			"is what makes a markdown rule a rule:\n%s", details)
+	}
+	// And the details themselves are untouched: a disclaimer that replaced them would be
+	// worse than none.
+	for _, want := range []string{"J-1", "加群送皮肤", "无操作权限", "这是招揽"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("the details no longer show %q:\n%s", want, details)
+		}
+	}
+}
+
+// TestTheSummaryIsNotDisclaimed covers where the line is: the summary is the bot's own
+// sentences about a judgement, and nothing in it is quoted from anybody.
+func TestTheSummaryIsNotDisclaimed(t *testing.T) {
+	h := newHarness(t, baseSection)
+	if summary := h.handler.receiptSummary(aJudgement("J-1"), true); strings.Contains(summary, disclaimer.Text) {
+		t.Errorf("the summary carries a disclaimer it has no reason for:\n%s", summary)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+
+	"github.com/fouc3/qq-group-management-bot/internal/disclaimer"
 )
 
 // TestTheCardOpensWithNothingChosen covers the state a card starts in: no option
@@ -119,8 +121,10 @@ func TestTheBroadcastIsPostedAsWritten(t *testing.T) {
 		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
 	}
 	// Rendered as markdown, so the header is bold, a blank line separates it from the rule,
-	// and the rule is the one the platform draws.
-	want := "**来自管理员的广播**\n\n" + markdownRule + "\n第一行\n第二行"
+	// the rule is the one the platform draws, and the disclaimer sits under one of its own
+	// at the end: the body is the writer's text, carried under the bot's name.
+	want := "**来自管理员的广播**\n\n" + markdownRule + "\n第一行\n第二行\n\n" +
+		markdownRule + "\n**" + disclaimer.Text + "**"
 	if posted[0] != want {
 		t.Errorf("the group reads:\n%q\nwant:\n%q", posted[0], want)
 	}
@@ -204,6 +208,42 @@ func TestMarkdownOffEscapesWhatWasWritten(t *testing.T) {
 	// a bold marker as asterisks.
 	if !strings.HasPrefix(posted[0], "来自管理员的广播\n") {
 		t.Errorf("a notice that is not rendered does not have a plain header:\n%s", posted[0])
+	}
+}
+
+// TestTheNoticeSaysTheBotDidNotWriteIt covers the disclaimer.
+//
+// What the group reads is the writer's text carried under this bot's name, so the message
+// has to say which of the two wrote it -- in both kinds of message, and in the preview too,
+// because the preview is what the writer approves.
+func TestTheNoticeSaysTheBotDidNotWriteIt(t *testing.T) {
+	for _, rendered := range []bool{true, false} {
+		p := newPlatform(t)
+		p.start(t, theAdmin)
+		p.choose(t, rendered, true)
+		p.press(t, "确认", theAdmin)
+		p.press(t, "继续", theAdmin)
+		p.say(t, theAdmin, "正文")
+
+		divider := plainDivider
+		if rendered {
+			divider = markdownRule
+		}
+		if preview := p.lastText(); !strings.HasSuffix(preview,
+			divider+"\n**"+disclaimer.Text+"**") {
+			t.Errorf("the preview of a notice rendered=%v does not end with the "+
+				"disclaimer:\n%s", rendered, preview)
+		}
+
+		p.press(t, "发送", theAdmin)
+		posted := p.notices()
+		if len(posted) != 1 {
+			t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
+		}
+		if !strings.HasSuffix(posted[0], divider+"\n**"+disclaimer.Text+"**") {
+			t.Errorf("the notice a group reads rendered=%v does not end with the "+
+				"disclaimer:\n%s", rendered, posted[0])
+		}
 	}
 }
 

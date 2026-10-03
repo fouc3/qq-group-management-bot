@@ -13,6 +13,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
 	"github.com/fouc3/qq-group-management-bot/internal/command"
+	"github.com/fouc3/qq-group-management-bot/internal/disclaimer"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -301,7 +302,10 @@ func (h *handler) receiptDetails(entry store.Judgement) string {
 		fmt.Fprintf(&out, "**思考过程**：\n%s\n",
 			oneBlock(entry.Reasoning, receiptReasoningLimit))
 	}
-	return out.String()
+	// Almost every field above is somebody else's text: the reason and the chain of thought
+	// are the model's, and the withdrawn messages are the members'. It goes out under this
+	// bot's name, which is exactly the confusion the disclaimer exists to prevent.
+	return disclaimer.After(out.String(), receiptDivider)
 }
 
 // receiptDivider is the rule under a receipt's title.

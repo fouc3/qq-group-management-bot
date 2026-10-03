@@ -7,6 +7,8 @@ import (
 	"time"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+
+	"github.com/fouc3/qq-group-management-bot/internal/disclaimer"
 )
 
 // buttonPrefix is the namespace of every button on a broadcast card.
@@ -250,28 +252,35 @@ func displayName(group groupChoice) string {
 
 // broadcastText is the message the groups will see.
 //
-// It is built from the same switches the card shows, and the preview is this
-// function's own answer: what an administrator approves is the message, not a
-// description of one.
+// It is built from the same switches the card shows, and the preview is this function's
+// own answer: what the writer approves is the message, not a description of one. That
+// includes the disclaimer at the end of it, which is a line of the message rather than
+// something added on the way out: what the writer looks at has to be what a group reads.
 func (h *handler) broadcastText(s *session) string {
 	header := "来自管理员的广播"
 	if s.anonymous == off {
 		header = "来自 <@" + s.chat + "> 的广播"
 	}
-	if s.markdown != on {
+	notice, divider := "", ""
+	if s.markdown == on {
+		// Rendered as markdown, so the header is bold and the divider is the rule the
+		// platform draws -- with a blank line in front of it.
+		//
+		// Both of those are load-bearing, and both were measured in a group rather than
+		// reasoned about: a rule on the line straight under the header is a setext heading
+		// underline, which made the header a big title and drew no divider at all. The
+		// blank line is what makes it a divider instead, and the bold is what keeps the
+		// header reading as one.
+		notice, divider = "**"+header+"**\n\n"+markdownRule+"\n"+s.content, markdownRule
+	} else {
 		// Taken literally, so the header stays plain and the divider is characters: the
 		// markdown rule only is a rule when something renders it.
-		return header + "\n" + plainDivider + "\n" + escapeMarkdown(s.content)
+		notice, divider = header+"\n"+plainDivider+"\n"+escapeMarkdown(s.content), plainDivider
 	}
-	// Rendered as markdown, so the header is bold and the divider is the rule the platform
-	// draws -- with a blank line in front of it.
-	//
-	// Both of those are load-bearing, and both were measured in a group rather than
-	// reasoned about: a rule on the line straight under the header is a setext heading
-	// underline, which made the header a big title and drew no divider at all. The blank
-	// line is what makes it a divider instead, and the bold is what keeps the header
-	// reading as one.
-	return "**" + header + "**\n\n" + markdownRule + "\n" + s.content
+	// The body is the writer's text, and this bot is carrying it: who wrote it and who is
+	// answerable for it are not the same thing, and the message goes out under the bot's
+	// name.
+	return disclaimer.After(notice, divider)
 }
 
 // escapeMarkdown takes the meaning out of the text.
