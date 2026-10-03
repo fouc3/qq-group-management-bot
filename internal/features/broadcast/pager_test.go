@@ -114,9 +114,13 @@ func TestTheRecordTurnsOnePageAtATime(t *testing.T) {
 			t.Errorf("the first page shows more than five entries:\n%s", first)
 		}
 	}
-	// Nothing to go back to on the first page, so no button offering it.
+	// Nothing to go back to on the first page, so no button offering it -- and nothing offering
+	// to close the record either: what a reader is finished with they can delete where it is.
 	if buttons := p.cardButtons(); buttons["上一页"] != "" {
 		t.Error("the first page offers a page before it")
+	}
+	if buttons := p.cardButtons(); buttons["关闭"] != "" {
+		t.Error("a page offers a way to close it")
 	}
 
 	before := len(p.recalls)
@@ -143,21 +147,44 @@ func TestTheRecordTurnsOnePageAtATime(t *testing.T) {
 	}
 }
 
-// TestClosingARecordTakesItAway covers the way out: the page goes, and the record stops
-// being something that can be turned.
-func TestClosingARecordTakesItAway(t *testing.T) {
+// TestASinglePageCarriesNoKeyboard covers the shortest record there is: one page is nothing to
+// turn, so there is nothing under it.
+func TestASinglePageCarriesNoKeyboard(t *testing.T) {
 	p := newPlatform(t)
 	p.record(t, "一")
 	p.askPrivately(t, theAdmin)
 
+	if said := p.lastText(); !strings.Contains(said, "第 1 页 / 共 1 页") {
+		t.Errorf("a one-page record does not say it is one page:\n%s", said)
+	}
+	if len(p.handler.pages) != 1 {
+		t.Fatal("the record is not being held")
+	}
+	// The message that was sent is the last one, and it carries no keyboard at all.
+	if p.lastMessageHadKeyboard() {
+		t.Error("a record with one page carries buttons under it")
+	}
+}
+
+// TestACloseButtonFromAnOlderPageStillWorks covers the button the pages used to carry.
+//
+// No page offers it any more, and a page sent before that change is still in somebody's chat
+// with it. A button that answers nothing leaves whoever presses it watching a spinner, so it is
+// still answered -- by taking the page away, which is what it says.
+func TestACloseButtonFromAnOlderPageStillWorks(t *testing.T) {
+	p := newPlatform(t)
+	p.record(t, "一")
+	p.askPrivately(t, theAdmin)
+
+	token := p.olderCloseToken(t)
 	before := len(p.recalls)
-	p.press(t, "关闭", theAdmin)
+	p.pressPagePayload(t, token, kindPageClose, theAdmin)
 
 	if len(p.recalls) == before {
-		t.Error("closing a record left it in the chat")
+		t.Error("an older page's close button left the page in the chat")
 	}
 	// Forgotten rather than merely hidden: the same button pressed again finds nothing.
-	p.press(t, "关闭", theAdmin)
+	p.pressPagePayload(t, token, kindPageClose, theAdmin)
 	if said := p.lastText(); !strings.Contains(said, "已经过期") {
 		t.Errorf("a closed record can still be turned:\n%s", said)
 	}
@@ -167,7 +194,9 @@ func TestClosingARecordTakesItAway(t *testing.T) {
 // dropped: said out loud, because the presser is looking at a page that will never turn.
 func TestARecordOutOfItsTimeSaysSo(t *testing.T) {
 	p := newPlatform(t)
-	p.record(t, "一")
+	for _, content := range []string{"一", "二", "三", "四", "五", "六"} {
+		p.record(t, content)
+	}
 	p.askPrivately(t, theAdmin)
 
 	// What a restart of the feature does to the records: the pages they were holding are
@@ -176,36 +205,42 @@ func TestARecordOutOfItsTimeSaysSo(t *testing.T) {
 	p.handler.pages = map[string]*pager{}
 	p.handler.mu.Unlock()
 
-	p.press(t, "关闭", theAdmin)
+	p.press(t, "下一页", theAdmin)
 	if said := p.lastText(); !strings.Contains(said, "已经过期") {
 		t.Errorf("a record that is no longer held was not said to be expired:\n%s", said)
 	}
 }
 
-// TestSomebodyElseCannotTurnTheRecord covers who a record belongs to, in both places it can
-// be read.
+// TestSomebodyElseCannotTurnTheRecord covers who a record belongs to, in both places it can be
+// read.
 func TestSomebodyElseCannotTurnTheRecord(t *testing.T) {
 	// In a single chat: the member who asked, and nobody else.
 	private := newPlatform(t)
 	private.record(t, "一")
+	private.record(t, "二")
+	private.record(t, "三")
+	private.record(t, "四")
+	private.record(t, "五")
+	private.record(t, "六")
 	private.askPrivately(t, theAdmin)
-	private.press(t, "关闭", somebodyElse)
+	private.press(t, "下一页", somebodyElse)
 	if said := private.lastText(); !strings.Contains(said, "不是发起它的人") {
 		t.Errorf("somebody else turned a record in a single chat:\n%s", said)
 	}
 
 	// In a group: that group's administrators, whoever is holding the phone.
 	group := newPlatform(t, func(p *platform) { p.admins = admins{who: theAdmin} })
-	group.record(t, "一")
+	for _, content := range []string{"一", "二", "三", "四", "五", "六"} {
+		group.record(t, content)
+	}
 	group.askInGroupForRecord(t, hereGroup, theAdmin)
-	group.pressInGroup(t, "关闭", hereGroup, somebodyElse)
+	group.pressInGroup(t, "下一页", hereGroup, somebodyElse)
 	if said := group.lastText(); !strings.Contains(said, "不是发起它的人") {
 		t.Errorf("a member who does not administer the group turned its record:\n%s", said)
 	}
-	// And a record of this group cannot be turned from another one: the page is refused
-	// rather than answered, because a press arriving in a different group is not a turn of
-	// this record whatever it carries.
-	group.pressInGroup(t, "关闭", otherGroup, theAdmin)
+	// And a record of this group cannot be turned from another one: the press is refused rather
+	// than answered, because it arrives somewhere this record is not.
+	group.pressInGroup(t, "下一页", otherGroup, theAdmin)
 	if said := group.lastText(); !strings.Contains(said, "不是发起它的人") {
 		t.Errorf("a record was turned from the wrong group:\n%s", said)
 	}

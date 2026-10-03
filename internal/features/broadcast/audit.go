@@ -152,8 +152,10 @@ func (h *handler) onPagePress(ctx context.Context, press command.Press, asked ac
 		return h.answer(press, qqbotsdk.InteractionCodeFailed)
 	}
 	if asked.kind == kindPageClose {
-		// Closing takes the page away rather than leaving it: the record is a thing to
-		// consult, and a chat left holding one has nobody to tell it is finished with.
+		// No page offers this any more, and the pages that were already sent when it was
+		// offered still carry it: a button in somebody's chat that answers nothing leaves them
+		// watching a spinner, so it is still answered -- by taking the page away, which is what
+		// it says.
 		h.forgetPage(p)
 		h.recallPage(ctx, *p)
 		return h.answer(press, qqbotsdk.InteractionCodeSuccess)
@@ -310,10 +312,12 @@ func presserOf(data *qqbotsdk.InteractionCreateData) string {
 	return data.GroupMemberOpenID
 }
 
-// pageKeyboard is under a page of the record.
+// pageKeyboard is under a page of the record: the directions that lead somewhere, and nothing
+// else.
 //
-// Only the directions that lead somewhere: a button that answers "there is nothing there" is
-// a button that should not have been shown.
+// No way to close it: a message a reader is finished with can be deleted where it is, and a
+// button that has to be pressed to make a record go away is a step between somebody and what
+// they were reading. A single page therefore carries no keyboard at all.
 func pageKeyboard(p pager, page, pages int) *qqbotsdk.Keyboard {
 	var buttons []qqbotsdk.Button
 	if page > 1 {
@@ -324,8 +328,9 @@ func pageKeyboard(p pager, page, pages int) *qqbotsdk.Keyboard {
 		buttons = append(buttons,
 			plainButton("下一页", kindPageNext, p.token, strconv.Itoa(page+1)))
 	}
-	buttons = append(buttons,
-		plainButton("关闭", kindPageClose, p.token, strconv.Itoa(page)))
+	if len(buttons) == 0 {
+		return nil
+	}
 	return &qqbotsdk.Keyboard{Content: &qqbotsdk.KeyboardContent{Rows: []qqbotsdk.Row{
 		{Buttons: buttons},
 	}}}
