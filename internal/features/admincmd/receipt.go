@@ -111,7 +111,8 @@ func (h *handler) receiptCommand(ctx context.Context, data *qqbotsdk.GroupMessag
 		h.reply(ctx, data, "本群没有这条记录。回执单号只能在它所属的群里查，或者私聊机器人查。")
 		return nil
 	}
-	h.replyWithKeyboard(ctx, data, h.receiptSummary(entry), detailKeyboard(entry.ID, true))
+	h.replyWithKeyboard(ctx, data, h.receiptSummary(entry, true),
+		detailKeyboard(entry.ID, true))
 	return nil
 }
 
@@ -182,7 +183,7 @@ func (h *handler) privateCommand(ctx context.Context, data *qqbotsdk.C2CMessageC
 	// details behind a button. Who may press it is decided when the press
 	// arrives, which is where the record's own group is known -- the summary can
 	// say which group a receipt belongs to, so the button cannot take that back.
-	h.replyPrivatelyWithKeyboard(ctx, data, h.receiptSummary(entry),
+	h.replyPrivatelyWithKeyboard(ctx, data, h.receiptSummary(entry, false),
 		detailKeyboard(entry.ID, false))
 	return nil
 }
@@ -238,7 +239,12 @@ func receiptProblem(ask string, err error) string {
 // chain of thought, no withdrawn text -- because this is the version a group gets,
 // and a group is the one place where free text from a model must not be published.
 // Everything else is in receiptDetails, which an administrator asks for.
-func (h *handler) receiptSummary(entry store.Judgement) string {
+//
+// inGroup decides how the two members are named, and it is not cosmetic: a single
+// chat refuses the mention tag outright, so a summary written for a group cannot
+// be sent to one. It was, once -- the whole private answer came back 40034106 and
+// the person asking saw nothing at all.
+func (h *handler) receiptSummary(entry store.Judgement, inGroup bool) string {
 	var out strings.Builder
 	out.WriteString("**违规回执 " + entry.ID + "**\n")
 	out.WriteString(receiptDivider + "\n")
@@ -250,8 +256,8 @@ func (h *handler) receiptSummary(entry store.Judgement) string {
 	fmt.Fprintf(&out, "**群**：%s\n", h.groupNumber(entry.GroupOpenID))
 
 	fmt.Fprintf(&out, "**判定**：%s\n", h.verdictLabel(entry))
-	fmt.Fprintf(&out, "**被判定人**：%s\n", atUser(entry.SubjectOpenID))
-	fmt.Fprintf(&out, "**举报人**：%s\n", atUser(entry.ReporterOpenID))
+	fmt.Fprintf(&out, "**被判定人**：%s\n", memberRef(entry.SubjectOpenID, inGroup))
+	fmt.Fprintf(&out, "**举报人**：%s\n", memberRef(entry.ReporterOpenID, inGroup))
 	if entry.Model != "" {
 		fmt.Fprintf(&out, "**模型**：%s\n", entry.Model)
 	}
@@ -294,6 +300,24 @@ func (h *handler) receiptDetails(entry store.Judgement) string {
 // out as three stray characters. A run of box-drawing characters is a visible rule
 // either way.
 const receiptDivider = "────────────────────"
+
+// memberRef names a member in a receipt.
+//
+// In a group it is a mention, which the platform renders as the member's own name
+// and which is how the group already saw them. In a single chat it is the openid,
+// because a single chat does not accept the mention tag at all: the send is
+// refused whole with 40034106 -- "C2C消息不支持qqbot-at-user", measured -- so a
+// mention there is not a cosmetic difference, it is a message that never arrives.
+//
+// The openid is a poor name to read, and it is the honest one: it is what an
+// administrator can search the configuration and the member log for, and the
+// alternative is nothing at all.
+func memberRef(openID string, inGroup bool) string {
+	if inGroup {
+		return atUser(openID)
+	}
+	return orNone(openID)
+}
 
 // atUser renders a member the way the platform's markdown expects a mention.
 //

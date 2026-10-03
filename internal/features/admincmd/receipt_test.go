@@ -388,6 +388,17 @@ func TestAReceiptIsReadInPrivate(t *testing.T) {
 			t.Errorf("the private summary leaks %q:\n%s", forbidden, reply)
 		}
 	}
+	// No mention tag, and this is not a matter of taste: a single chat refuses it
+	// outright with 40034106 -- "C2C消息不支持qqbot-at-user", measured -- so the
+	// whole answer would never arrive and the person asking would see nothing.
+	if strings.Contains(reply, "<qqbot-at-user") {
+		t.Errorf("the private summary carries a mention, which a single chat refuses:\n%s",
+			reply)
+	}
+	if !strings.Contains(reply, entry.SubjectOpenID) ||
+		!strings.Contains(reply, entry.ReporterOpenID) {
+		t.Errorf("the private summary does not name the two members at all:\n%s", reply)
+	}
 	if data := h.buttonOf(); data != receiptDetailPrefix+entry.ID {
 		t.Fatalf("button data = %q, want the details button", data)
 	}
@@ -415,6 +426,12 @@ func TestAReceiptIsReadInPrivate(t *testing.T) {
 		if !strings.Contains(details, want) {
 			t.Errorf("the private details are missing %q:\n%s", want, details)
 		}
+	}
+	// The details go into a single chat too, so they are held to the same rule as
+	// the summary: a mention added to them later would break this path the same
+	// way, and silently.
+	if strings.Contains(details, "<qqbot-at-user") {
+		t.Errorf("the private details carry a mention:\n%s", details)
 	}
 	if h.lastMessageCarriedKeyboard() {
 		t.Error("the private details carry a keyboard, which only a group's may")
