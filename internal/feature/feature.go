@@ -24,6 +24,13 @@ import (
 )
 
 // Deps is what a feature is handed to do its work.
+//
+// What is here is what the bot is made of rather than what one feature promises
+// another: a feature takes the part it needs, and nothing in this struct can be
+// absent because another feature is switched off. A promise one feature makes to
+// another is a capability instead, wired in the Inject calls below -- a promise
+// can go unkept, and a feature on the receiving end has to be able to say so
+// rather than fail later.
 type Deps struct {
 	// Client is the configured SDK client.
 	Client *qqbotsdk.Client
@@ -39,9 +46,6 @@ type Deps struct {
 	// BotQQ is the bot's own QQ number, which the OneBot fallback uses to
 	// accept a message as the bot's own rather than a forged copy.
 	BotQQ int64
-	// JoinTolerance is how many seconds a join match may differ between the
-	// official event timestamp and OneBot's recorded join time.
-	JoinTolerance int64
 	// Store is the data layer: what has to outlive a restart.
 	//
 	// A feature takes the part it needs rather than this package declaring a
@@ -51,8 +55,8 @@ type Deps struct {
 	Store store.Store
 	// Redis is where the volatile cache lives, with its defaults filled in.
 	//
-	// Lifted out of the configuration the way Groups and JoinTolerance are, so
-	// that a feature which caches something does not have to read the file.
+	// Lifted out of the configuration the way Groups is, so that a feature which
+	// caches something does not have to read the file.
 	Redis config.Redis
 	// Buttons is where the feature claims the button presses it answers.
 	//

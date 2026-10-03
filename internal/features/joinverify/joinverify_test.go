@@ -100,12 +100,11 @@ func newHarnessWithStore(t *testing.T, section, databasePath string) *harness {
 	}
 
 	deps := feature.Deps{
-		Client:        client,
-		OneBot:        oneBotClient,
-		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Groups:        config.Groups{{OpenID: testGroupOpenID, QQGroupID: testQQGroupID}},
-		BotQQ:         testBotQQ,
-		JoinTolerance: 15,
+		Client: client,
+		OneBot: oneBotClient,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Groups: config.Groups{{OpenID: testGroupOpenID, QQGroupID: testQQGroupID}},
+		BotQQ:  testBotQQ,
 	}
 	if databasePath != "" {
 		opened, err := store.Open(context.Background(), store.Config{

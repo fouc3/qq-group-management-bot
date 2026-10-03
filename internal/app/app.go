@@ -88,14 +88,13 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 		"driver", cfg.Database.Driver, "dsn", cfg.Database.DSN)
 
 	features, err := registry.Build(cfg, feature.Deps{
-		Client:        client,
-		OneBot:        oneBot,
-		Logger:        logger,
-		Groups:        cfg.Bot.Groups,
-		BotQQ:         cfg.Bot.QQ,
-		JoinTolerance: cfg.OneBot.Tolerance(),
-		Store:         database,
-		Redis:         cfg.RedisConfig(),
+		Client: client,
+		OneBot: oneBot,
+		Logger: logger,
+		Groups: cfg.Bot.Groups,
+		BotQQ:  cfg.Bot.QQ,
+		Store:  database,
+		Redis:  cfg.RedisConfig(),
 	})
 	if err != nil {
 		return err
