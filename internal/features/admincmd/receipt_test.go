@@ -3,6 +3,7 @@ package admincmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,9 @@ import (
 const (
 	receiptGroup      = "GROUP-OPENID"
 	receiptOtherGroup = "OTHER-GROUP-OPENID"
+	// receiptGroupNumber is the number the group is known by, which is what a
+	// summary shows instead of the openid nobody has seen.
+	receiptGroupNumber = 123456789
 )
 
 // receiptHarness builds the feature over a real database holding one judgement.
@@ -55,8 +59,8 @@ groups:
 	// Both groups are managed, which is what makes the wrong-group case a test of
 	// the boundary rather than of the bot ignoring an unknown group entirely.
 	h.handler.deps.Groups = config.Groups{
-		{OpenID: receiptGroup},
-		{OpenID: receiptOtherGroup},
+		{OpenID: receiptGroup, QQGroupID: receiptGroupNumber},
+		{OpenID: receiptOtherGroup, QQGroupID: receiptGroupNumber + 1},
 	}
 	// The label a receipt shows comes from the moderation feature, which owns the
 	// categories; the stub answers with what it was built with.
@@ -106,15 +110,17 @@ func TestAnyoneReadsTheSummaryOfAReceipt(t *testing.T) {
 		t.Fatal("the command was not answered")
 	}
 	for _, want := range []string{
-		"违规回执 " + entry.ID,
-		receiptGroup,
+		// The title is one bold line, a rule, and then the body.
+		"**违规回执 " + entry.ID + "**",
+		receiptDivider,
 		"违规·广告",
 		`<qqbot-at-user id="` + entry.SubjectOpenID + `"/>`,
 		`<qqbot-at-user id="` + entry.ReporterOpenID + `"/>`,
 		// Every field is labelled and the label is bold: the message is markdown,
 		// and eight plain lines of "key：value" read as a wall.
 		"**时间**：",
-		"**群**：",
+		// The group is named by its number, which is what its members know.
+		fmt.Sprintf("**群**：%d", receiptGroupNumber),
 		"**判定**：",
 		"**被判定人**：",
 		"**举报人**：",
@@ -132,6 +138,10 @@ func TestAnyoneReadsTheSummaryOfAReceipt(t *testing.T) {
 		// its own: "已禁言 10分钟" above "禁言时长：10分钟" is the same fact twice,
 		// and a reader checks both to see whether they agree.
 		"禁言时长",
+		// The openid belongs to the details: it is what an administrator needs
+		// when they go to the configuration, and nobody in a group has ever seen
+		// it.
+		entry.GroupOpenID,
 	} {
 		if strings.Contains(reply, forbidden) {
 			t.Errorf("the summary leaks %q:\n%s", forbidden, reply)
@@ -170,7 +180,14 @@ func TestTheDetailsAreBehindAnAdministratorOnlyButton(t *testing.T) {
 			t.Fatal("no detailed receipt was sent")
 		}
 		details := h.lastReply()
-		for _, want := range []string{entry.Reason, entry.Reasoning, "本站价目"} {
+		for _, want := range []string{
+			entry.Reason, entry.Reasoning, "本站价目",
+			// The openid is here rather than in the summary: it is what an
+			// administrator needs when they go to the configuration.
+			"**群 openid**：" + entry.GroupOpenID,
+			"**违规回执 " + entry.ID + " 详细信息**",
+			receiptDivider,
+		} {
 			if !strings.Contains(details, want) {
 				t.Errorf("the details do not mention %q:\n%s", want, details)
 			}

@@ -248,10 +248,14 @@ func receiptProblem(ask string, err error) string {
 // Everything else is in receiptDetails, which an administrator asks for.
 func (h *handler) receiptSummary(entry store.Judgement) string {
 	var out strings.Builder
-	out.WriteString("违规回执 " + entry.ID + "\n")
+	out.WriteString("**违规回执 " + entry.ID + "**\n")
+	out.WriteString(receiptDivider + "\n")
 	fmt.Fprintf(&out, "**时间**：%s\n",
 		time.Unix(entry.CreatedAt, 0).Format("2006-01-02 15:04:05"))
-	fmt.Fprintf(&out, "**群**：%s\n", h.groupLabel(entry.GroupOpenID))
+	// The QQ number, not the openid: the number is the group somebody knows they
+	// are in, and it is short. The openid is what an administrator needs when
+	// they go to the configuration, so it is in the details.
+	fmt.Fprintf(&out, "**群**：%s\n", h.groupNumber(entry.GroupOpenID))
 
 	verdict := entry.Verdict
 	if entry.Category != "" {
@@ -281,7 +285,9 @@ func (h *handler) receiptSummary(entry store.Judgement) string {
 // here is the only one left anywhere.
 func (h *handler) receiptDetails(entry store.Judgement) string {
 	var out strings.Builder
-	out.WriteString("违规回执 " + entry.ID + " 详细信息\n")
+	out.WriteString("**违规回执 " + entry.ID + " 详细信息**\n")
+	out.WriteString(receiptDivider + "\n")
+	fmt.Fprintf(&out, "**群 openid**：%s\n", orNone(entry.GroupOpenID))
 	if entry.Reason != "" {
 		fmt.Fprintf(&out, "**理由**：%s\n", entry.Reason)
 	}
@@ -292,6 +298,14 @@ func (h *handler) receiptDetails(entry store.Judgement) string {
 	}
 	return out.String()
 }
+
+// receiptDivider is the rule under a receipt's title.
+//
+// Drawn rather than written as "---": the platform's markdown is not the whole of
+// markdown, and a line of dashes that is not understood as a horizontal rule comes
+// out as three stray characters. A run of box-drawing characters is a visible rule
+// either way.
+const receiptDivider = "────────────────────"
 
 // atUser renders a member the way the platform's markdown expects a mention.
 //
@@ -398,12 +412,17 @@ func cutRunes(text string, limit int) string {
 	return string(runes[:limit]) + "\n    ……（已截断）"
 }
 
-// groupLabel names a group the way the configuration does.
-func (h *handler) groupLabel(groupOpenID string) string {
+// groupNumber names a group by the number its members know it by.
+//
+// The openid is what the configuration and every API call speak, but nobody in a
+// group has ever seen it; the number is what they are in. A group whose number is
+// not configured yet falls back to the openid, because a blank field answers
+// nothing, and the receipt is the one place it can be read back from.
+func (h *handler) groupNumber(groupOpenID string) string {
 	if id, ok := h.deps.GroupQQID(groupOpenID); ok && id != 0 {
-		return fmt.Sprintf("%d（%s）", id, groupOpenID)
+		return fmt.Sprintf("%d", id)
 	}
-	return groupOpenID
+	return orNone(groupOpenID)
 }
 
 // categoryLabel is the configured display name for a category.
