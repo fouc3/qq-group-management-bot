@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -154,6 +154,31 @@ CREATE TABLE IF NOT EXISTS member_events (
 CREATE INDEX IF NOT EXISTS member_events_by_member ON member_events (member_openid, event_at);
 CREATE INDEX IF NOT EXISTS member_events_by_time ON member_events (event_at);
 `,
+	// 6: what was broadcast, and who asked for it.
+	//
+	// The one place the two halves of an anonymous notice meet: a group reads a message
+	// that does not say who wrote it, and this is where that is still answerable. One row
+	// per group it went to, because the question an audit asks is group by group, and the
+	// card together with the group is the key, so recording the same broadcast twice is a
+	// no-op rather than a duplicate.
+	//
+	// The content is kept whole. A record that cannot be read back cannot answer what a
+	// group was told, which is most of what an audit is for.
+	`
+CREATE TABLE IF NOT EXISTS broadcasts (
+    token          TEXT   NOT NULL,
+    from_group     TEXT   NOT NULL DEFAULT '',
+    sender_openid  TEXT   NOT NULL,
+    group_openid   TEXT   NOT NULL,
+    anonymous      BIGINT NOT NULL DEFAULT 0,
+    markdown       BIGINT NOT NULL DEFAULT 0,
+    content        TEXT   NOT NULL,
+    sent_at        BIGINT NOT NULL,
+    message_id     TEXT   NOT NULL DEFAULT '',
+    PRIMARY KEY (token, group_openid)
+);
+CREATE INDEX IF NOT EXISTS broadcasts_by_group ON broadcasts (group_openid, sent_at);
+`,
 }
 
 // sqlStore is the database/sql implementation, shared by both dialects.
@@ -170,6 +195,7 @@ func (s *sqlStore) Pending() PendingStore          { return pendingStore{s} }
 func (s *sqlStore) Blacklist() BlacklistStore      { return blacklistStore{s} }
 func (s *sqlStore) Judgements() JudgementStore     { return judgementStore{s} }
 func (s *sqlStore) MemberEvents() MemberEventStore { return memberEventStore{s} }
+func (s *sqlStore) Broadcasts() BroadcastStore     { return broadcastStore{s} }
 func (s *sqlStore) Meta() MetaStore                { return metaStore{s} }
 func (s *sqlStore) Close() error                   { return s.db.Close() }
 

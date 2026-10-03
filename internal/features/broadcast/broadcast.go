@@ -190,6 +190,17 @@ func (h *handler) CommandDefs() []command.Def {
 		},
 		Run:     h.startCommand,
 		Private: h.startPrivately,
+	}, {
+		// The other half of anonymity: the group is not told who asked, and this is how
+		// it can still be found out. In the help rather than in a panel, because a
+		// record is something to consult rather than something to put in front of a
+		// group.
+		Name:     "广播审计",
+		Aliases:  []string{"广播记录"},
+		Usage:    "{prefix}广播审计 —— 本群最近的广播记录与发起人（只有本群管理员能看）",
+		Desc:     "广播记录",
+		Audience: command.Admins,
+		Run:      h.auditCommand,
 	}}
 }
 

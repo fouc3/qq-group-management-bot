@@ -11,6 +11,7 @@ import (
 
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/messaging"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // pressTimeout bounds how long answering one press may take: the presser is watching
@@ -435,12 +436,14 @@ func (h *handler) deliver(ctx context.Context, s *session, press command.Press) 
 			refused = append(refused, h.callOf(s, groupOpenID)+"（没开主动推送）")
 			continue
 		}
-		if _, err := h.send(ctx, messaging.Message{GroupOpenID: groupOpenID, Text: text}); err != nil {
+		response, err := h.send(ctx, messaging.Message{GroupOpenID: groupOpenID, Text: text})
+		if err != nil {
 			h.logger(groupOpenID).Error("could not post a broadcast", "error", err)
 			refused = append(refused, h.callOf(s, groupOpenID)+"（平台拒绝了发送）")
 			continue
 		}
 		sent = append(sent, groupOpenID)
+		h.deposit(ctx, s, groupOpenID, response)
 		h.logger(groupOpenID).Info("a broadcast was posted", "from", s.where.String(),
 			"member", s.starter, "token", s.token, "anonymous", s.anonymous == on,
 			"markdown", s.markdown == on)
@@ -461,8 +464,98 @@ func (h *handler) deliver(ctx context.Context, s *session, press command.Press) 
 		"已发出 "+strconv.Itoa(len(sent))+" 个群。")
 }
 
-// adminsOf reports whether this member administers this group.
+// deposit writes down what went out and who asked for it.
 //
+// A failure is loud rather than quiet: the group is not told who asked, so this record
+// is the only thing that makes the notice answerable, and losing it is losing the audit.
+// The message has already gone out by the time this runs -- a notice is not taken back
+// for the sake of its record -- but nobody can claim afterwards that it was.
+func (h *handler) deposit(ctx context.Context, s *session, groupOpenID string,
+	sent *qqbotsdk.MessageResponse) {
+	if h.deps.Store == nil {
+		h.logger(groupOpenID).Warn("no data layer, so this broadcast is recorded "+
+			"nowhere but the journal", "token", s.token, "member", s.starter)
+		return
+	}
+	messageID := ""
+	if sent != nil {
+		messageID = sent.ID
+	}
+	err := h.deps.Store.Broadcasts().Record(ctx, store.Broadcast{
+		Token:           s.token,
+		FromGroupOpenID: s.where.groupOpenID,
+		SenderOpenID:    s.starter,
+		GroupOpenID:     groupOpenID,
+		Anonymous:       s.anonymous == on,
+		Markdown:        s.markdown == on,
+		Content:         s.content,
+		SentAt:          time.Now().Unix(),
+		MessageID:       messageID,
+	})
+	if err != nil {
+		h.logger(groupOpenID).Error("a broadcast was posted and could not be "+
+			"recorded", "error", err, "token", s.token, "member", s.starter)
+		return
+	}
+	h.logger(groupOpenID).Info("a broadcast was recorded", "token", s.token,
+		"member", s.starter)
+}
+
+// auditLimit is how many broadcasts the audit shows, newest first.
+//
+// Fixed rather than asked for: the question is "who sent that", and the recent ones are
+// where that is answered. A record kept for its own sake is read out of the database
+// rather than out of a group.
+const auditLimit = 10
+
+// auditCommand shows what was broadcast in this group, and who asked for it.
+func (h *handler) auditCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+	_ command.Parsed) error {
+	where := place{groupOpenID: data.GroupOpenID}
+	if h.deps.Store == nil {
+		return h.say(ctx, where, "", data.ID, "这里没有数据层，广播记录查不到。")
+	}
+	posted, err := h.deps.Store.Broadcasts().ListByGroup(ctx, data.GroupOpenID, auditLimit)
+	if err != nil {
+		h.loggerIn(where).Error("could not read the broadcast record", "error", err)
+		return h.say(ctx, where, "", data.ID, "广播记录读取失败："+err.Error())
+	}
+
+	lines := []string{"**广播记录**（本群最近 " + strconv.Itoa(len(posted)) +
+		" 条，只有本群管理员能看到）", ""}
+	if len(posted) == 0 {
+		lines = append(lines, "还没有广播记录。")
+	}
+	for index, entry := range posted {
+		when := time.Unix(entry.SentAt, 0).Format("01-02 15:04")
+		how := "匿名发出"
+		if !entry.Anonymous {
+			how = "署名发出"
+		}
+		lines = append(lines,
+			strconv.Itoa(index+1)+". "+when+" · "+how+" · 发起人 `"+entry.SenderOpenID+"`",
+			"   "+firstLine(entry.Content, 40))
+	}
+	return h.say(ctx, where, "", data.ID, strings.Join(lines, "\n"))
+}
+
+// firstLine is the beginning of what was broadcast, for a record read in a group.
+func firstLine(content string, limit int) string {
+	line := content
+	if cut := strings.IndexAny(line, "\n\r"); cut >= 0 {
+		line = line[:cut]
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "（没有文字内容）"
+	}
+	runes := []rune(line)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return line
+}
+
 // The failure of a question that cannot be asked counts as "no": a broadcast is not
 // something to send on a guess, and the list is what decides it rather than the bot.
 func (h *handler) adminsOf(groupOpenID, memberOpenID string) bool {

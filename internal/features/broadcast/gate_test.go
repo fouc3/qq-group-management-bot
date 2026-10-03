@@ -64,17 +64,25 @@ func TestTheTrialGateAlsoClosesASingleChat(t *testing.T) {
 func TestTheCommandIsOfferedInBothPanels(t *testing.T) {
 	p := newPlatform(t)
 	defs := p.handler.CommandDefs()
-	if len(defs) != 1 {
-		t.Fatalf("the feature offers %d commands, want 1", len(defs))
+	var broadcast, audit *command.Def
+	for index := range defs {
+		switch defs[index].Name {
+		case "群广播":
+			broadcast = &defs[index]
+		case "广播审计":
+			audit = &defs[index]
+		}
 	}
-	def := defs[0]
-	if def.Private == nil {
+	if broadcast == nil || audit == nil {
+		t.Fatal("the feature does not offer both of its commands")
+	}
+	if broadcast.Private == nil {
 		t.Error("a single chat cannot write a broadcast, so the private panel would " +
 			"offer a command that answers nothing")
 	}
 	for _, scene := range []command.Scene{command.InGroup, command.InPrivate} {
 		offered := false
-		for _, place := range def.Panels {
+		for _, place := range broadcast.Panels {
 			if place.Scene == scene {
 				offered = true
 			}
@@ -82,6 +90,11 @@ func TestTheCommandIsOfferedInBothPanels(t *testing.T) {
 		if !offered {
 			t.Errorf("the command is not offered in scene %v", scene)
 		}
+	}
+	// The record is consulted rather than offered: an entry in the menu would put a
+	// list of names in front of a group.
+	if len(audit.Panels) != 0 {
+		t.Errorf("the audit is offered in a panel: %+v", audit.Panels)
 	}
 }
 

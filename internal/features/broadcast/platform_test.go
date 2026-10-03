@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 const (
@@ -63,10 +65,12 @@ type platform struct {
 	recalls   []string
 	answered  []qqbotsdk.InteractionCode
 	proactive bool
-	// section is the configuration this feature is built from, and admins is the list
-	// it is handed, so that a test can set either before building it.
+	// section is the configuration this feature is built from, admins is the list it is
+	// handed, and store is the data layer it records into, so that a test can set what
+	// it wants before building it.
 	section string
 	admins  feature.AdminDirectory
+	store   store.Store
 }
 
 // card is the last card sent, and its buttons.
@@ -245,6 +249,16 @@ func newPlatform(t *testing.T, options ...func(*platform)) *platform {
 		t.Fatalf("building the client: %v", err)
 	}
 
+	database, err := store.Open(context.Background(), store.Config{
+		Driver: "sqlite",
+		DSN:    filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("opening the store: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	p.store = database
+
 	built, err := New(sectionNode(t, p.section), feature.Deps{
 		Client: client,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -252,6 +266,7 @@ func newPlatform(t *testing.T, options ...func(*platform)) *platform {
 			{OpenID: hereGroup}, {OpenID: otherGroup}, {OpenID: thirdGroup},
 		},
 		Buttons: command.NewButtons(),
+		Store:   database,
 	})
 	if err != nil {
 		t.Fatalf("building the feature: %v", err)

@@ -72,6 +72,11 @@ type Store interface {
 	// It is the only place this is kept: the platform refuses this application
 	// the member-list endpoints, so a group's membership cannot be read back.
 	MemberEvents() MemberEventStore
+	// Broadcasts holds what an administrator had the bot post, and who asked for it.
+	//
+	// It is the other half of an anonymous notice: the group reads a message that does
+	// not say who wrote it, and this is where that is still answerable.
+	Broadcasts() BroadcastStore
 	// Meta holds small bookkeeping values that have to survive a restart, such
 	// as whether a one-off import has already run.
 	//
