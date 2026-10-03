@@ -258,16 +258,20 @@ func (h *handler) broadcastText(s *session) string {
 	if s.anonymous == off {
 		header = "来自 <@" + s.chat + "> 的广播"
 	}
-	// The divider follows the same switch the body does: a message the platform renders
-	// gets the divider the platform draws, and one it does not gets characters instead,
-	// because the rule would come out as three literal dashes there.
-	divider := markdownRule
-	body := s.content
-	if s.markdown == off {
-		divider = plainDivider
-		body = escapeMarkdown(body)
+	if s.markdown != on {
+		// Taken literally, so the header stays plain and the divider is characters: the
+		// markdown rule only is a rule when something renders it.
+		return header + "\n" + plainDivider + "\n" + escapeMarkdown(s.content)
 	}
-	return header + "\n" + divider + "\n" + body
+	// Rendered as markdown, so the header is bold and the divider is the rule the platform
+	// draws -- with a blank line in front of it.
+	//
+	// Both of those are load-bearing, and both were measured in a group rather than
+	// reasoned about: a rule on the line straight under the header is a setext heading
+	// underline, which made the header a big title and drew no divider at all. The blank
+	// line is what makes it a divider instead, and the bold is what keeps the header
+	// reading as one.
+	return "**" + header + "**\n\n" + markdownRule + "\n" + s.content
 }
 
 // escapeMarkdown takes the meaning out of the text.

@@ -132,6 +132,28 @@ func (p *platform) press(t *testing.T, label, member string) {
 	}
 }
 
+// notices are the messages that came from this start and are a posted broadcast.
+//
+// Told apart from everything else the flow says by carrying a divider, which a card, a
+// refusal and the answer afterwards do not: whether it is the platform's rule or a run of
+// characters depends on how the notice was rendered.
+func (p *platform) notices() []string {
+	var posted []string
+	for _, message := range p.sent {
+		markdown, _ := message["markdown"].(map[string]any)
+		text, _ := markdown["content"].(string)
+		if strings.HasPrefix(text, "**预览**") {
+			// What the writer looked at, not what a group read.
+			continue
+		}
+		if strings.Contains(text, "\n"+markdownRule+"\n") ||
+			strings.Contains(text, "\n"+plainDivider+"\n") {
+			posted = append(posted, text)
+		}
+	}
+	return posted
+}
+
 // lastText is what the last message sent says.
 func (p *platform) lastText() string {
 	markdown, _ := p.card()["markdown"].(map[string]any)

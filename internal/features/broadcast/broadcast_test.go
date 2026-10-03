@@ -112,25 +112,15 @@ func TestTheBroadcastIsPostedAsWritten(t *testing.T) {
 		t.Errorf("the preview does not show what was written:\n%s", preview)
 	}
 
-	before := len(p.sent)
 	p.press(t, "发送", theAdmin)
 
-	// What was posted, told from what was said about it: the answer the administrator
-	// reads afterwards is a message as well. Told apart by the header, which only a posted
-	// notice has.
-	var posted []string
-	for _, message := range p.sent[before:] {
-		markdown, _ := message["markdown"].(map[string]any)
-		if text, _ := markdown["content"].(string); strings.HasPrefix(text, "来自") {
-			posted = append(posted, text)
-		}
-	}
+	posted := p.notices()
 	if len(posted) != 1 {
 		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
 	}
-	// Rendered as markdown, so the divider is the rule the platform draws rather than a
-	// line of characters.
-	want := "来自管理员的广播\n" + markdownRule + "\n第一行\n第二行"
+	// Rendered as markdown, so the header is bold, a blank line separates it from the rule,
+	// and the rule is the one the platform draws.
+	want := "**来自管理员的广播**\n\n" + markdownRule + "\n第一行\n第二行"
 	if posted[0] != want {
 		t.Errorf("the group reads:\n%q\nwant:\n%q", posted[0], want)
 	}
@@ -150,8 +140,11 @@ func TestTheDividerFollowsTheRendering(t *testing.T) {
 	rendered.press(t, "继续", theAdmin)
 	rendered.say(t, theAdmin, "正文")
 
-	if preview := rendered.lastText(); !strings.Contains(preview, "\n"+markdownRule+"\n") {
-		t.Errorf("a rendered notice does not use the platform's own divider:\n%s", preview)
+	// The blank line is the point, not the spacing: a rule on the line straight under a
+	// line of text is a setext heading underline in markdown, which made the header a big
+	// title and drew no divider at all in a group.
+	if preview := rendered.lastText(); !strings.Contains(preview, "\n\n"+markdownRule+"\n") {
+		t.Errorf("a rendered notice does not separate its header from the rule:\n%s", preview)
 	}
 
 	literal := newPlatform(t)
@@ -179,17 +172,18 @@ func TestTheHeaderSaysWhoAsked(t *testing.T) {
 	p.press(t, "继续", theAdmin)
 	p.say(t, theAdmin, "大家好")
 
-	before := len(p.sent)
 	p.press(t, "发送", theAdmin)
-	markdown, _ := p.sent[before]["markdown"].(map[string]any)
-	sent, _ := markdown["content"].(string)
-	if !strings.HasPrefix(sent, "来自 <@"+theAdmin+"> 的广播") {
-		t.Errorf("with the switch off the group should be told who asked:\n%s", sent)
+	posted := p.notices()
+	if len(posted) != 1 {
+		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
+	}
+	if !strings.Contains(posted[0], "来自 <@"+theAdmin+"> 的广播") {
+		t.Errorf("with the switch off the group should be told who asked:\n%s", posted[0])
 	}
 }
 
 // TestMarkdownOffEscapesWhatWasWritten covers what turning markdown rendering off has
-// to mean: the text is what the administrator wrote, not what markdown makes of it.
+// to mean: the text is what the writer wrote, not what markdown makes of it.
 func TestMarkdownOffEscapesWhatWasWritten(t *testing.T) {
 	p := newPlatform(t)
 	p.start(t, theAdmin)
@@ -198,12 +192,18 @@ func TestMarkdownOffEscapesWhatWasWritten(t *testing.T) {
 	p.press(t, "继续", theAdmin)
 	p.say(t, theAdmin, "*不是加粗*")
 
-	before := len(p.sent)
 	p.press(t, "发送", theAdmin)
-	markdown, _ := p.sent[before]["markdown"].(map[string]any)
-	sent, _ := markdown["content"].(string)
-	if !strings.Contains(sent, `\*不是加粗\*`) {
-		t.Errorf("the asterisks were left to mean something: %q", sent)
+	posted := p.notices()
+	if len(posted) != 1 {
+		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
+	}
+	if !strings.Contains(posted[0], `\*不是加粗\*`) {
+		t.Errorf("the asterisks were left to mean something: %q", posted[0])
+	}
+	// And the header is plain there: a message nobody renders would show the asterisks of
+	// a bold marker as asterisks.
+	if !strings.HasPrefix(posted[0], "来自管理员的广播\n") {
+		t.Errorf("a notice that is not rendered does not have a plain header:\n%s", posted[0])
 	}
 }
 

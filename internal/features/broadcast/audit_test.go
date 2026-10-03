@@ -154,16 +154,8 @@ func TestABroadcastWithNoRecordIsLoudAboutIt(t *testing.T) {
 		t.Errorf("something was recorded with no data layer: %+v", posted)
 	}
 	// And the broadcast itself still went out: the record is the audit's business, not
-	// the group's. Told from the preview by its header, which only a posted notice has.
-	var notices []string
-	for _, message := range p.sent {
-		markdown, _ := message["markdown"].(map[string]any)
-		text, _ := markdown["content"].(string)
-		if strings.HasPrefix(text, "来自管理员的广播") {
-			notices = append(notices, text)
-		}
-	}
-	if len(notices) != 1 {
+	// the group's.
+	if notices := p.notices(); len(notices) != 1 {
 		t.Errorf("the broadcast went out %d time(s), want once: %v", len(notices), notices)
 	}
 }

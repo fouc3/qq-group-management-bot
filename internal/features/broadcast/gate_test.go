@@ -154,16 +154,9 @@ func TestABroadcastCanBeWrittenInASingleChat(t *testing.T) {
 	p.press(t, "继续", theAdmin)
 	p.say(t, theAdmin, "从私聊发的广播")
 
-	before := len(p.sent)
 	p.press(t, "发送", theAdmin)
 
-	var posted []string
-	for _, message := range p.sent[before:] {
-		markdown, _ := message["markdown"].(map[string]any)
-		if text, _ := markdown["content"].(string); strings.HasPrefix(text, "来自") {
-			posted = append(posted, text)
-		}
-	}
+	posted := p.notices()
 	if len(posted) != 1 {
 		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
 	}
