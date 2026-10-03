@@ -359,6 +359,16 @@ func (h *handler) Intents() qqbotsdk.Intent {
 func (h *handler) SetVerifier(verifier feature.Verifier) { h.verifier = verifier }
 
 // IsAdmin implements feature.AdminDirectory.
+// LooksLikeACommand implements feature.Commands.
+//
+// It answers for the table as a whole, which is what a feature waiting for free
+// text needs to know: a message carrying the prefix is somebody asking the bot to
+// do something, whether or not the table holds the word they typed.
+func (h *handler) LooksLikeACommand(content string) bool {
+	_, ok := command.Parse(content, h.cfg.Prefix)
+	return ok
+}
+
 func (h *handler) IsAdmin(groupOpenID, memberOpenID string) bool {
 	group, known := h.cfg.Groups[groupOpenID]
 	return known && contains(group.Admins, memberOpenID)

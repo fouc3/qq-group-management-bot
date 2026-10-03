@@ -202,6 +202,39 @@ func InjectAdminDirectory(features []Feature, logger *slog.Logger) error {
 	return nil
 }
 
+// Commands is the bot's command table, as a question another feature can ask it.
+//
+// Only the table knows what a command looks like, because only the table knows the
+// prefix it is written with and the words it holds. A feature that is waiting for
+// free text from a member has to ask rather than guess: a command typed in the
+// middle of that has to be answered, not swallowed as the text that was being
+// waited for.
+type Commands interface {
+	// LooksLikeACommand reports whether a message is an attempt at a command.
+	//
+	// An attempt, not a command the table holds: a word that was mistyped is still
+	// somebody asking the bot to do something, and answering it with the help is
+	// what the bot does everywhere else.
+	LooksLikeACommand(content string) bool
+}
+
+// CommandAware is implemented by a feature that has to tell a command from what a
+// member typed.
+type CommandAware interface {
+	SetCommands(Commands)
+}
+
+// InjectCommands hands the command table to every feature that has to ask it.
+func InjectCommands(features []Feature, logger *slog.Logger) error {
+	commands, providedBy, err := FindProvider[Commands](features, "the command table")
+	if err != nil {
+		return err
+	}
+	Inject[Commands, CommandAware](features, commands, providedBy,
+		"the command table as a question", logger, CommandAware.SetCommands)
+	return nil
+}
+
 // Verifier is what the administrator commands need from the join verification
 // feature.
 //

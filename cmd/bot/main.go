@@ -22,6 +22,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
+	"github.com/fouc3/qq-group-management-bot/internal/features/broadcast"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinverify"
 	"github.com/fouc3/qq-group-management-bot/internal/features/memberlog"
@@ -53,6 +54,9 @@ func run() error {
 	registry.Add(admincmd.Name, admincmd.New)
 	registry.Add(moderation.Name, moderation.New)
 	registry.Add(memberlog.Name, memberlog.New)
+	// After the command feature, because what this one answers is put into that
+	// feature's table rather than into a table of its own.
+	registry.Add(broadcast.Name, broadcast.New)
 	logger.Debug("features registered", "features", registry.Names())
 
 	// SIGHUP is deliberately not in this list: it asks for a reload rather than a

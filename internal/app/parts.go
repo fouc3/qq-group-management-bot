@@ -262,6 +262,11 @@ func (p *parts) wire() error {
 	if err := feature.InjectModeration(running, p.logger); err != nil {
 		return err
 	}
+	// A feature that waits for free text has to be able to tell a command from what
+	// a member typed, and only the table knows what a command looks like.
+	if err := feature.InjectCommands(running, p.logger); err != nil {
+		return err
+	}
 	// The commands other features answer are handed to whoever keeps the table, so
 	// that the help a group is shown, the menu it taps and the dispatcher that runs
 	// a command are still one list. It is wired after everything else because it is

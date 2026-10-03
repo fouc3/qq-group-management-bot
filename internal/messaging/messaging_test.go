@@ -185,6 +185,29 @@ func TestAMessageOfItsOwnCarriesNoReply(t *testing.T) {
 	}
 }
 
+// TestAnAnswerToAnEventAnswersTheEvent covers the third way a message can be
+// attached to something: a button press, which is an event rather than a message.
+//
+// It is what makes words after a press cost nothing: an answer to an event is not
+// counted against what the bot may say unasked, and a press carries its own event id
+// for exactly this.
+func TestAnAnswerToAnEventAnswersTheEvent(t *testing.T) {
+	platform := platform(t, ok)
+	if err := sendToGroup(t, platform, Message{Text: "hi", ReplyToEvent: "EVENT-ID"}); err != nil {
+		t.Fatalf("sending: %v", err)
+	}
+
+	body := platform.last()
+	if body["event_id"] != "EVENT-ID" {
+		t.Errorf("event_id = %v, want the event the press came in", body["event_id"])
+	}
+	// The platform refuses both at once, so an answer to an event must not also
+	// claim to answer a message.
+	if _, sent := body["msg_id"]; sent {
+		t.Errorf("an answer to an event also answered a message: %v", body["msg_id"])
+	}
+}
+
 // TestADestinationIsRequired covers what the platform would otherwise be asked to
 // work out: which of the two endpoints to use.
 func TestADestinationIsRequired(t *testing.T) {

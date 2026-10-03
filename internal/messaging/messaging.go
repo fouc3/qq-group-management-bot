@@ -54,6 +54,15 @@ type Message struct {
 	// limits, per group, by its own rules rather than this one's.
 	ReplyTo string
 
+	// ReplyToEvent makes the message a passive reply to an event rather than to a
+	// message, which is how a button press is answered with words.
+	//
+	// It is worth preferring over ReplyTo where there is a choice: a press carries
+	// its own event id, and an answer to one arrives as an answer rather than being
+	// counted against what the bot is allowed to say unasked. Mutually exclusive with
+	// ReplyTo, which is the platform's rule rather than this one's.
+	ReplyToEvent string
+
 	// Sequence numbers the replies to one message, and the first one is 1.
 	//
 	// The platform treats replies that share both a message and a sequence as
@@ -119,7 +128,9 @@ func route(ctx context.Context, client *qqbotsdk.Client, message Message) (*qqbo
 		Markdown: &qqbotsdk.MessageMarkdown{Content: message.Text},
 		Keyboard: message.Keyboard,
 	}
-	if message.ReplyTo != "" {
+	if message.ReplyToEvent != "" {
+		body.EventID = message.ReplyToEvent
+	} else if message.ReplyTo != "" {
 		body.MsgID = message.ReplyTo
 		body.MsgSeq = message.Sequence
 		if body.MsgSeq == 0 {
