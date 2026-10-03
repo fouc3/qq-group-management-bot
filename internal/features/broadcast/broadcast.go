@@ -183,11 +183,13 @@ func (h *handler) CommandDefs() []command.Def {
 		// The gate is the table's, and it is the same list the card's buttons are
 		// checked against: broadcasting into a group is something its administrators do.
 		Audience: command.Admins,
-		// The card is opened in a single chat, so that is the panel it belongs in: the
-		// group is exactly who is not supposed to watch a notice being drafted.
+		// The card is opened in a single chat, so that is the panel it belongs in: a notice
+		// being drafted -- its options, and the preview of it -- is not something the group
+		// it is for should be reading.
 		Panels: []command.PanelPlacement{{Scene: command.InPrivate}},
-		// Typed in a group, where the draft would be read by everyone in it, it says
-		// where to go instead of opening anything.
+		// Typed in a group it opens nothing and says where a broadcast is written instead,
+		// because nothing of this flow happens in a group: the card, the choices and the
+		// text are all in a single chat, and a group only ever receives the notice itself.
 		Run:     h.startInGroup,
 		Private: h.startPrivately,
 	}, {
@@ -207,6 +209,11 @@ func (h *handler) CommandDefs() []command.Def {
 }
 
 // startInGroup says where a broadcast is written, for a group that asked for one.
+//
+// What it must not say is that anything of this flow happens here: nothing does. The card,
+// the choices and the text are all in a single chat, and the group only receives the
+// notice they add up to -- so a group that was told "the draft would go here" would be
+// waiting for something that never comes.
 func (h *handler) startInGroup(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 	_ command.Parsed) error {
 	if !h.cfg.allowed(data.Author.MemberOpenID) {
@@ -217,7 +224,8 @@ func (h *handler) startInGroup(ctx context.Context, data *qqbotsdk.GroupMessageC
 	h.logger(data.GroupOpenID).Info("a broadcast was asked for in a group, so it was "+
 		"answered where to write one", "member", data.Author.MemberOpenID)
 	return h.say(ctx, data.GroupOpenID, data.ID,
-		"广播在私聊里写：请私聊机器人发送 /群广播 —— 草稿发在群里，全群都会看到。")
+		"广播在私聊里写：请私聊机器人发送 /群广播。参数和正文都在私聊里填，"+
+			"本群只会收到最后那条广播。")
 }
 
 // startPrivately opens a card in a single chat.

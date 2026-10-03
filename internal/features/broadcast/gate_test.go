@@ -72,6 +72,15 @@ func TestABroadcastIsOnlyWrittenInASingleChat(t *testing.T) {
 	if !strings.Contains(said, "私聊") {
 		t.Errorf("a group was not told where a broadcast is written:\n%s", said)
 	}
+	// What it says about the group has to be true: nothing of the flow happens here, and a
+	// group told the parameters or the text would appear here waits for something that
+	// never comes. The wording that did that said the draft would be posted in the group.
+	if strings.Contains(said, "草稿发在群里") {
+		t.Errorf("the answer promises the draft would be posted in the group:\n%s", said)
+	}
+	if !strings.Contains(said, "只会收到") {
+		t.Errorf("the answer does not say what the group will actually see:\n%s", said)
+	}
 	// And no card was opened anywhere: the group was answered, and that is all.
 	if strings.Contains(said, "**群广播**") {
 		t.Errorf("a card was opened in a group:\n%s", said)

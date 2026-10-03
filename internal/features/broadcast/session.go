@@ -56,9 +56,9 @@ type groupChoice struct {
 // they have chosen on it, and the text once they have written it.
 //
 // It lives in a single chat with the bot, always. A broadcast is one person writing a
-// notice for groups to read, and the card is how they write it: doing that in the group
-// would mean the group watching the notice being drafted, and the group is exactly who
-// is not supposed to know.
+// notice for groups to read, and the card is how they write it -- the options, and then
+// the notice itself as a preview. Were the card in a group, that group would be reading
+// the notice being drafted, and it is exactly who the finished one is for.
 type session struct {
 	token string
 	// chat is the single chat the card is in, which is also the member who may work it
