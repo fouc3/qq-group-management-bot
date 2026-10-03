@@ -11,6 +11,7 @@ package broadcast
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -28,17 +29,58 @@ const Name = "broadcast"
 
 // Config is the broadcast section.
 //
-// There is nothing in it beyond the switch every feature has. What a broadcast says
-// about itself is written where it is said -- the header, the divider, the buttons
-// -- and where it may go is the list of groups this bot manages.
-type Config struct{}
+// What a broadcast says about itself is written where it is said -- the header, the
+// divider, the buttons -- and where it may go is decided by who administers what.
+type Config struct {
+	// Beta gates the feature while it is being tried out.
+	//
+	// A gate of its own rather than a switch, because the two questions are
+	// different: whether the feature runs at all, and who may use it while it does.
+	Beta Beta `yaml:"beta"`
+}
+
+// Beta is the closed-trial gate.
+type Beta struct {
+	// Enabled turns the gate on: only the members it names may use the feature.
+	Enabled bool `yaml:"enabled"`
+	// Whitelist are the members who may use it while the gate is on, by openid.
+	//
+	// Somebody is named twice when they are wanted in both places, because a member's
+	// openid in a group is not the openid they have in a single chat: what a group
+	// carries and what the private panel carries are different values.
+	Whitelist []string `yaml:"whitelist"`
+}
+
+// allowed reports whether a member may use the feature now.
+func (c Config) allowed(memberOpenID string) bool {
+	if !c.Beta.Enabled {
+		return true
+	}
+	for _, named := range c.Beta.Whitelist {
+		if named != "" && named == memberOpenID {
+			return true
+		}
+	}
+	return false
+}
+
+// closed is what a member the trial does not name is told.
+//
+// Said rather than left silent: a command that answers nothing looks like a bot that
+// is broken, and the fact that the feature exists and is not open yet is not a secret.
+const closed = "功能正在内测阶段，暂无法使用。"
 
 // New builds the feature from its own configuration section.
-func New(_ yaml.Node, deps feature.Deps) (feature.Feature, error) {
+func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if deps.Client == nil {
 		return nil, errors.New("broadcast: no client to send with")
 	}
+	var cfg Config
+	if err := section.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("reading the %s section: %w", Name, err)
+	}
 	h := &handler{
+		cfg:    cfg,
 		deps:   deps,
 		open:   map[string]*session{},
 		router: command.NewRouter(Name, command.ButtonsOrOwn(deps.Buttons)),
@@ -52,6 +94,7 @@ func New(_ yaml.Node, deps feature.Deps) (feature.Feature, error) {
 
 // handler implements feature.Feature.
 type handler struct {
+	cfg  Config
 	deps feature.Deps
 
 	// admins is the administrator list, injected after building. Who may work a card
@@ -90,9 +133,12 @@ func (h *handler) Intents() qqbotsdk.Intent {
 func (h *handler) Register(context.Context) error {
 	return h.router.Register(h.deps.Client, command.Handlers{
 		Group: h.onGroupMessage,
+		// A card can be opened in a single chat, so the text it is made of can be
+		// written in one.
+		Private: h.onPrivateMessage,
 		Buttons: []command.ButtonClaim{{
 			Namespace: buttonPrefix,
-			Scenes:    command.InGroup,
+			Scenes:    command.InGroup | command.InPrivate,
 			Handle:    h.onPress,
 		}},
 	})
@@ -130,32 +176,95 @@ func (h *handler) CommandDefs() []command.Def {
 		// nothing about it changes with the name it is called by.
 		Aliases: []string{"群通报"},
 		Usage: "{prefix}群广播 —— 打开广播卡片，选好参数后写下要发的内容" +
-			"（别名 {prefix}群通报）",
+			"（别名 {prefix}群通报；也可在私聊里用）",
 		Desc: "匿名群广播",
 		// The gate is the table's, and it is the same list the buttons are checked
 		// against: a broadcast is something only this group's administrators do.
 		Audience: command.Admins,
-		Panels:   []command.PanelPlacement{{Scene: command.InGroup}},
-		Run:      h.startCommand,
+		// Both panels. In a group it is the group's administrators who may write one;
+		// in a single chat it is whoever administers a group somewhere, and the card
+		// itself offers only those groups.
+		Panels: []command.PanelPlacement{
+			{Scene: command.InGroup},
+			{Scene: command.InPrivate},
+		},
+		Run:     h.startCommand,
+		Private: h.startPrivately,
 	}}
 }
 
-// startCommand opens a card for the member who asked.
+// startCommand opens a card for the member who asked in a group.
 func (h *handler) startCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 	_ command.Parsed) error {
-	s, err := h.openCard(ctx, data.GroupOpenID, data.Author.MemberOpenID, data.ID)
-	if err != nil {
-		h.logger(data.GroupOpenID).Warn("could not open a broadcast card", "error", err)
-		_, replyErr := h.send(ctx, messaging.Message{
+	where := place{groupOpenID: data.GroupOpenID}
+	if !h.cfg.allowed(data.Author.MemberOpenID) {
+		h.loggerIn(where).Info("a broadcast was asked for by somebody the trial does "+
+			"not name", "member", data.Author.MemberOpenID)
+		_, err := h.send(ctx, messaging.Message{
 			GroupOpenID: data.GroupOpenID,
-			Text:        "广播卡片没能发出来，请稍后再试。",
+			Text:        closed,
 			ReplyTo:     data.ID,
 		})
-		return replyErr
+		return err
 	}
-	h.deps.Logger.Info("a broadcast card was opened",
-		"group", data.GroupOpenID, "member", data.Author.MemberOpenID, "token", s.token)
+	s, err := h.openCard(ctx, where, data.Author.MemberOpenID, data.ID)
+	if err != nil {
+		h.loggerIn(where).Warn("could not open a broadcast card", "error", err)
+		return h.say(ctx, where, data.Author.MemberOpenID, data.ID,
+			"广播卡片没能发出来，请稍后再试。")
+	}
+	h.deps.Logger.Info("a broadcast card was opened", "where", where.String(),
+		"member", data.Author.MemberOpenID, "token", s.token)
 	return nil
+}
+
+// startPrivately opens a card in a single chat.
+//
+// Offered there because a broadcast is written by one person rather than by a group:
+// somebody who administers several groups writes it once and picks where it goes. A
+// single chat has no administrator list of its own, so the gate is that this member
+// administers a group somewhere -- and the card offers only those groups.
+func (h *handler) startPrivately(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
+	_ command.Parsed) error {
+	where := place{userOpenID: data.Author.UserOpenID}
+	if !h.cfg.allowed(data.Author.UserOpenID) {
+		h.loggerIn(where).Info("a broadcast was asked for by somebody the trial does "+
+			"not name", "member", data.Author.UserOpenID)
+		return h.say(ctx, where, data.Author.UserOpenID, data.ID, closed)
+	}
+	if len(h.administers(data.Author.UserOpenID)) == 0 {
+		return h.say(ctx, where, data.Author.UserOpenID, data.ID,
+			"你不在任何群的管理员名单里，广播发不出去。")
+	}
+	s, err := h.openCard(ctx, where, data.Author.UserOpenID, data.ID)
+	if err != nil {
+		h.loggerIn(where).Warn("could not open a broadcast card", "error", err)
+		return h.say(ctx, where, data.Author.UserOpenID, data.ID,
+			"广播卡片没能发出来，请稍后再试。")
+	}
+	h.deps.Logger.Info("a broadcast card was opened in a single chat",
+		"member", data.Author.UserOpenID, "token", s.token)
+	return nil
+}
+
+// administers are the groups this member is on the administrator list of.
+func (h *handler) administers(memberOpenID string) []string {
+	var groups []string
+	for _, group := range h.deps.Groups {
+		if h.adminsOf(group.OpenID, memberOpenID) {
+			groups = append(groups, group.OpenID)
+		}
+	}
+	return groups
+}
+
+// say answers in one place or the other.
+func (h *handler) say(ctx context.Context, where place, memberOpenID, replyTo,
+	text string) error {
+	message := where.message(text, nil)
+	message.ReplyTo = replyTo
+	_, err := h.send(ctx, message)
+	return err
 }
 
 // send puts one message where it goes, through the one sender every feature uses.
@@ -164,7 +273,15 @@ func (h *handler) send(ctx context.Context, message messaging.Message) (
 	return messaging.Send(ctx, h.deps.Client, message)
 }
 
-// logger is the feature's logger, with the group it is working in.
+// loggerIn is the feature's logger, with the group or chat it is working in.
+func (h *handler) loggerIn(where place) *slog.Logger {
+	if where.inGroup() {
+		return h.deps.Logger.With("group", where.groupOpenID)
+	}
+	return h.deps.Logger.With("chat", where.userOpenID)
+}
+
+// logger is the same, for the one question asked before there is a place to ask it of.
 func (h *handler) logger(groupOpenID string) *slog.Logger {
 	return h.deps.Logger.With("group", groupOpenID)
 }

@@ -274,21 +274,32 @@ func escapeMarkdown(text string) string {
 	return escaped.String()
 }
 
-// groupChoices are the groups a broadcast can go to, with what to call them.
+// groupChoices are the groups this member may broadcast into, with what to call them.
+//
+// Only the groups they administer: a card that offered the others would be offering
+// something the send would refuse, and being on one group's administrator list is not
+// being on another's.
 //
 // The names are read when a card is opened rather than on every press: the card is
 // sent again each time a button is pressed, and a call per press for a label is paid
 // for by whoever is looking at it. They are read together and under one budget,
 // because a group that does not answer must not hold up the card -- and a group
 // whose name cannot be read is still a group a broadcast can go to.
-func (h *handler) groupChoices(ctx context.Context) []groupChoice {
+func (h *handler) groupChoices(ctx context.Context, memberOpenID string) []groupChoice {
+	var candidates []string
+	for _, group := range h.deps.Groups {
+		if h.adminsOf(group.OpenID, memberOpenID) {
+			candidates = append(candidates, group.OpenID)
+		}
+	}
+
 	named, cancel := context.WithTimeout(ctx, namingBudget)
 	defer cancel()
 
-	choices := make([]groupChoice, len(h.deps.Groups))
+	choices := make([]groupChoice, len(candidates))
 	var wg sync.WaitGroup
-	for index, group := range h.deps.Groups {
-		choices[index] = groupChoice{openID: group.OpenID}
+	for index, openID := range candidates {
+		choices[index] = groupChoice{openID: openID}
 		wg.Add(1)
 		go func(index int, openID string) {
 			defer wg.Done()
@@ -299,7 +310,7 @@ func (h *handler) groupChoices(ctx context.Context) []groupChoice {
 				return
 			}
 			choices[index].name = info.GroupName
-		}(index, group.OpenID)
+		}(index, openID)
 	}
 	wg.Wait()
 	return choices

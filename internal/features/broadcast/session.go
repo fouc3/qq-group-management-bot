@@ -5,6 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"time"
+
+	qqbotsdk "github.com/fouc3/qq-bot-sdk"
+
+	"github.com/fouc3/qq-group-management-bot/internal/messaging"
 )
 
 // sessionLifetime is how long a card stays usable.
@@ -52,13 +56,67 @@ type groupChoice struct {
 	selected bool
 }
 
+// place is where a card is: a group, or a single chat with the bot.
+//
+// A broadcast is written by one person rather than by a group, so the card can be
+// worked on in private and posted into the groups that person administers. Which of
+// the two it is decides the endpoint every message of the flow goes to, and it is
+// carried rather than passed around so that nothing can send half a card to the wrong
+// place.
+type place struct {
+	groupOpenID string
+	userOpenID  string
+}
+
+// message is one message on its way to this place.
+func (p place) message(text string, keyboard *qqbotsdk.Keyboard) messaging.Message {
+	return messaging.Message{
+		GroupOpenID: p.groupOpenID,
+		UserOpenID:  p.userOpenID,
+		Text:        text,
+		Keyboard:    keyboard,
+	}
+}
+
+// inGroup reports whether the card is in a group rather than in a single chat.
+func (p place) inGroup() bool { return p.groupOpenID != "" }
+
+// String is how a place is named in a log line, where one field has to say which of
+// the two it was.
+func (p place) String() string {
+	if p.inGroup() {
+		return "group " + p.groupOpenID
+	}
+	return "chat " + p.userOpenID
+}
+
+// matches reports whether an interaction happened in this place.
+func (p place) matches(data *qqbotsdk.InteractionCreateData) bool {
+	if data == nil {
+		return false
+	}
+	if p.inGroup() {
+		return data.Scene == qqbotsdk.InteractionSceneGroup &&
+			data.GroupOpenID == p.groupOpenID
+	}
+	return data.Scene == qqbotsdk.InteractionSceneC2C && data.UserOpenID == p.userOpenID
+}
+
+// presser is who pressed, which each scene names in its own field.
+func presser(data *qqbotsdk.InteractionCreateData) string {
+	if data.Scene == qqbotsdk.InteractionSceneC2C {
+		return data.UserOpenID
+	}
+	return data.GroupMemberOpenID
+}
+
 // session is one broadcast being written: the card a member is looking at, what
 // they have chosen on it, and the text once they have written it.
 type session struct {
 	token string
-	// groupOpenID is where the card is, and where everything about this broadcast
-	// happens.
-	groupOpenID string
+	// where is the group or single chat the card lives in, and where everything
+	// about this broadcast happens.
+	where place
 	// starter is the member who may work the card.
 	//
 	// Nobody else can, whatever the buttons say: the platform's own administrator

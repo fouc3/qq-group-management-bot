@@ -27,9 +27,28 @@ const (
 )
 
 // admins is the administrator list, which this feature reads but does not keep.
-type admins struct{ who string }
+//
+// groups names where the member administers: empty means everywhere, which is what
+// most tests want.
+type admins struct {
+	who    string
+	groups []string
+}
 
-func (a admins) IsAdmin(_, memberOpenID string) bool { return memberOpenID == a.who }
+func (a admins) IsAdmin(groupOpenID, memberOpenID string) bool {
+	if a.who == "" || memberOpenID != a.who {
+		return false
+	}
+	if len(a.groups) == 0 {
+		return true
+	}
+	for _, group := range a.groups {
+		if group == groupOpenID {
+			return true
+		}
+	}
+	return false
+}
 
 // commands is the command table, as another feature sees it.
 type commands struct{ looks bool }
@@ -44,6 +63,10 @@ type platform struct {
 	recalls   []string
 	answered  []qqbotsdk.InteractionCode
 	proactive bool
+	// section is the configuration this feature is built from, and admins is the list
+	// it is handed, so that a test can set either before building it.
+	section string
+	admins  feature.AdminDirectory
 }
 
 // card is the last card sent, and its buttons.
@@ -82,6 +105,54 @@ func (p *platform) cardButtons() map[string]string {
 	return buttons
 }
 
+// pressPrivately is the same, for a card that lives in a single chat.
+func (p *platform) pressPrivately(t *testing.T, label, member string) {
+	t.Helper()
+	data, ok := p.cardButtons()[label]
+	if !ok {
+		t.Fatalf("no button labelled %q on the card:\n%s", label, p.lastText())
+	}
+	press := command.Press{
+		Data: &qqbotsdk.InteractionCreateData{
+			ID:         "INTERACTION-" + label,
+			Scene:      qqbotsdk.InteractionSceneC2C,
+			UserOpenID: member,
+		},
+		EventID: "EVENT-" + label,
+		Payload: strings.TrimPrefix(data, buttonPrefix),
+	}
+	if err := p.handler.onPress(context.Background(), press); err != nil {
+		t.Fatalf("pressing %q: %v", label, err)
+	}
+}
+
+// startPrivately opens a card in a single chat, the way the private command does.
+func (p *platform) startPrivately(t *testing.T, member string) {
+	t.Helper()
+	data := &qqbotsdk.C2CMessageCreateData{
+		ID:      "PRIVATE-MESSAGE",
+		Content: "/群广播",
+		Author:  &qqbotsdk.User{UserOpenID: member},
+	}
+	if err := p.handler.startPrivately(context.Background(), data, command.Parsed{}); err != nil {
+		t.Fatalf("opening a card in a single chat: %v", err)
+	}
+}
+
+// sayPrivately delivers what a member wrote in a single chat.
+func (p *platform) sayPrivately(t *testing.T, member, content string) {
+	t.Helper()
+	event := qqbotsdk.NewEvent(&qqbotsdk.Payload{
+		Op:   qqbotsdk.OpDispatch,
+		Type: qqbotsdk.EventC2CMessageCreate,
+		Data: json.RawMessage(`{"id":"TEXT-MESSAGE","content":` + quote(content) +
+			`,"author":{"user_openid":"` + member + `"}}`),
+	}, "test")
+	if err := p.handler.onPrivateMessage(context.Background(), event); err != nil {
+		t.Fatalf("taking the text: %v", err)
+	}
+}
+
 // lastText is what the last message sent says.
 func (p *platform) lastText() string {
 	markdown, _ := p.card()["markdown"].(map[string]any)
@@ -114,9 +185,19 @@ func (p *platform) press(t *testing.T, label, member string) {
 }
 
 // newPlatform builds the feature over a stand-in platform.
+//
+// The options run before the feature is built, so that a test can say what its
+// configuration is or who administers what.
 func newPlatform(t *testing.T, options ...func(*platform)) *platform {
 	t.Helper()
-	p := &platform{proactive: true}
+	p := &platform{
+		proactive: true,
+		section:   "{}",
+		admins:    admins{who: theAdmin},
+	}
+	for _, option := range options {
+		option(p)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -164,7 +245,7 @@ func newPlatform(t *testing.T, options ...func(*platform)) *platform {
 		t.Fatalf("building the client: %v", err)
 	}
 
-	built, err := New(yaml.Node{}, feature.Deps{
+	built, err := New(sectionNode(t, p.section), feature.Deps{
 		Client: client,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Groups: config.Groups{
@@ -176,15 +257,26 @@ func newPlatform(t *testing.T, options ...func(*platform)) *platform {
 		t.Fatalf("building the feature: %v", err)
 	}
 	p.handler = built.(*handler)
-	p.handler.SetAdminDirectory(admins{who: theAdmin})
+	p.handler.SetAdminDirectory(p.admins)
 	p.handler.SetCommands(commands{looks: false})
-	for _, option := range options {
-		option(p)
-	}
 	if err := p.handler.Register(context.Background()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	return p
+}
+
+// sectionNode decodes the configuration a test wrote, the way the registry hands it
+// over.
+func sectionNode(t *testing.T, text string) yaml.Node {
+	t.Helper()
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &document); err != nil {
+		t.Fatalf("decoding %q: %v", text, err)
+	}
+	if len(document.Content) == 0 {
+		return yaml.Node{}
+	}
+	return *document.Content[0]
 }
 
 // start opens a card, the way the command does.
