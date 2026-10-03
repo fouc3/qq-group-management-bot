@@ -161,7 +161,26 @@ func (r *reloader) structuralChange(fresh *config.Config) string {
 	return ""
 }
 
-// sameSection reports whether two configuration sections are the same thing.
+// sameSection reports whether two configuration sections say the same thing.
+//
+// The comparison is by content, and deliberately not a DeepEqual on the nodes: a node
+// carries the line and column it came from, so inserting a line anywhere above a
+// section makes that section look changed even when not one character of it moved. That
+// is not a corner case -- it is what every edit above another section looks like -- and
+// it refused a real reload for a reason nobody could have seen from the file.
+//
+// Comments are ignored on purpose as well: a section that only had its explanations
+// rewritten still says the same thing, and re-adopting a configuration because of a
+// comment is work nobody asked for.
 func sameSection(before, after yaml.Node) bool {
-	return reflect.DeepEqual(before, after)
+	if before.Kind != after.Kind || before.Tag != after.Tag ||
+		before.Value != after.Value || len(before.Content) != len(after.Content) {
+		return false
+	}
+	for index := range before.Content {
+		if !sameSection(*before.Content[index], *after.Content[index]) {
+			return false
+		}
+	}
+	return true
 }
