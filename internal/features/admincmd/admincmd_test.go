@@ -747,6 +747,28 @@ func TestWhoisAnswersInAGroupThatIsNotConfiguredYet(t *testing.T) {
 	}
 }
 
+// TestCloseStopsAnswering covers what makes this feature rebuildable rather than
+// merely startable: what Close stops is the answering itself.
+//
+// Without it, a reload that built the feature again would leave two instances on
+// one connection, and every command would be answered twice.
+func TestCloseStopsAnswering(t *testing.T) {
+	h := newHarness(t, baseSection)
+	h.send("/菜单", testAdmin, testGroupOpenID)
+	if replies := h.groupReplies(); replies != 1 {
+		t.Fatalf("before closing: %d replies, want 1", replies)
+	}
+
+	if err := h.handler.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	h.send("/菜单", testAdmin, testGroupOpenID)
+	if replies := h.groupReplies(); replies != 1 {
+		t.Errorf("a closed feature answered a later message: %d replies", replies)
+	}
+}
+
 // TestWhoisInAGroupTheBotDoesNotManageNamesNobodyElse covers the half of the
 // administrator check that is about the group rather than about the member.
 //

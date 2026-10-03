@@ -407,6 +407,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	instance := &verifier{
 		cfg:       cfg,
 		deps:      deps,
+		buttons:   command.ButtonsOrOwn(deps.Buttons),
 		byToken:   map[string]*pending{},
 		byMember:  map[string]*pending{},
 		stateFile: cfg.StateFile,
@@ -480,6 +481,12 @@ type verifier struct {
 	pending store.PendingStore
 	meta    store.MetaStore
 
+	// buttons is where the verification button's namespace is claimed. It is
+	// shared with the other features that have buttons, so a press reaches one of
+	// them, and the claim is taken back in Close so that this feature can be built
+	// again while the bot runs.
+	buttons *command.Buttons
+
 	registrations []*qqbotsdk.Registration
 	stopping      chan struct{}
 	stopped       chan struct{}
@@ -519,19 +526,19 @@ func (v *verifier) Register(_ context.Context) error {
 	//
 	// The dispatcher it declares is deliberately not in v.registrations: it is
 	// shared with the other features that claim buttons, so cancelling it here
-	// would take their presses with it. Nothing removes a feature from a running
-	// bot, which is the only case where that would matter.
-	buttons := command.ButtonsOrOwn(v.deps.Buttons)
-	if err := buttons.Claim(command.ButtonClaim{
+	// would take their presses with it. What Close gives back instead is the
+	// claim itself, which is what lets this feature be built again while the bot
+	// runs.
+	if err := v.buttons.Set(Name, []command.ButtonClaim{{
 		Namespace: buttonPrefix,
 		// A verification button is only ever put in a group, and a press the
 		// platform reports as coming from a single chat is not ours to act on.
 		Scenes: command.InGroup,
 		Handle: v.onInteractionPress,
-	}); err != nil {
+	}}); err != nil {
 		return err
 	}
-	buttons.Register(v.deps.Client)
+	v.buttons.Register(v.deps.Client)
 	v.warnAboutRemoval()
 	go v.sweep()
 	// One line per group, because the rules are per group now.
@@ -585,11 +592,17 @@ func (v *verifier) eachSettings(report func(label string, settings Settings)) {
 }
 
 // Close implements feature.Feature.
+//
+// It stops answering, gives the button namespace back, and waits for the sweep to
+// finish -- in that order, because a rebuild that started while the old instance
+// was still sweeping would have two of them acting on the same holds. The waiting
+// is what makes this feature rebuildable rather than merely stoppable.
 func (v *verifier) Close(_ context.Context) error {
 	for _, registration := range v.registrations {
 		registration.Cancel()
 	}
 	v.registrations = nil
+	v.buttons.Release(Name)
 	v.closeOnce.Do(func() { close(v.stopping) })
 	<-v.stopped
 	return nil

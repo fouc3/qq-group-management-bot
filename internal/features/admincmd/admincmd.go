@@ -147,7 +147,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(deps.Buttons)}
+	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(Name, deps.Buttons)}
 	// The table is validated here, so that a word invoking two commands stops the
 	// bot at startup rather than leaving one of them answering nothing at all.
 	if _, err := command.NewCatalog(h.commandDefs()); err != nil {
@@ -335,7 +335,14 @@ func (h *handler) Register(_ context.Context) error {
 }
 
 // Close implements feature.Feature.
-func (h *handler) Close(context.Context) error { return nil }
+//
+// It stops answering, which is what lets the app build this feature again with
+// new configuration while the bot runs: without it the second instance would sit
+// beside the first and every command would be answered twice.
+func (h *handler) Close(context.Context) error {
+	h.router.Stop()
+	return nil
+}
 
 // onMessage handles one group message that may carry a command.
 func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {

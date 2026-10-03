@@ -73,13 +73,23 @@ type ButtonClaim struct {
 //
 // Claiming a namespace is not enough on its own: a feature also has to ask for
 // the interaction intent, or the presses it claimed never arrive.
+//
+// A claim belongs to an owner rather than to the namespace alone, because a
+// feature can be built a second time while the bot runs -- a reload that rebuilds
+// it, for instance -- and the second build claims exactly what the first did.
 type Buttons struct {
 	mu     sync.Mutex
-	claims []ButtonClaim
+	claims []claimed
 	// wired is the clients a dispatcher has already been declared on. A bot has
 	// one connection, so it has one dispatcher however many features claim a
 	// part of it.
 	wired map[*qqbotsdk.Client]bool
+}
+
+// claimed is one namespace, and the feature that owns it.
+type claimed struct {
+	owner string
+	claim ButtonClaim
 }
 
 // NewButtons returns an empty registry.
@@ -100,13 +110,82 @@ func ButtonsOrOwn(shared *Buttons) *Buttons {
 	return shared
 }
 
-// Claim registers one feature's buttons.
+// Set replaces everything this owner claimed before with these buttons.
 //
-// A namespace that overlaps one already claimed is refused. Routing a press would
+// It replaces rather than adds, and that is what makes a feature rebuildable:
+// the second build of a feature claims exactly the namespaces the first did, and
+// adding would refuse that as a conflict with itself. The old claims go at the
+// same time, so no press can reach an instance that has already stopped.
+//
+// A namespace that overlaps another owner's is refused. Routing a press would
 // otherwise depend on which feature claimed first, and the buttons of one would
 // answer as those of the other -- the failure being that a member's press does
 // something nobody intended.
-func (b *Buttons) Claim(claim ButtonClaim) error {
+func (b *Buttons) Set(owner string, claims []ButtonClaim) error {
+	if strings.TrimSpace(owner) == "" {
+		return errors.New("command: buttons were claimed with no owner")
+	}
+	for _, claim := range claims {
+		if err := validClaim(claim); err != nil {
+			return err
+		}
+	}
+	for i, outer := range claims {
+		for _, inner := range claims[i+1:] {
+			if overlap(outer.Namespace, inner.Namespace) {
+				return fmt.Errorf("command: %s claims %q and %q, which overlap",
+					owner, outer.Namespace, inner.Namespace)
+			}
+		}
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, taken := range b.claims {
+		if taken.owner == owner {
+			continue
+		}
+		for _, claim := range claims {
+			if overlap(claim.Namespace, taken.claim.Namespace) {
+				return fmt.Errorf("command: %s claims %q, which the %s buttons own as %q",
+					owner, claim.Namespace, taken.owner, taken.claim.Namespace)
+			}
+		}
+	}
+
+	kept := b.claims[:0:0]
+	for _, taken := range b.claims {
+		if taken.owner != owner {
+			kept = append(kept, taken)
+		}
+	}
+	for _, claim := range claims {
+		kept = append(kept, claimed{owner: owner, claim: claim})
+	}
+	b.claims = kept
+	return nil
+}
+
+// Release gives back everything this owner claimed.
+//
+// It is what stopping a feature does with its buttons. The dispatcher stays: it
+// belongs to the bot's one connection rather than to any feature, and with no
+// claim matching a press it answers nothing, which is the right thing for a
+// button whose feature is not running.
+func (b *Buttons) Release(owner string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	kept := b.claims[:0:0]
+	for _, taken := range b.claims {
+		if taken.owner != owner {
+			kept = append(kept, taken)
+		}
+	}
+	b.claims = kept
+}
+
+// validClaim reports why a claim cannot be made, if it cannot.
+func validClaim(claim ButtonClaim) error {
 	if strings.TrimSpace(claim.Namespace) == "" {
 		return errors.New("command: a button claim carries no namespace")
 	}
@@ -118,17 +197,12 @@ func (b *Buttons) Claim(claim ButtonClaim) error {
 		return fmt.Errorf("command: the %q buttons say nothing about where a "+
 			"press is answered", claim.Namespace)
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, taken := range b.claims {
-		if strings.HasPrefix(claim.Namespace, taken.Namespace) ||
-			strings.HasPrefix(taken.Namespace, claim.Namespace) {
-			return fmt.Errorf("command: the %q buttons overlap the %q ones",
-				claim.Namespace, taken.Namespace)
-		}
-	}
-	b.claims = append(b.claims, claim)
 	return nil
+}
+
+// overlap reports whether two namespaces cannot be told apart in a press.
+func overlap(first, second string) bool {
+	return strings.HasPrefix(first, second) || strings.HasPrefix(second, first)
 }
 
 // Register declares the dispatcher on a client, once for each client.
@@ -186,7 +260,8 @@ func (b *Buttons) owner(data *qqbotsdk.InteractionCreateData) (ButtonClaim, stri
 	// claim can match; the longest is taken anyway, so that the rule does not
 	// depend on the order the claims were made in.
 	var found ButtonClaim
-	for _, claim := range b.claims {
+	for _, taken := range b.claims {
+		claim := taken.claim
 		if claim.Scenes&scene == 0 || !strings.HasPrefix(buttonData, claim.Namespace) {
 			continue
 		}

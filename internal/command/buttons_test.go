@@ -64,6 +64,14 @@ func recorder(seen *[]Press) ButtonHandler {
 	}
 }
 
+// claim sets one feature's buttons, which is what its Register does.
+func claim(t *testing.T, buttons *Buttons, owner string, claims ...ButtonClaim) {
+	t.Helper()
+	if err := buttons.Set(owner, claims); err != nil {
+		t.Fatalf("claiming %s: %v", owner, err)
+	}
+}
+
 // TestOnePressReachesOneFeature covers what the registry is for: a press carries
 // nothing but its button's data, and exactly one feature is asked to answer it.
 //
@@ -72,15 +80,11 @@ func recorder(seen *[]Press) ButtonHandler {
 func TestOnePressReachesOneFeature(t *testing.T) {
 	buttons := NewButtons()
 	var verification, receipt []Press
-	for _, claim := range []ButtonClaim{
-		{Namespace: "v:", Scenes: InGroup, Handle: recorder(&verification)},
-		{Namespace: "qgb-receipt-detail:", Scenes: InGroup | InPrivate,
-			Handle: recorder(&receipt)},
-	} {
-		if err := buttons.Claim(claim); err != nil {
-			t.Fatalf("claiming %q: %v", claim.Namespace, err)
-		}
-	}
+	claim(t, buttons, "join_verification",
+		ButtonClaim{Namespace: "v:", Scenes: InGroup, Handle: recorder(&verification)})
+	claim(t, buttons, "admin_commands",
+		ButtonClaim{Namespace: "qgb-receipt-detail:", Scenes: InGroup | InPrivate,
+			Handle: recorder(&receipt)})
 
 	client := testClient(t)
 	buttons.Register(client)
@@ -114,10 +118,8 @@ func TestOnePressReachesOneFeature(t *testing.T) {
 func TestAPressNobodyClaimedIsIgnored(t *testing.T) {
 	buttons := NewButtons()
 	var seen []Press
-	if err := buttons.Claim(ButtonClaim{Namespace: "v:", Scenes: InGroup,
-		Handle: recorder(&seen)}); err != nil {
-		t.Fatal(err)
-	}
+	claim(t, buttons, "join_verification",
+		ButtonClaim{Namespace: "v:", Scenes: InGroup, Handle: recorder(&seen)})
 	client := testClient(t)
 	buttons.Register(client)
 
@@ -136,14 +138,11 @@ func TestAPressNobodyClaimedIsIgnored(t *testing.T) {
 func TestAClaimIsOnlyAnsweredWhereItSays(t *testing.T) {
 	buttons := NewButtons()
 	var inGroup, inPrivate []Press
-	for _, claim := range []ButtonClaim{
-		{Namespace: "v:", Scenes: InGroup, Handle: recorder(&inGroup)},
-		{Namespace: "qgb-receipt-detail:", Scenes: InPrivate, Handle: recorder(&inPrivate)},
-	} {
-		if err := buttons.Claim(claim); err != nil {
-			t.Fatal(err)
-		}
-	}
+	claim(t, buttons, "join_verification",
+		ButtonClaim{Namespace: "v:", Scenes: InGroup, Handle: recorder(&inGroup)})
+	claim(t, buttons, "admin_commands",
+		ButtonClaim{Namespace: "qgb-receipt-detail:", Scenes: InPrivate,
+			Handle: recorder(&inPrivate)})
 	client := testClient(t)
 	buttons.Register(client)
 
@@ -187,10 +186,9 @@ func TestAPressMissingWhatItsSceneNeedsIsIgnored(t *testing.T) {
 	} {
 		buttons := NewButtons()
 		var seen []Press
-		if err := buttons.Claim(ButtonClaim{Namespace: "v:", Scenes: InGroup | InPrivate,
-			Handle: recorder(&seen)}); err != nil {
-			t.Fatal(err)
-		}
+		claim(t, buttons, "join_verification",
+			ButtonClaim{Namespace: "v:", Scenes: InGroup | InPrivate,
+				Handle: recorder(&seen)})
 		client := testClient(t)
 		buttons.Register(client)
 
@@ -214,29 +212,105 @@ func TestOverlappingNamespacesAreRefused(t *testing.T) {
 		{"qgb-receipt-detail:", "qgb-receipt-"},
 	} {
 		buttons := NewButtons()
-		if err := buttons.Claim(ButtonClaim{Namespace: pair[0], Scenes: InGroup,
-			Handle: handle}); err != nil {
-			t.Fatalf("claiming %q: %v", pair[0], err)
-		}
-		if err := buttons.Claim(ButtonClaim{Namespace: pair[1], Scenes: InGroup,
-			Handle: handle}); err == nil {
+		claim(t, buttons, "first", ButtonClaim{Namespace: pair[0], Scenes: InGroup,
+			Handle: handle})
+		err := buttons.Set("second", []ButtonClaim{{Namespace: pair[1],
+			Scenes: InGroup, Handle: handle}})
+		if err == nil {
 			t.Errorf("%q was accepted beside %q", pair[1], pair[0])
 		}
+	}
+}
+
+// TestOneOwnerCannotOverlapItself covers the same mistake made inside one
+// feature's own set: two of its namespaces that a press cannot be told apart by.
+func TestOneOwnerCannotOverlapItself(t *testing.T) {
+	handle := func(context.Context, Press) error { return nil }
+	err := NewButtons().Set("one", []ButtonClaim{
+		{Namespace: "qgb-receipt-", Scenes: InGroup, Handle: handle},
+		{Namespace: "qgb-receipt-detail:", Scenes: InGroup, Handle: handle},
+	})
+	if err == nil {
+		t.Error("a feature was allowed to claim two namespaces a press cannot tell apart")
+	}
+}
+
+// TestARebuiltFeatureClaimsWhatItClaimedBefore covers the case that makes a
+// feature rebuildable: the second build claims exactly what the first did.
+//
+// Adding instead of replacing would refuse that as a conflict with the feature
+// itself, and the rebuilt feature would never answer a press again.
+func TestARebuiltFeatureClaimsWhatItClaimedBefore(t *testing.T) {
+	buttons := NewButtons()
+	var first, second []Press
+	claim(t, buttons, "admin_commands",
+		ButtonClaim{Namespace: "qgb-receipt-detail:", Scenes: InGroup,
+			Handle: recorder(&first)})
+	// The same feature, built again.
+	claim(t, buttons, "admin_commands",
+		ButtonClaim{Namespace: "qgb-receipt-detail:", Scenes: InGroup,
+			Handle: recorder(&second)})
+
+	client := testClient(t)
+	buttons.Register(client)
+	press(t, client, groupPressBody("qgb-receipt-detail:RECEIPT"))
+
+	if len(first) != 0 {
+		t.Errorf("the instance that stopped answered %d press(es)", len(first))
+	}
+	if len(second) != 1 {
+		t.Fatalf("the instance that is running answered %d press(es), want 1", len(second))
+	}
+}
+
+// TestReleaseGivesTheNamespaceBack covers stopping: the press is answered by
+// nobody, and the namespace is free for the build that comes after.
+func TestReleaseGivesTheNamespaceBack(t *testing.T) {
+	buttons := NewButtons()
+	var seen []Press
+	claim(t, buttons, "join_verification",
+		ButtonClaim{Namespace: "v:", Scenes: InGroup, Handle: recorder(&seen)})
+	client := testClient(t)
+	buttons.Register(client)
+
+	press(t, client, groupPressBody("v:TOKEN"))
+	if len(seen) != 1 {
+		t.Fatalf("the feature answered %d press(es) before stopping, want 1", len(seen))
+	}
+
+	buttons.Release("join_verification")
+	press(t, client, groupPressBody("v:TOKEN"))
+	if len(seen) != 1 {
+		t.Errorf("a press was answered after the feature gave its buttons back")
+	}
+
+	// And the namespace is free again, which is what lets the feature be built
+	// once more.
+	var rebuilt []Press
+	claim(t, buttons, "join_verification",
+		ButtonClaim{Namespace: "v:", Scenes: InGroup, Handle: recorder(&rebuilt)})
+	press(t, client, groupPressBody("v:TOKEN"))
+	if len(rebuilt) != 1 {
+		t.Errorf("the rebuilt feature answered %d press(es), want 1", len(rebuilt))
 	}
 }
 
 // TestAClaimMustSayWhatItAnswers covers the three things a claim cannot leave out.
 func TestAClaimMustSayWhatItAnswers(t *testing.T) {
 	handle := func(context.Context, Press) error { return nil }
-	for why, claim := range map[string]ButtonClaim{
-		"no namespace": {Scenes: InGroup, Handle: handle},
-		"none at all":  {},
-		"no scenes":    {Namespace: "v:", Handle: handle},
-		"no handler":   {Namespace: "v:", Scenes: InGroup},
+	for why, claims := range map[string][]ButtonClaim{
+		"no namespace": {{Scenes: InGroup, Handle: handle}},
+		"none at all":  {{}},
+		"no scenes":    {{Namespace: "v:", Handle: handle}},
+		"no handler":   {{Namespace: "v:", Scenes: InGroup}},
 	} {
-		if err := NewButtons().Claim(claim); err == nil {
+		if err := NewButtons().Set("one", claims); err == nil {
 			t.Errorf("a claim with %s was accepted", why)
 		}
+	}
+	if err := NewButtons().Set("", []ButtonClaim{{Namespace: "v:", Scenes: InGroup,
+		Handle: handle}}); err == nil {
+		t.Error("buttons were accepted with no owner to give them back to")
 	}
 }
 

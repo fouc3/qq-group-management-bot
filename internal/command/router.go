@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"sync"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 )
@@ -22,7 +23,8 @@ type Handlers struct {
 	Buttons []ButtonClaim
 }
 
-// Router wires a feature's handlers to the events a command can arrive in.
+// Router wires a feature's handlers to the events a command can arrive in, and
+// takes them back again when the feature stops.
 //
 // What it holds is the platform's knowledge rather than any one feature's: a
 // group message reaches the bot as one of two event types depending on the
@@ -38,18 +40,29 @@ type Router struct {
 	// must not be recorded as handled.
 	Seen *Seen
 
+	// owner is the feature this router belongs to. It is the name its buttons are
+	// claimed under and what Stop gives back.
+	owner string
+
 	// buttons is the registry the keyboards below are claimed in. It is shared
 	// with the other features of the same bot, so that one press reaches one of
 	// them.
 	buttons *Buttons
+
+	// mu guards registrations, which is what makes Stop possible.
+	mu sync.Mutex
+	// registrations are the handlers this router declared, kept so that a feature
+	// that stops stops answering.
+	registrations []*qqbotsdk.Registration
 }
 
-// NewRouter returns a router that claims its buttons in the registry given.
+// NewRouter returns a router for one feature, claiming its buttons in the
+// registry given.
 //
 // A nil registry -- which is what a feature built without a bot is handed -- gets
 // one of its own, for the reason ButtonsOrOwn gives.
-func NewRouter(buttons *Buttons) *Router {
-	return &Router{Seen: NewSeen(), buttons: ButtonsOrOwn(buttons)}
+func NewRouter(owner string, buttons *Buttons) *Router {
+	return &Router{Seen: NewSeen(), owner: owner, buttons: ButtonsOrOwn(buttons)}
 }
 
 // Register declares the events on the client.
@@ -61,11 +74,14 @@ func NewRouter(buttons *Buttons) *Router {
 // that a namespace another feature owns stops the registration before any event
 // is, rather than leaving a bot with half a feature wired up.
 func (r *Router) Register(client *qqbotsdk.Client, handlers Handlers) error {
-	for _, claim := range handlers.Buttons {
-		if err := r.buttons.Claim(claim); err != nil {
+	if len(handlers.Buttons) > 0 {
+		if err := r.buttons.Set(r.owner, handlers.Buttons); err != nil {
 			return err
 		}
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if handlers.Group != nil {
 		// Both group event types are always read, and whether a command had to
 		// mention the bot is enforced on the message itself instead.
@@ -76,15 +92,41 @@ func (r *Router) Register(client *qqbotsdk.Client, handlers Handlers) error {
 		// showed, while a mention-only group delivers the same message as
 		// GROUP_AT_MESSAGE_CREATE. Registering only one of them made the bot
 		// unable to see commands at all in one of the two modes.
-		client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, handlers.Group)
-		client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, handlers.Group)
+		r.registrations = append(r.registrations,
+			client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, handlers.Group),
+			client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, handlers.Group))
 	}
 	if handlers.Private != nil {
-		client.RegisterFunc(qqbotsdk.EventC2CMessageCreate, handlers.Private)
+		r.registrations = append(r.registrations,
+			client.RegisterFunc(qqbotsdk.EventC2CMessageCreate, handlers.Private))
 	}
 	if len(handlers.Buttons) > 0 {
 		// One dispatcher for the bot, however many features claim a part of it.
+		// It is deliberately not among the registrations above: it belongs to the
+		// connection rather than to this feature, and cancelling it would take
+		// the other features' presses with it.
 		r.buttons.Register(client)
 	}
 	return nil
+}
+
+// Stop stops this feature answering, and gives back what it claimed.
+//
+// It is what makes a feature rebuildable rather than merely startable: a second
+// build registers on the same connection, and without this it would sit beside
+// the first -- every message answered twice, once per instance, and the button
+// namespaces it claimed refused as a conflict with itself.
+//
+// It is safe to call more than once, because Close may run after a Register that
+// failed or never happened.
+func (r *Router) Stop() {
+	r.mu.Lock()
+	registrations := r.registrations
+	r.registrations = nil
+	r.mu.Unlock()
+
+	for _, registration := range registrations {
+		registration.Cancel()
+	}
+	r.buttons.Release(r.owner)
 }
