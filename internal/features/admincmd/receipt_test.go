@@ -289,6 +289,61 @@ func TestARecallButtonOnlyForItsOwnAdministrator(t *testing.T) {
 	}
 }
 
+// TestAReceiptSaysWhatWasDecided covers the line a reader looks at first.
+//
+// The column holds ok, violation and error, which is what the code acts on and
+// not something to put in front of a person: "判定：ok" is a key out of a
+// database. The distinction it has to keep is the one the column exists for -- a
+// judgement nobody reached must never read as "nothing was found".
+func TestAReceiptSaysWhatWasDecided(t *testing.T) {
+	cases := map[string]struct {
+		entry store.Judgement
+		want  string
+	}{
+		"a violation": {
+			entry: aJudgement("a1b2c3d4e5f60718"),
+			want:  "违规·广告",
+		},
+		"nothing was found": {
+			entry: func() store.Judgement {
+				entry := aJudgement("a1b2c3d4e5f60718")
+				entry.Verdict = store.JudgementOK
+				entry.Category = ""
+				entry.Action = ""
+				return entry
+			}(),
+			want: "无违规",
+		},
+		"nobody looked": {
+			entry: func() store.Judgement {
+				entry := aJudgement("a1b2c3d4e5f60718")
+				entry.Verdict = store.JudgementError
+				entry.Category = ""
+				entry.Action = ""
+				return entry
+			}(),
+			want: "未能判定",
+		},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			h, _ := receiptHarness(t, testCase.entry)
+			h.send("/违规查询 a1b2c3d4", testAdmin, receiptGroup)
+
+			reply := h.lastReply()
+			if !strings.Contains(reply, "**判定**："+testCase.want) {
+				t.Errorf("the receipt says something else:\n%s", reply)
+			}
+			// And never the raw value behind it.
+			for _, raw := range []string{"：ok", "：violation", "：error", "违规·ad"} {
+				if strings.Contains(reply, raw) {
+					t.Errorf("the receipt shows %q:\n%s", raw, reply)
+				}
+			}
+		})
+	}
+}
+
 // TestAReceiptIsRefusedOutsideItsOwnGroup covers the boundary a group needs.
 //
 // A member of one group has no business reading another group's punishments, and

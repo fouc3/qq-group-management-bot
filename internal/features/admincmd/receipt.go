@@ -249,11 +249,7 @@ func (h *handler) receiptSummary(entry store.Judgement) string {
 	// they go to the configuration, so it is in the details.
 	fmt.Fprintf(&out, "**群**：%s\n", h.groupNumber(entry.GroupOpenID))
 
-	verdict := entry.Verdict
-	if entry.Category != "" {
-		verdict = "违规·" + h.categoryLabel(entry.Category)
-	}
-	fmt.Fprintf(&out, "**判定**：%s\n", verdict)
+	fmt.Fprintf(&out, "**判定**：%s\n", h.verdictLabel(entry))
 	fmt.Fprintf(&out, "**被判定人**：%s\n", atUser(entry.SubjectOpenID))
 	fmt.Fprintf(&out, "**举报人**：%s\n", atUser(entry.ReporterOpenID))
 	if entry.Model != "" {
@@ -415,6 +411,33 @@ func (h *handler) groupNumber(groupOpenID string) string {
 		return fmt.Sprintf("%d", id)
 	}
 	return orNone(groupOpenID)
+}
+
+// verdictLabel is what a receipt says was decided.
+//
+// The column holds the value the code acts on -- ok, violation, error -- and a
+// receipt that printed it would be showing the reader a key out of a database.
+// It says the same three things in words, and a violation says which one, in the
+// configuration's own wording rather than in the key it is filed under.
+func (h *handler) verdictLabel(entry store.Judgement) string {
+	switch entry.Verdict {
+	case store.JudgementViolation:
+		if label := h.categoryLabel(entry.Category); label != "" {
+			return "违规·" + label
+		}
+		return "违规"
+	case store.JudgementOK:
+		return "无违规"
+	case store.JudgementError:
+		// Nobody looked: the window was not in the cache, or the model could not
+		// be read. Saying "无违规" here would be the one mistake this column
+		// exists to prevent, because it is the answer somebody would act on.
+		return "未能判定"
+	default:
+		// A record written by a version that knew a value this one does not:
+		// shown as it is rather than guessed at.
+		return orNone(entry.Verdict)
+	}
 }
 
 // categoryLabel is the configured display name for a category.
