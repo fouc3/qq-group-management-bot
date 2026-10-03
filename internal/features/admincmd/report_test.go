@@ -439,6 +439,78 @@ func TestAnUnfoundedReportCanCostTheReporter(t *testing.T) {
 	}
 }
 
+// TestAReportAboutYourselfCostsHalf covers the one discount there is.
+//
+// The message is still wrong and still goes, and the member who pointed at it has
+// saved somebody else the trouble -- so the silence is halved rather than lifted.
+// Reporting yourself is not a way out of being reported.
+func TestAReportAboutYourselfCostsHalf(t *testing.T) {
+	// The subject is the reporter, which is what makes it a self-report.
+	judge := &stubJudge{verdict: feature.ModerationVerdict{
+		JudgementID:   "a1b2c3d4e5f60718",
+		Category:      "ad",
+		Label:         "广告",
+		MuteSeconds:   600,
+		SubjectOpenID: testAdmin,
+		RecallMessages: []feature.JudgedMessage{
+			{ID: "M-1", Index: "IDX-1", Number: 1, Text: "加群送皮肤"},
+		},
+	}}
+	h := reportHarness(t, judge)
+
+	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
+		parsedCommand{}); err != nil {
+		t.Fatalf("reportCommand: %v", err)
+	}
+	reply := waitForReply(t, h, "判定为")
+
+	if got := h.mutedSeconds(); got < 5*time.Minute-5*time.Second ||
+		got > 5*time.Minute+5*time.Second {
+		t.Errorf("muted for %s, want half of the configured ten minutes", got)
+	}
+	// The group is told, because a duration that does not match what the
+	// configuration says would otherwise look like a bot that cannot count.
+	if !strings.Contains(reply, "刑期减半") {
+		t.Errorf("reply = %q, want it to say why the silence is shorter", reply)
+	}
+	// And the record says the same thing the group was told: it is what an
+	// administrator reads the punishment back from.
+	if judge.lastOutcome.MuteSeconds != 300 {
+		t.Errorf("recorded %d seconds, want the 300 that were applied",
+			judge.lastOutcome.MuteSeconds)
+	}
+}
+
+// TestAnOrdinaryReportCostsTheFullTime is the other half of that rule: the
+// discount belongs to a report about yourself and to nothing else.
+func TestAnOrdinaryReportCostsTheFullTime(t *testing.T) {
+	judge := &stubJudge{verdict: feature.ModerationVerdict{
+		JudgementID:   "a1b2c3d4e5f60718",
+		Category:      "ad",
+		Label:         "广告",
+		MuteSeconds:   600,
+		SubjectOpenID: "SOMEONE-ELSE",
+	}}
+	h := reportHarness(t, judge)
+
+	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
+		parsedCommand{}); err != nil {
+		t.Fatalf("reportCommand: %v", err)
+	}
+	reply := waitForReply(t, h, "判定为")
+
+	if got := h.mutedSeconds(); got < 10*time.Minute-5*time.Second ||
+		got > 10*time.Minute+5*time.Second {
+		t.Errorf("muted for %s, want the configured ten minutes", got)
+	}
+	if strings.Contains(reply, "刑期减半") {
+		t.Errorf("reply = %q, want no discount for somebody else's message", reply)
+	}
+	if judge.lastOutcome.MuteSeconds != 600 {
+		t.Errorf("recorded %d seconds, want the full 600", judge.lastOutcome.MuteSeconds)
+	}
+}
+
 // TestTheReporterIsNotPunishedByDefault covers the default the plan asked for:
 // with no penalty configured, a report that finds nothing costs nothing.
 func TestTheReporterIsNotPunishedByDefault(t *testing.T) {

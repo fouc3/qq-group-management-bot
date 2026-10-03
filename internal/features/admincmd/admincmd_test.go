@@ -511,6 +511,33 @@ func (h *harness) lastSentID() string {
 	return "SENT-" + strconv.Itoa(h.sentIDs)
 }
 
+// mutedSeconds returns how long the most recent mute was applied for.
+//
+// The platform is told an absolute expiry rather than a duration, so the length
+// is what is left between now and it.
+func (h *harness) mutedSeconds() time.Duration {
+	h.t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := len(h.calls) - 1; i >= 0; i-- {
+		members, ok := h.calls[i]["members"].([]any)
+		if !ok || len(members) == 0 {
+			continue
+		}
+		entry, _ := members[0].(map[string]any)
+		raw, ok := entry["mute_expire_at"].(string)
+		if !ok {
+			continue
+		}
+		expiry, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			h.t.Fatalf("mute_expire_at %q: %v", raw, err)
+		}
+		return time.Until(expiry)
+	}
+	return 0
+}
+
 // privateReplies counts the messages sent into a single chat.
 func (h *harness) privateReplies() int {
 	h.mu.Lock()

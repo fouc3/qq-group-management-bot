@@ -260,8 +260,28 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 				"group", groupOpenID, "error", err)
 		}
 	}
-	if verdict.MuteSeconds > 0 && verdict.SubjectOpenID != "" {
-		duration := time.Duration(verdict.MuteSeconds) * time.Second
+	// A report about the reporter's own message is answered the same way, with
+	// half the silence: the message is still wrong and still goes, and the member
+	// who pointed at it has saved somebody else the trouble of doing it. Half
+	// rather than none, because reporting yourself is not a way out of being
+	// reported.
+	//
+	// The group is told, because a duration that does not match what the
+	// configuration says would otherwise look like a bot that cannot count.
+	muteFor := verdict.MuteSeconds
+	selfReported := reporter != "" && reporter == verdict.SubjectOpenID
+	if selfReported && muteFor > 0 {
+		muteFor /= 2
+		if muteFor < 1 {
+			muteFor = 1
+		}
+		h.deps.Logger.Info("the reporter reported themselves, so the silence is halved",
+			"group", groupOpenID, "member", verdict.SubjectOpenID,
+			"seconds", verdict.MuteSeconds, "applied", muteFor)
+		notes = append(notes, "自己举报自己，刑期减半")
+	}
+	if muteFor > 0 && verdict.SubjectOpenID != "" {
+		duration := time.Duration(muteFor) * time.Second
 		if err := h.muteMember(ctx, groupOpenID, verdict.SubjectOpenID, duration); err != nil {
 			h.deps.Logger.Error("could not mute a member who was judged",
 				"group", groupOpenID, "member", verdict.SubjectOpenID, "error", err)
@@ -281,7 +301,7 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	// number means, in the group or in a private message, and read the reason, the
 	// chain of thought and the message that was taken back.
 	answer += h.receiptSentence(verdict.JudgementID)
-	action, muteSeconds = strings.Join(notes, " "), verdict.MuteSeconds
+	action, muteSeconds = strings.Join(notes, " "), muteFor
 	h.sayInGroup(ctx, groupOpenID, answer)
 }
 
