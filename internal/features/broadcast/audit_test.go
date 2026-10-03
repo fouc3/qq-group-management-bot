@@ -37,10 +37,10 @@ func TestThePostingIsRecorded(t *testing.T) {
 	}
 	entry := posted[0]
 	if entry.SenderOpenID != theAdmin {
-		t.Errorf("sender = %q, want the administrator who asked", entry.SenderOpenID)
+		t.Errorf("sender = %q, want the member who asked", entry.SenderOpenID)
 	}
-	if entry.FromGroupOpenID != hereGroup {
-		t.Errorf("from = %q, want the group the card was opened in", entry.FromGroupOpenID)
+	if entry.GroupOpenID != hereGroup {
+		t.Errorf("group = %q, want the group this row is about", entry.GroupOpenID)
 	}
 	if !entry.Anonymous || !entry.Markdown {
 		t.Errorf("the switches were not recorded: %+v", entry)

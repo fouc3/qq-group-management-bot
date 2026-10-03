@@ -122,23 +122,26 @@ func (h *handler) Name() string { return Name }
 
 // Intents implements feature.Feature.
 //
-// A button press carries the choices, and a group message carries the text of the
-// broadcast -- the second is why this feature reads messages at all, and it reads
-// them for one member at a time rather than reading anything it was not asked for.
+// A button press carries the choices, and a single-chat message carries the text of the
+// broadcast -- the second is why this feature reads messages at all, and it reads them
+// for one member at a time rather than reading anything it was not asked for. The group
+// intent is in here because the platform delivers a single-chat message under it, not
+// because this feature reads anything said in a group.
 func (h *handler) Intents() qqbotsdk.Intent {
 	return qqbotsdk.IntentGroupAndC2CEvent | qqbotsdk.IntentInteraction
 }
 
 // Register implements feature.Feature.
+//
+// A card lives in a single chat, so that is where both the presses and the text come
+// from. Nothing of this feature reads a group: a broadcast is written away from the group
+// it is for.
 func (h *handler) Register(context.Context) error {
 	return h.router.Register(h.deps.Client, command.Handlers{
-		Group: h.onGroupMessage,
-		// A card can be opened in a single chat, so the text it is made of can be
-		// written in one.
 		Private: h.onPrivateMessage,
 		Buttons: []command.ButtonClaim{{
 			Namespace: buttonPrefix,
-			Scenes:    command.InGroup | command.InPrivate,
+			Scenes:    command.InPrivate,
 			Handle:    h.onPress,
 		}},
 	})
@@ -172,89 +175,74 @@ func (h *handler) SetCommands(commands feature.Commands) { h.commands = commands
 func (h *handler) CommandDefs() []command.Def {
 	return []command.Def{{
 		Name: "群广播",
-		// The word an administrator is as likely to say, on the same command:
-		// nothing about it changes with the name it is called by.
+		// The word somebody is as likely to say, on the same command: nothing about it
+		// changes with the name it is called by.
 		Aliases: []string{"群通报"},
-		Usage: "{prefix}群广播 —— 打开广播卡片，选好参数后写下要发的内容" +
-			"（别名 {prefix}群通报；也可在私聊里用）",
-		Desc: "匿名群广播",
-		// The gate is the table's, and it is the same list the buttons are checked
-		// against: a broadcast is something only this group's administrators do.
+		Usage:   "{prefix}群广播 —— 私聊里打开广播卡片，选好参数后写下要发的内容",
+		Desc:    "匿名群广播",
+		// The gate is the table's, and it is the same list the card's buttons are
+		// checked against: broadcasting into a group is something its administrators do.
 		Audience: command.Admins,
-		// Both panels. In a group it is the group's administrators who may write one;
-		// in a single chat it is whoever administers a group somewhere, and the card
-		// itself offers only those groups.
-		Panels: []command.PanelPlacement{
-			{Scene: command.InGroup},
-			{Scene: command.InPrivate},
-		},
-		Run:     h.startCommand,
+		// The card is opened in a single chat, so that is the panel it belongs in: the
+		// group is exactly who is not supposed to watch a notice being drafted.
+		Panels: []command.PanelPlacement{{Scene: command.InPrivate}},
+		// Typed in a group, where the draft would be read by everyone in it, it says
+		// where to go instead of opening anything.
+		Run:     h.startInGroup,
 		Private: h.startPrivately,
 	}, {
 		// The other half of anonymity: the group is not told who asked, and this is how
-		// it can still be found out. In the help rather than in a panel, because a
-		// record is something to consult rather than something to put in front of a
-		// group.
-		Name:     "广播审计",
-		Aliases:  []string{"广播记录"},
-		Usage:    "{prefix}广播审计 —— 本群最近的广播记录与发起人（只有本群管理员能看）",
-		Desc:     "广播记录",
-		Audience: command.Admins,
-		Run:      h.auditCommand,
+		// it can still be found out. In the help rather than in a panel, because a record
+		// is something to consult rather than something to put in front of a group.
+		Name:    "广播审计",
+		Aliases: []string{"广播记录"},
+		Usage: "{prefix}广播审计 —— 本群最近的广播记录与发起人（只有本群管理员能看）；" +
+			"在私聊里用则列出你管理的群",
+		PrivateUsage: "{prefix}广播审计 —— 你管理的群最近发过哪些广播、各是谁发起的",
+		Desc:         "广播记录",
+		Audience:     command.Admins,
+		Run:          h.auditCommand,
+		Private:      h.auditPrivately,
 	}}
 }
 
-// startCommand opens a card for the member who asked in a group.
-func (h *handler) startCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
+// startInGroup says where a broadcast is written, for a group that asked for one.
+func (h *handler) startInGroup(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 	_ command.Parsed) error {
-	where := place{groupOpenID: data.GroupOpenID}
 	if !h.cfg.allowed(data.Author.MemberOpenID) {
-		h.loggerIn(where).Info("a broadcast was asked for by somebody the trial does "+
-			"not name", "member", data.Author.MemberOpenID)
-		_, err := h.send(ctx, messaging.Message{
-			GroupOpenID: data.GroupOpenID,
-			Text:        closed,
-			ReplyTo:     data.ID,
-		})
-		return err
+		h.logger(data.GroupOpenID).Info("a broadcast was asked for by somebody the "+
+			"trial does not name", "member", data.Author.MemberOpenID)
+		return h.say(ctx, data.GroupOpenID, data.ID, closed)
 	}
-	s, err := h.openCard(ctx, where, data.Author.MemberOpenID, data.ID)
-	if err != nil {
-		h.loggerIn(where).Warn("could not open a broadcast card", "error", err)
-		return h.say(ctx, where, data.Author.MemberOpenID, data.ID,
-			"广播卡片没能发出来，请稍后再试。")
-	}
-	h.deps.Logger.Info("a broadcast card was opened", "where", where.String(),
-		"member", data.Author.MemberOpenID, "token", s.token)
-	return nil
+	h.logger(data.GroupOpenID).Info("a broadcast was asked for in a group, so it was "+
+		"answered where to write one", "member", data.Author.MemberOpenID)
+	return h.say(ctx, data.GroupOpenID, data.ID,
+		"广播在私聊里写：请私聊机器人发送 /群广播 —— 草稿发在群里，全群都会看到。")
 }
 
 // startPrivately opens a card in a single chat.
 //
-// Offered there because a broadcast is written by one person rather than by a group:
-// somebody who administers several groups writes it once and picks where it goes. A
-// single chat has no administrator list of its own, so the gate is that this member
-// administers a group somewhere -- and the card offers only those groups.
+// It is only opened here: a broadcast is one person writing a notice for groups to read,
+// and the group is exactly who is not supposed to watch it being written. A single chat
+// has no administrator list of its own, so the gate is that this member administers a
+// group somewhere -- and the card offers only those groups.
 func (h *handler) startPrivately(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
 	_ command.Parsed) error {
-	where := place{userOpenID: data.Author.UserOpenID}
-	if !h.cfg.allowed(data.Author.UserOpenID) {
-		h.loggerIn(where).Info("a broadcast was asked for by somebody the trial does "+
-			"not name", "member", data.Author.UserOpenID)
-		return h.say(ctx, where, data.Author.UserOpenID, data.ID, closed)
+	chat := data.Author.UserOpenID
+	if !h.cfg.allowed(chat) {
+		h.loggerIn(chat).Info("a broadcast was asked for by somebody the trial does "+
+			"not name", "member", chat)
+		return h.say(ctx, chat, data.ID, closed)
 	}
-	if len(h.administers(data.Author.UserOpenID)) == 0 {
-		return h.say(ctx, where, data.Author.UserOpenID, data.ID,
-			"你不在任何群的管理员名单里，广播发不出去。")
+	if len(h.administers(chat)) == 0 {
+		return h.say(ctx, chat, data.ID, "你不在任何群的管理员名单里，广播发不出去。")
 	}
-	s, err := h.openCard(ctx, where, data.Author.UserOpenID, data.ID)
+	s, err := h.openCard(ctx, chat, data.ID)
 	if err != nil {
-		h.loggerIn(where).Warn("could not open a broadcast card", "error", err)
-		return h.say(ctx, where, data.Author.UserOpenID, data.ID,
-			"广播卡片没能发出来，请稍后再试。")
+		h.loggerIn(chat).Warn("could not open a broadcast card", "error", err)
+		return h.say(ctx, chat, data.ID, "广播卡片没能发出来，请稍后再试。")
 	}
-	h.deps.Logger.Info("a broadcast card was opened in a single chat",
-		"member", data.Author.UserOpenID, "token", s.token)
+	h.deps.Logger.Info("a broadcast card was opened", "member", chat, "token", s.token)
 	return nil
 }
 
@@ -269,13 +257,33 @@ func (h *handler) administers(memberOpenID string) []string {
 	return groups
 }
 
-// say answers in one place or the other.
-func (h *handler) say(ctx context.Context, where place, memberOpenID, replyTo,
-	text string) error {
-	message := where.message(text, nil)
-	message.ReplyTo = replyTo
+// say answers in a group or in a single chat, as a passive reply where there is one.
+//
+// The destination is told apart by which of the two identifiers is filled in, because
+// that is what the single sender takes: a group and a single chat are two endpoints
+// rather than one with a flag.
+func (h *handler) say(ctx context.Context, to, replyTo, text string) error {
+	message := messaging.Message{Text: text, ReplyTo: replyTo}
+	if h.isChat(to) {
+		message.UserOpenID = to
+	} else {
+		message.GroupOpenID = to
+	}
 	_, err := h.send(ctx, message)
 	return err
+}
+
+// isChat reports whether an identifier is somebody's, rather than a group's.
+//
+// The two come from the same set of calls and never overlap in practice: a group's openid
+// is what the bot's own configuration names, and a member's is what an event carries.
+func (h *handler) isChat(openID string) bool {
+	for _, group := range h.deps.Groups {
+		if group.OpenID == openID {
+			return false
+		}
+	}
+	return true
 }
 
 // send puts one message where it goes, through the one sender every feature uses.
@@ -284,15 +292,12 @@ func (h *handler) send(ctx context.Context, message messaging.Message) (
 	return messaging.Send(ctx, h.deps.Client, message)
 }
 
-// loggerIn is the feature's logger, with the group or chat it is working in.
-func (h *handler) loggerIn(where place) *slog.Logger {
-	if where.inGroup() {
-		return h.deps.Logger.With("group", where.groupOpenID)
-	}
-	return h.deps.Logger.With("chat", where.userOpenID)
+// loggerIn is the feature's logger, with the single chat it is working in.
+func (h *handler) loggerIn(chat string) *slog.Logger {
+	return h.deps.Logger.With("chat", chat)
 }
 
-// logger is the same, for the one question asked before there is a place to ask it of.
+// logger is the same, with the group a question is about.
 func (h *handler) logger(groupOpenID string) *slog.Logger {
 	return h.deps.Logger.With("group", groupOpenID)
 }

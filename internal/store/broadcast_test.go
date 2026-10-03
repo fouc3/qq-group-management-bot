@@ -14,15 +14,14 @@ func TestABroadcastIsRecorded(t *testing.T) {
 	at := time.Now().Add(-time.Minute).Unix()
 
 	entry := Broadcast{
-		Token:           "TOKEN-1",
-		FromGroupOpenID: "GROUP-1",
-		SenderOpenID:    "ADMIN-1",
-		GroupOpenID:     "GROUP-2",
-		Anonymous:       true,
-		Markdown:        true,
-		Content:         "第一行\n第二行",
-		SentAt:          at,
-		MessageID:       "MESSAGE-1",
+		Token:        "TOKEN-1",
+		SenderOpenID: "ADMIN-1",
+		GroupOpenID:  "GROUP-2",
+		Anonymous:    true,
+		Markdown:     true,
+		Content:      "第一行\n第二行",
+		SentAt:       at,
+		MessageID:    "MESSAGE-1",
 	}
 	if err := opened.Broadcasts().Record(ctx, entry); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -31,7 +30,7 @@ func TestABroadcastIsRecorded(t *testing.T) {
 	// The same card posted into a second group is a second row: what an audit asks is
 	// group by group.
 	if err := opened.Broadcasts().Record(ctx, Broadcast{
-		Token: "TOKEN-1", FromGroupOpenID: "GROUP-1", SenderOpenID: "ADMIN-1",
+		Token: "TOKEN-1", SenderOpenID: "ADMIN-1",
 		GroupOpenID: "GROUP-3", Anonymous: true, Markdown: true,
 		Content: "第一行\n第二行", SentAt: at, MessageID: "MESSAGE-2",
 	}); err != nil {
@@ -51,10 +50,7 @@ func TestABroadcastIsRecorded(t *testing.T) {
 	}
 	got := posted[0]
 	if got.SenderOpenID != "ADMIN-1" {
-		t.Errorf("sender = %q, want the administrator who asked", got.SenderOpenID)
-	}
-	if got.FromGroupOpenID != "GROUP-1" {
-		t.Errorf("from = %q, want the group the card was opened in", got.FromGroupOpenID)
+		t.Errorf("sender = %q, want the member who asked", got.SenderOpenID)
 	}
 	if !got.Anonymous || !got.Markdown {
 		t.Errorf("the switches were not kept: %+v", got)

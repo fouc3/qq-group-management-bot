@@ -18,10 +18,11 @@ type Broadcast struct {
 	// Token is the card the broadcast was written on. With the group it is the identity
 	// of the row, so a send that is somehow repeated does not double the record.
 	Token string
-	// FromGroupOpenID is the group the card was opened in, or empty when it was opened in
-	// a single chat with the bot.
-	FromGroupOpenID string
 	// SenderOpenID is who asked for it. This is the field the record exists for.
+	//
+	// It is a member's openid in a single chat, which is where a broadcast is written:
+	// the card lives there, so the sender is the person who wrote it rather than anybody
+	// in a group.
 	SenderOpenID string
 	// GroupOpenID is the group this row is about.
 	//
@@ -78,14 +79,12 @@ func (b broadcastStore) Record(ctx context.Context, broadcast Broadcast) error {
 	// new, and an update would only rewrite a row with itself.
 	if _, err := b.store.db.ExecContext(ctx, b.store.query(`
 INSERT INTO broadcasts
-    (token, from_group, sender_openid, group_openid, anonymous, markdown, content,
-     sent_at, message_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (token, sender_openid, group_openid, anonymous, markdown, content, sent_at, message_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (token, group_openid) DO NOTHING`),
-		broadcast.Token, broadcast.FromGroupOpenID, broadcast.SenderOpenID,
-		broadcast.GroupOpenID, boolValue(broadcast.Anonymous),
-		boolValue(broadcast.Markdown), broadcast.Content, broadcast.SentAt,
-		broadcast.MessageID); err != nil {
+		broadcast.Token, broadcast.SenderOpenID, broadcast.GroupOpenID,
+		boolValue(broadcast.Anonymous), boolValue(broadcast.Markdown),
+		broadcast.Content, broadcast.SentAt, broadcast.MessageID); err != nil {
 		return fmt.Errorf("recording a broadcast: %w", err)
 	}
 	return nil
@@ -97,8 +96,7 @@ func (b broadcastStore) ListByGroup(ctx context.Context, groupOpenID string, lim
 		limit = 10
 	}
 	rows, err := b.store.db.QueryContext(ctx, b.store.query(`
-SELECT token, from_group, sender_openid, group_openid, anonymous, markdown, content,
-       sent_at, message_id
+SELECT token, sender_openid, group_openid, anonymous, markdown, content, sent_at, message_id
 FROM broadcasts
 WHERE group_openid = ?
 ORDER BY sent_at DESC, token DESC
@@ -114,9 +112,9 @@ LIMIT ?`), groupOpenID, limit)
 			broadcast           Broadcast
 			anonymous, markdown int
 		)
-		if err := rows.Scan(&broadcast.Token, &broadcast.FromGroupOpenID,
-			&broadcast.SenderOpenID, &broadcast.GroupOpenID, &anonymous, &markdown,
-			&broadcast.Content, &broadcast.SentAt, &broadcast.MessageID); err != nil {
+		if err := rows.Scan(&broadcast.Token, &broadcast.SenderOpenID,
+			&broadcast.GroupOpenID, &anonymous, &markdown, &broadcast.Content,
+			&broadcast.SentAt, &broadcast.MessageID); err != nil {
 			return nil, fmt.Errorf("reading a broadcast: %w", err)
 		}
 		broadcast.Anonymous = anonymous != 0

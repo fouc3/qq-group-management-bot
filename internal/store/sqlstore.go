@@ -164,6 +164,11 @@ CREATE INDEX IF NOT EXISTS member_events_by_time ON member_events (event_at);
 	//
 	// The content is kept whole. A record that cannot be read back cannot answer what a
 	// group was told, which is most of what an audit is for.
+	//
+	// from_group is written by nobody: a card can only be opened in a single chat, and
+	// the column was added before that was settled. It stays with its default rather
+	// than being dropped, because a migration that removes a column is a migration that
+	// can lose data on somebody else's database.
 	`
 CREATE TABLE IF NOT EXISTS broadcasts (
     token          TEXT   NOT NULL,

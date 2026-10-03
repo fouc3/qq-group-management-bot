@@ -173,30 +173,6 @@ func TestMarkdownOffEscapesWhatWasWritten(t *testing.T) {
 	}
 }
 
-// TestSomebodyElseCannotWorkTheCard covers who a card belongs to.
-//
-// The platform's administrator gate is about QQ's administrators, and the list this
-// bot obeys is a different list: the press is checked here, and a member who is not
-// the administrator who opened the card gets nothing.
-func TestSomebodyElseCannotWorkTheCard(t *testing.T) {
-	p := newPlatform(t)
-	p.start(t, theAdmin)
-
-	before := len(p.sent)
-	p.press(t, "MD：未选", somebodyElse)
-
-	if last := p.answered[len(p.answered)-1]; last != qqbotsdk.InteractionCodeAdminOnly {
-		t.Errorf("a press from somebody else answered %v, want admin only", last)
-	}
-	if said := p.lastText(); !strings.Contains(said, "管理员") {
-		t.Errorf("the refusal does not say who may work the card:\n%s", said)
-	}
-	if len(p.sent) != before+1 {
-		t.Errorf("a refused press sent %d message(s), want only the refusal",
-			len(p.sent)-before)
-	}
-}
-
 // TestACommandIsNotSwallowedAsText covers what the table is asked for: a command typed
 // while a broadcast is being written has to be answered, not taken as its text.
 func TestACommandIsNotSwallowedAsText(t *testing.T) {

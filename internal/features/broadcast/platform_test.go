@@ -109,8 +109,10 @@ func (p *platform) cardButtons() map[string]string {
 	return buttons
 }
 
-// pressPrivately is the same, for a card that lives in a single chat.
-func (p *platform) pressPrivately(t *testing.T, label, member string) {
+// press delivers a button press the way the command layer does: the payload is the
+// button's own data with its namespace taken off, and it comes from the single chat the
+// card lives in.
+func (p *platform) press(t *testing.T, label, member string) {
 	t.Helper()
 	data, ok := p.cardButtons()[label]
 	if !ok {
@@ -130,62 +132,11 @@ func (p *platform) pressPrivately(t *testing.T, label, member string) {
 	}
 }
 
-// startPrivately opens a card in a single chat, the way the private command does.
-func (p *platform) startPrivately(t *testing.T, member string) {
-	t.Helper()
-	data := &qqbotsdk.C2CMessageCreateData{
-		ID:      "PRIVATE-MESSAGE",
-		Content: "/群广播",
-		Author:  &qqbotsdk.User{UserOpenID: member},
-	}
-	if err := p.handler.startPrivately(context.Background(), data, command.Parsed{}); err != nil {
-		t.Fatalf("opening a card in a single chat: %v", err)
-	}
-}
-
-// sayPrivately delivers what a member wrote in a single chat.
-func (p *platform) sayPrivately(t *testing.T, member, content string) {
-	t.Helper()
-	event := qqbotsdk.NewEvent(&qqbotsdk.Payload{
-		Op:   qqbotsdk.OpDispatch,
-		Type: qqbotsdk.EventC2CMessageCreate,
-		Data: json.RawMessage(`{"id":"TEXT-MESSAGE","content":` + quote(content) +
-			`,"author":{"user_openid":"` + member + `"}}`),
-	}, "test")
-	if err := p.handler.onPrivateMessage(context.Background(), event); err != nil {
-		t.Fatalf("taking the text: %v", err)
-	}
-}
-
 // lastText is what the last message sent says.
 func (p *platform) lastText() string {
 	markdown, _ := p.card()["markdown"].(map[string]any)
 	text, _ := markdown["content"].(string)
 	return text
-}
-
-// press delivers a button press the way the command layer does: the payload is the
-// button's own data with its namespace taken off.
-func (p *platform) press(t *testing.T, label, member string) {
-	t.Helper()
-	data, ok := p.cardButtons()[label]
-	if !ok {
-		t.Fatalf("no button labelled %q on the card:\n%s", label, p.lastText())
-	}
-	payload := strings.TrimPrefix(data, buttonPrefix)
-	press := command.Press{
-		Data: &qqbotsdk.InteractionCreateData{
-			ID:                "INTERACTION-" + label,
-			Scene:             qqbotsdk.InteractionSceneGroup,
-			GroupOpenID:       hereGroup,
-			GroupMemberOpenID: member,
-		},
-		EventID: "EVENT-" + label,
-		Payload: payload,
-	}
-	if err := p.handler.onPress(context.Background(), press); err != nil {
-		t.Fatalf("pressing %q: %v", label, err)
-	}
 }
 
 // newPlatform builds the feature over a stand-in platform.
@@ -294,8 +245,23 @@ func sectionNode(t *testing.T, text string) yaml.Node {
 	return *document.Content[0]
 }
 
-// start opens a card, the way the command does.
+// start opens a card, the way the command does: in a single chat, which is the only
+// place a broadcast is written.
 func (p *platform) start(t *testing.T, member string) {
+	t.Helper()
+	data := &qqbotsdk.C2CMessageCreateData{
+		ID:      "PRIVATE-MESSAGE",
+		Content: "/群广播",
+		Author:  &qqbotsdk.User{UserOpenID: member},
+	}
+	if err := p.handler.startPrivately(context.Background(), data, command.Parsed{}); err != nil {
+		t.Fatalf("opening a card: %v", err)
+	}
+}
+
+// askInGroup is the same command typed in a group, where the draft would be read by
+// everyone in it.
+func (p *platform) askInGroup(t *testing.T, member string) {
 	t.Helper()
 	data := &qqbotsdk.GroupMessageCreateData{
 		ID:          "COMMAND-MESSAGE",
@@ -303,13 +269,13 @@ func (p *platform) start(t *testing.T, member string) {
 		Content:     "/群广播",
 		Author:      &qqbotsdk.User{MemberOpenID: member},
 	}
-	if err := p.handler.startCommand(context.Background(), data, command.Parsed{}); err != nil {
-		t.Fatalf("opening a card: %v", err)
+	if err := p.handler.startInGroup(context.Background(), data, command.Parsed{}); err != nil {
+		t.Fatalf("asking in a group: %v", err)
 	}
 }
 
-// choose sets the two switches to what the test wants and picks the group the card is
-// in.
+// choose sets the two switches to what the test wants and picks the group the card was
+// opened in.
 //
 // A switch that should end up off is pressed twice: the card starts with neither
 // chosen, and one press is what turns it on.
@@ -326,17 +292,16 @@ func (p *platform) choose(t *testing.T, markdown, anonymous bool) {
 	p.press(t, "群-HERE", theAdmin)
 }
 
-// say delivers what a member wrote, the way a group message arrives.
+// say delivers what a member wrote, the way a single-chat message arrives.
 func (p *platform) say(t *testing.T, member, content string) {
 	t.Helper()
 	event := qqbotsdk.NewEvent(&qqbotsdk.Payload{
 		Op:   qqbotsdk.OpDispatch,
-		Type: qqbotsdk.EventGroupMessageCreate,
-		Data: json.RawMessage(`{"id":"TEXT-MESSAGE","group_openid":"` + hereGroup +
-			`","content":` + quote(content) + `,"author":{"member_openid":"` + member +
-			`"}}`),
+		Type: qqbotsdk.EventC2CMessageCreate,
+		Data: json.RawMessage(`{"id":"TEXT-MESSAGE","content":` + quote(content) +
+			`,"author":{"user_openid":"` + member + `"}}`),
 	}, "test")
-	if err := p.handler.onGroupMessage(context.Background(), event); err != nil {
+	if err := p.handler.onPrivateMessage(context.Background(), event); err != nil {
 		t.Fatalf("taking the text: %v", err)
 	}
 }

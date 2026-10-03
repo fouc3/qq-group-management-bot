@@ -248,7 +248,7 @@ func displayName(group groupChoice) string {
 func (h *handler) broadcastText(s *session) string {
 	header := "来自管理员的广播"
 	if s.anonymous == off {
-		header = "来自 <@" + s.starter + "> 的广播"
+		header = "来自 <@" + s.chat + "> 的广播"
 	}
 	body := s.content
 	if s.markdown == off {
