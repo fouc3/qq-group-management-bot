@@ -39,10 +39,15 @@ const plainDivider = "————————————"
 const labelLimit = 10
 
 // action is what a button on the card asks for.
+//
+// extra is the one thing a press has to say besides which card and what was asked for,
+// and what it means depends on the kind: which group, for a group's own switch, and which
+// page, for a record being read a page at a time. One field rather than two, because a
+// press never needs both.
 type action struct {
 	token string
 	kind  string
-	group string
+	extra string
 }
 
 // The kinds of button there are on a card.
@@ -57,13 +62,30 @@ const (
 	kindCancel    = "cancel"
 	kindSend      = "send"
 	kindEdit      = "edit"
+
+	// The page buttons of a record: the same namespace, and a press on one is told from a
+	// press on a card by knowing these, so that a page never has to be looked up in the
+	// cards that are open.
+	kindPagePrev  = "pprev"
+	kindPageNext  = "pnext"
+	kindPageClose = "pclose"
 )
 
+// isPage reports whether this press is one of a record's page buttons.
+func (a action) isPage() bool {
+	switch a.kind {
+	case kindPagePrev, kindPageNext, kindPageClose:
+		return true
+	default:
+		return false
+	}
+}
+
 // buttonData is what goes in a button's data field.
-func buttonData(token, kind, group string) string {
+func buttonData(token, kind, extra string) string {
 	data := buttonPrefix + token + ":" + kind
-	if group != "" {
-		data += ":" + group
+	if extra != "" {
+		data += ":" + extra
 	}
 	return data
 }
@@ -71,8 +93,8 @@ func buttonData(token, kind, group string) string {
 // readAction takes apart what a press carried.
 //
 // The payload is the data with the namespace already taken off, which is what the
-// command layer hands over: what is left is the card it belongs to, what was asked
-// for, and -- for a group button -- which group.
+// command layer hands over: what is left is the record or card it belongs to, what was
+// asked for, and at most one more thing.
 func readAction(payload string) (action, bool) {
 	parts := strings.Split(payload, ":")
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
@@ -80,7 +102,7 @@ func readAction(payload string) (action, bool) {
 	}
 	asked := action{token: parts[0], kind: parts[1]}
 	if len(parts) > 2 {
-		asked.group = parts[2]
+		asked.extra = parts[2]
 	}
 	return asked, true
 }
@@ -169,8 +191,8 @@ func toggleButton(label, kind string, state chosen, token string) qqbotsdk.Butto
 }
 
 // plainButton is a button that asks for something rather than choosing.
-func plainButton(label, kind, token, group string) qqbotsdk.Button {
-	return button(label, kind, token, group, qqbotsdk.KeyboardStyleBlue)
+func plainButton(label, kind, token, extra string) qqbotsdk.Button {
+	return button(label, kind, token, extra, qqbotsdk.KeyboardStyleBlue)
 }
 
 // button is one button on the card.
@@ -178,13 +200,13 @@ func plainButton(label, kind, token, group string) qqbotsdk.Button {
 // Every button is a callback: nothing here types a command for the member, because
 // what a press means is decided when it arrives rather than by what the composer
 // was given.
-func button(label, kind, token, group string, style int) qqbotsdk.Button {
+func button(label, kind, token, extra string, style int) qqbotsdk.Button {
 	// Unique within the keyboard, which is what the platform asks of an id: the
-	// kind alone repeats -- every group has its own button -- so the group is part
-	// of it where there is one.
+	// kind alone repeats -- every group has its own button -- so the extra field is
+	// part of it where there is one.
 	id := kind
-	if group != "" {
-		id += ":" + group
+	if extra != "" {
+		id += ":" + extra
 	}
 	return qqbotsdk.Button{
 		ID: id,
@@ -195,7 +217,7 @@ func button(label, kind, token, group string, style int) qqbotsdk.Button {
 		},
 		Action: &qqbotsdk.Action{
 			Type: qqbotsdk.ActionTypeCallback,
-			Data: buttonData(token, kind, group),
+			Data: buttonData(token, kind, extra),
 			// Everybody: the platform's administrator gate is about QQ's
 			// administrators, and who may work this card is decided here, against
 			// the list the bot obeys. Greying the buttons out for the wrong people

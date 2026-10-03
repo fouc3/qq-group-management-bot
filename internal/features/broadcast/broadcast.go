@@ -83,6 +83,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		cfg:    cfg,
 		deps:   deps,
 		open:   map[string]*session{},
+		pages:  map[string]*pager{},
 		router: command.NewRouter(Name, command.ButtonsOrOwn(deps.Buttons)),
 	}
 	// Work that outlives the event that asked for it runs under this: a card sent
@@ -112,9 +113,11 @@ type handler struct {
 	part     context.Context
 	stopPart context.CancelFunc
 
-	// mu guards open, which is the cards members are looking at.
-	mu   sync.Mutex
-	open map[string]*session
+	// mu guards open and pages: the cards members are looking at, and the records they are
+	// reading a page at a time.
+	mu    sync.Mutex
+	open  map[string]*session
+	pages map[string]*pager
 }
 
 // Name implements feature.Feature.
@@ -133,15 +136,17 @@ func (h *handler) Intents() qqbotsdk.Intent {
 
 // Register implements feature.Feature.
 //
-// A card lives in a single chat, so that is where both the presses and the text come
-// from. Nothing of this feature reads a group: a broadcast is written away from the group
+// A card lives in a single chat, so that is where the presses on it come from. A record of
+// what was broadcast can be read in a group as well, so the namespace is claimed in both --
+// and which of the two a press is for is decided when it arrives, from the button itself.
+// Nothing of this feature reads a group message: a broadcast is written away from the group
 // it is for.
 func (h *handler) Register(context.Context) error {
 	return h.router.Register(h.deps.Client, command.Handlers{
 		Private: h.onPrivateMessage,
 		Buttons: []command.ButtonClaim{{
 			Namespace: buttonPrefix,
-			Scenes:    command.InPrivate,
+			Scenes:    command.InGroup | command.InPrivate,
 			Handle:    h.onPress,
 		}},
 	})
@@ -158,6 +163,9 @@ func (h *handler) Close(context.Context) error {
 
 	h.mu.Lock()
 	h.open = map[string]*session{}
+	// The records being read go with it: their pages carry buttons that only this instance
+	// can answer, and a page left behind would answer "过期" to every turn.
+	h.pages = map[string]*pager{}
 	h.mu.Unlock()
 
 	h.stopPart()
@@ -193,18 +201,28 @@ func (h *handler) CommandDefs() []command.Def {
 		Run:     h.startInGroup,
 		Private: h.startPrivately,
 	}, {
-		// The other half of anonymity: the group is not told who asked, and this is how
-		// it can still be found out. In the help rather than in a panel, because a record
-		// is something to consult rather than something to put in front of a group.
+		// The other half of anonymity: the group is not told who asked, and this is how it can
+		// still be found out. A page at a time, five entries each, so that a record of a busy
+		// group is readable rather than a wall of text.
+		//
+		// It is not behind the trial gate, on purpose: the gate is about writing a broadcast,
+		// and reading the record is the half that makes an anonymous notice answerable. A
+		// group whose administrators were refused the record of their own group would have no
+		// way to find out what was sent in its name.
 		Name:    "广播审计",
 		Aliases: []string{"广播记录"},
-		Usage: "{prefix}广播审计 —— 本群最近的广播记录与发起人（只有本群管理员能看）；" +
+		Usage: "{prefix}广播审计 —— 本群最近的广播记录与发起人（只有本群管理员能看，可翻页）；" +
 			"在私聊里用则列出你管理的群",
-		PrivateUsage: "{prefix}广播审计 —— 你管理的群最近发过哪些广播、各是谁发起的",
+		PrivateUsage: "{prefix}广播审计 —— 你管理的群最近发过哪些广播、各是谁发起的（可翻页）",
 		Desc:         "广播记录",
 		Audience:     command.Admins,
-		Run:          h.auditCommand,
-		Private:      h.auditPrivately,
+		// Offered in the single chat's menu as well: it is the same record asked in the place
+		// where somebody who answers for several groups would look for it. In a group its own
+		// menu entry is left out -- the group is who the record is about, and reading it is
+		// its administrators' business rather than a line in front of everybody.
+		Panels:  []command.PanelPlacement{{Scene: command.InPrivate}},
+		Run:     h.auditCommand,
+		Private: h.auditPrivately,
 	}}
 }
 

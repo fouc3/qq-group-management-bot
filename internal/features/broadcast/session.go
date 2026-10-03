@@ -181,15 +181,20 @@ func (h *handler) forget(s *session) {
 	delete(h.open, s.token)
 }
 
-// dropExpired closes the cards nobody came back to.
+// dropExpired closes the cards nobody came back to, and the records nobody is reading.
 //
-// Called under the lock, from both the write and the read, because a map that is
-// only pruned on the way in grows with every card a group ever opened.
+// Called under the lock, from both the write and the read, because a map that is only
+// pruned on the way in grows with every card a group ever opened.
 func (h *handler) dropExpired() {
 	now := time.Now()
 	for token, s := range h.open {
 		if now.Sub(s.updated) > sessionLifetime {
 			delete(h.open, token)
+		}
+	}
+	for token, p := range h.pages {
+		if now.Sub(p.updated) > sessionLifetime {
+			delete(h.pages, token)
 		}
 	}
 }

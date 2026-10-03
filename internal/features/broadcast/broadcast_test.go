@@ -317,7 +317,7 @@ func TestTheAnswerCarriesWhatWasPressed(t *testing.T) {
 	if !ok {
 		t.Fatal("a well-formed payload was refused")
 	}
-	if asked.token != "token" || asked.kind != kindGroup || asked.group != "GROUP-OTHER" {
+	if asked.token != "token" || asked.kind != kindGroup || asked.extra != "GROUP-OTHER" {
 		t.Errorf("read %+v, want the token, the kind and the group", asked)
 	}
 	if _, ok := readAction("token"); ok {

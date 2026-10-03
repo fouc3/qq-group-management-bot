@@ -3,7 +3,6 @@ package broadcast
 import (
 	"context"
 	"errors"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,11 +40,18 @@ func (h *handler) openCard(ctx context.Context, chat, replyTo string) (*session,
 	return s, nil
 }
 
-// onPress answers a button on a card.
+// onPress answers a button this feature put under something.
+//
+// Two things carry its buttons: a card being written, which lives in a single chat, and a
+// record being read, which can be in either. They are told apart by the button rather than
+// looked up in both, because a page turn has no card behind it.
 func (h *handler) onPress(ctx context.Context, press command.Press) error {
 	asked, ok := readAction(press.Payload)
 	if !ok {
 		return h.answer(press, qqbotsdk.InteractionCodeFailed)
+	}
+	if asked.isPage() {
+		return h.onPagePress(ctx, press, asked)
 	}
 	s, found := h.lookup(asked.token)
 	if !found {
@@ -88,7 +94,7 @@ func (h *handler) work(ctx context.Context, s *session, asked action, press comm
 
 	case kindGroup:
 		for index := range s.groups {
-			if s.groups[index].openID == asked.group {
+			if s.groups[index].openID == asked.extra {
 				s.groups[index].selected = !s.groups[index].selected
 			}
 		}
@@ -454,125 +460,6 @@ func (h *handler) deposit(ctx context.Context, s *session, groupOpenID string,
 	}
 	h.logger(groupOpenID).Info("a broadcast was recorded", "token", s.token,
 		"member", s.chat)
-}
-
-// auditLimit is how many broadcasts an audit shows, newest first.
-//
-// Fixed rather than asked for: the question is "who sent that", and the recent ones are
-// where that is answered. A record kept for its own sake is read out of the database
-// rather than out of a chat.
-const auditLimit = 10
-
-// auditCommand shows what was broadcast in this group, and who asked for it.
-//
-// Asked in a group, and about that group: the record is what the group's own
-// administrators get to see, which is the answer to a notice they cannot trace
-// otherwise.
-func (h *handler) auditCommand(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
-	_ command.Parsed) error {
-	member := data.Author.MemberOpenID
-	// Asked again here rather than left to the table's own gate: who may read a record of
-	// who said what is worth one check of its own, and the two must agree.
-	if !h.adminsOf(data.GroupOpenID, member) {
-		return h.say(ctx, data.GroupOpenID, "",
-			"只有本群管理员能看广播记录。")
-	}
-	posted, err := h.records(ctx, []string{data.GroupOpenID})
-	if err != nil {
-		h.logger(data.GroupOpenID).Error("could not read the broadcast record", "error", err)
-		return h.say(ctx, data.GroupOpenID, "", "广播记录读取失败："+err.Error())
-	}
-	lines := []string{"**广播记录**（本群最近 " + strconv.Itoa(len(posted)) +
-		" 条，只有本群管理员能看到）", ""}
-	return h.say(ctx, data.GroupOpenID, "", joinAudit(lines, posted, false))
-}
-
-// auditPrivately shows a member what was broadcast in the groups they administer.
-//
-// In a single chat, and only about their own groups: the record is what somebody who
-// answers for a group needs, and a list of what other groups were told is not theirs to
-// read.
-func (h *handler) auditPrivately(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
-	_ command.Parsed) error {
-	chat := data.Author.UserOpenID
-	mine := h.administers(chat)
-	if len(mine) == 0 {
-		return h.say(ctx, chat, "", "你不在任何群的管理员名单里，没有可看的广播记录。")
-	}
-	posted, err := h.records(ctx, mine)
-	if err != nil {
-		h.loggerIn(chat).Error("could not read the broadcast record", "error", err)
-		return h.say(ctx, chat, "", "广播记录读取失败："+err.Error())
-	}
-	lines := []string{"**广播记录**（你管理的 " + strconv.Itoa(len(mine)) + " 个群，最近 " +
-		strconv.Itoa(len(posted)) + " 条）", ""}
-	return h.say(ctx, chat, "", joinAudit(lines, posted, true))
-}
-
-// records reads the newest broadcasts of these groups, newest first across all of them.
-func (h *handler) records(ctx context.Context, groups []string) ([]store.Broadcast, error) {
-	if h.deps.Store == nil {
-		return nil, errors.New("no data layer")
-	}
-	var posted []store.Broadcast
-	for _, groupOpenID := range groups {
-		found, err := h.deps.Store.Broadcasts().ListByGroup(ctx, groupOpenID, auditLimit)
-		if err != nil {
-			return nil, err
-		}
-		posted = append(posted, found...)
-	}
-	sort.SliceStable(posted, func(first, second int) bool {
-		return posted[first].SentAt > posted[second].SentAt
-	})
-	if len(posted) > auditLimit {
-		posted = posted[:auditLimit]
-	}
-	return posted, nil
-}
-
-// joinAudit renders the record for a group or for a member's own groups.
-//
-// withGroup names the group each line is about, which a member reading about several
-// groups needs and a group reading about itself does not.
-func joinAudit(head []string, posted []store.Broadcast, withGroup bool) string {
-	lines := head
-	if len(posted) == 0 {
-		return strings.Join(append(lines, "还没有广播记录。"), "\n")
-	}
-	for index, entry := range posted {
-		when := time.Unix(entry.SentAt, 0).Format("01-02 15:04")
-		how := "匿名发出"
-		if !entry.Anonymous {
-			how = "署名发出"
-		}
-		where := ""
-		if withGroup {
-			where = " · " + entry.GroupOpenID
-		}
-		lines = append(lines,
-			strconv.Itoa(index+1)+". "+when+where+" · "+how+" · 发起人 `"+
-				entry.SenderOpenID+"`",
-			"   "+firstLine(entry.Content, 40))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// firstLine is the beginning of what was broadcast, for a record read in a chat.
-func firstLine(content string, limit int) string {
-	line := content
-	if cut := strings.IndexAny(line, "\n\r"); cut >= 0 {
-		line = line[:cut]
-	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "（没有文字内容）"
-	}
-	runes := []rune(line)
-	if len(runes) > limit {
-		return string(runes[:limit]) + "…"
-	}
-	return line
 }
 
 // adminsOf reports whether this member administers this group.

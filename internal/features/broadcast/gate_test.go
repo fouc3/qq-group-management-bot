@@ -115,10 +115,12 @@ func TestTheCommandIsOfferedInThePrivatePanel(t *testing.T) {
 		t.Errorf("the broadcast is offered in %+v, want the single chat alone",
 			broadcast.Panels)
 	}
-	// A record is consulted rather than offered: an entry in the menu would put a list of
-	// names in front of a group.
-	if len(audit.Panels) != 0 {
-		t.Errorf("the audit is offered in a panel: %+v", audit.Panels)
+	// The record is offered where somebody who answers for several groups would look for it,
+	// which is the single chat. A group's menu still does not carry it: the group is who the
+	// record is about, and a line in front of everybody saying "who sent what" is not a menu
+	// entry.
+	if len(audit.Panels) != 1 || audit.Panels[0].Scene != command.InPrivate {
+		t.Errorf("the audit is offered in %+v, want the single chat alone", audit.Panels)
 	}
 	if audit.Private == nil || audit.PrivateUsage == "" {
 		t.Error("a single chat cannot read the record, so nothing says it can be asked " +

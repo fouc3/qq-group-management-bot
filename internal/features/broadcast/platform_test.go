@@ -71,6 +71,10 @@ type platform struct {
 	section string
 	admins  feature.AdminDirectory
 	store   store.Store
+
+	// recorded counts the broadcasts a test has put in the store, so that each one is a
+	// second newer than the last and "newest first" does not come down to a collation.
+	recorded int
 }
 
 // card is the last card sent, and its buttons.
