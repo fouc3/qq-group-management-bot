@@ -11,7 +11,7 @@ import (
 )
 
 // JudgingEnabled implements feature.Moderation.
-func (h *handler) JudgingEnabled() bool { return h.cfg.JudgingEnabled() }
+func (h *handler) JudgingEnabled() bool { return h.config().JudgingEnabled() }
 
 // RecordOutcome implements feature.Moderation.
 func (h *handler) RecordOutcome(ctx context.Context, judgementID, action string,

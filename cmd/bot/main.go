@@ -53,11 +53,13 @@ func run() error {
 	registry.Add(moderation.Name, moderation.New)
 	logger.Debug("features registered", "features", registry.Names())
 
+	// SIGHUP is deliberately not in this list: it asks for a reload rather than a
+	// stop, and the app listens for it. Interrupt and SIGTERM stop the bot.
 	ctx, stop := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.Run(ctx, cfg, registry, logger); err != nil {
+	if err := app.Run(ctx, cfg, *configPath, registry, logger); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}

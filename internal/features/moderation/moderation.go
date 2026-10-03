@@ -123,7 +123,7 @@ type Model struct {
 const defaultJudgeRetries = 2
 
 // judgeRetries is how many retries are in force.
-func (c *Config) judgeRetries() int {
+func (c Config) judgeRetries() int {
 	if c.Model.Retries == nil {
 		return defaultJudgeRetries
 	}
@@ -186,7 +186,7 @@ func (c *Config) groupFor(groupOpenID string) GroupOverride {
 }
 
 // judgingEnabledFor reports whether judging happens in one group at all.
-func (c *Config) judgingEnabledFor(groupOpenID string) bool {
+func (c Config) judgingEnabledFor(groupOpenID string) bool {
 	if enabled := c.groupFor(groupOpenID).Enabled; enabled != nil {
 		return *enabled
 	}
@@ -223,7 +223,7 @@ func (c *Config) allowedIn(groupOpenID, text string) (string, bool) {
 //
 // Identity, not content, which is what makes it the one exemption worth having:
 // there is no sentence somebody can write to become the group's own account.
-func (c *Config) senderExempt(groupOpenID, memberOpenID string) bool {
+func (c Config) senderExempt(groupOpenID, memberOpenID string) bool {
 	if strings.TrimSpace(memberOpenID) == "" {
 		return false
 	}
@@ -236,7 +236,7 @@ func (c *Config) senderExempt(groupOpenID, memberOpenID string) bool {
 }
 
 // allowText is the group's own list as a sentence for the prompt.
-func (c *Config) allowText(groupOpenID string) string {
+func (c Config) allowText(groupOpenID string) string {
 	entries := c.groupFor(groupOpenID).Allow
 	var kept []string
 	for _, entry := range entries {
@@ -252,7 +252,7 @@ func (c *Config) allowText(groupOpenID string) string {
 
 // MuteForGroup is how long a member is silenced for one category in one group,
 // falling back to the section's own setting.
-func (c *Config) MuteForGroup(groupOpenID, category string) (int64, bool) {
+func (c Config) MuteForGroup(groupOpenID, category string) (int64, bool) {
 	if text := strings.TrimSpace(c.groupFor(groupOpenID).Categories[category]); text != "" {
 		parsed, err := time.ParseDuration(text)
 		if err != nil {
@@ -266,9 +266,9 @@ func (c *Config) MuteForGroup(groupOpenID, category string) (int64, bool) {
 
 // modelClient builds the client the judge uses.
 func (h *handler) modelClient() *openai.Client {
-	config := openai.DefaultConfig(h.cfg.Model.APIKey)
-	if strings.TrimSpace(h.cfg.Model.BaseURL) != "" {
-		config.BaseURL = h.cfg.Model.BaseURL
+	config := openai.DefaultConfig(h.config().Model.APIKey)
+	if strings.TrimSpace(h.config().Model.BaseURL) != "" {
+		config.BaseURL = h.config().Model.BaseURL
 	}
 	return openai.NewClientWithConfig(config)
 }
@@ -424,7 +424,7 @@ func (c *Config) applyDefaults() error {
 // A deployment that only fills the cache is a stage worth being able to run in,
 // so a missing model is not a configuration error; it just means every report
 // ends in "could not judge" rather than in a verdict.
-func (c *Config) JudgingEnabled() bool {
+func (c Config) JudgingEnabled() bool {
 	return strings.TrimSpace(c.Model.Name) != ""
 }
 
@@ -456,7 +456,7 @@ func (c *Config) MuteFor(category string) (int64, bool) {
 }
 
 // LabelFor is what a group is told about a category, from the configuration.
-func (c *Config) LabelFor(category string) string {
+func (c Config) LabelFor(category string) string {
 	entry, known := c.Categories[category]
 	if !known {
 		return category
@@ -469,6 +469,10 @@ func (c *Config) LabelFor(category string) string {
 
 // handler implements feature.Feature.
 type handler struct {
+	// guarded carries the lock that makes adopting a new configuration safe: readers
+	// take it, and a reload replaces the whole configuration under it, so nobody ever
+	// reads half of one file and half of another.
+	guarded
 	cfg   Config
 	deps  feature.Deps
 	cache *Cache
@@ -498,7 +502,7 @@ func (h *handler) Name() string { return Name }
 //
 // On unless it is turned off, and asked for from the outside: what it holds back
 // belongs to whoever acts on a verdict.
-func (h *handler) DryRun() bool { return h.cfg.DryRun == nil || *h.cfg.DryRun }
+func (h *handler) DryRun() bool { return h.config().DryRun == nil || *h.config().DryRun }
 
 // ReportPenaltySeconds implements feature.Moderation.
 //
@@ -506,10 +510,10 @@ func (h *handler) DryRun() bool { return h.cfg.DryRun == nil || *h.cfg.DryRun }
 // penalty of no length: to a caller those are the same thing, because neither
 // silences anybody.
 func (h *handler) ReportPenaltySeconds() int64 {
-	if h.cfg.ReportPenalty == nil || !h.cfg.ReportPenalty.Enabled {
+	if h.config().ReportPenalty == nil || !h.config().ReportPenalty.Enabled {
 		return 0
 	}
-	parsed, err := time.ParseDuration(strings.TrimSpace(h.cfg.ReportPenalty.Mute))
+	parsed, err := time.ParseDuration(strings.TrimSpace(h.config().ReportPenalty.Mute))
 	if err != nil {
 		// Refused at startup, so this cannot happen in a running bot.
 		return 0
@@ -535,7 +539,7 @@ func (h *handler) Register(ctx context.Context) error {
 			"addr", h.deps.Redis.Addr, "error", err)
 	} else {
 		h.deps.Logger.Info("the message cache is ready",
-			"addr", h.deps.Redis.Addr, "retention_hours", h.cfg.CacheHours)
+			"addr", h.deps.Redis.Addr, "retention_hours", h.config().CacheHours)
 	}
 
 	// Said out loud because these are what decide whether a judgement can hurt
@@ -544,15 +548,15 @@ func (h *handler) Register(ctx context.Context) error {
 	// dry_run" is the first question anybody asks when something goes wrong.
 	h.deps.Logger.Info("the judge is configured",
 		"dry_run", h.DryRun(),
-		"model", h.cfg.Model.Name,
-		"categories", len(h.cfg.Categories),
-		"default_mute", h.cfg.DefaultMute,
+		"model", h.config().Model.Name,
+		"categories", len(h.config().Categories),
+		"default_mute", h.config().DefaultMute,
 		"report_penalty_seconds", h.ReportPenaltySeconds(),
-		"thinking", h.cfg.Model.Thinking,
-		"max_tokens", h.cfg.Model.MaxTokens,
-		"retries", h.cfg.judgeRetries(),
+		"thinking", h.config().Model.Thinking,
+		"max_tokens", h.config().Model.MaxTokens,
+		"retries", h.config().judgeRetries(),
 		"context", fmt.Sprintf("%d before, %d after, %d minutes",
-			h.cfg.ContextBefore, h.cfg.ContextAfter, h.cfg.ChainMinutes))
+			h.config().ContextBefore, h.config().ContextAfter, h.config().ChainMinutes))
 
 	// The receive setting decides whether this feature can work at all, so it is
 	// read and reported rather than assumed. A group that delivers only mentions

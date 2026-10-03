@@ -92,7 +92,7 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	if len(chain) == 0 {
 		return Verdict{}, fmt.Errorf("%w: nothing to judge", ErrUnjudged)
 	}
-	if strings.TrimSpace(h.cfg.Model.Name) == "" {
+	if strings.TrimSpace(h.config().Model.Name) == "" {
 		return Verdict{}, fmt.Errorf("%w: no model is configured", ErrUnjudged)
 	}
 	categories := h.categoryNames()
@@ -101,19 +101,19 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 			"nothing the model may call a violation", ErrUnjudged)
 	}
 
-	timeout := time.Duration(h.cfg.Model.TimeoutSeconds) * time.Second
+	timeout := time.Duration(h.config().Model.TimeoutSeconds) * time.Second
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleSystem,
 			Content: fmt.Sprintf(judgeSystemPrompt,
-				strings.Join(categories, "、"), h.cfg.allowText(groupOpenID))},
-		{Role: openai.ChatMessageRoleUser, Content: judgeUserMessage(chain, h.cfg.MaxChars)},
+				strings.Join(categories, "、"), h.config().allowText(groupOpenID))},
+		{Role: openai.ChatMessageRoleUser, Content: judgeUserMessage(chain, h.config().MaxChars)},
 	}
 	request := openai.ChatCompletionRequest{
-		Model:       h.cfg.Model.Name,
-		Temperature: h.cfg.Model.Temperature,
+		Model:       h.config().Model.Name,
+		Temperature: h.config().Model.Temperature,
 		Messages:    messages,
 	}
 	// Streaming is configured, not assumed: a verdict is one small object, so the
@@ -123,7 +123,7 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	// arrive, so an answer that could not be read is never held whole. It is kept
 	// because it works, and refused together with thinking, which cannot be sent that
 	// way at all.
-	if h.cfg.Model.Stream {
+	if h.config().Model.Stream {
 		return h.judgeStreaming(callCtx, request, categories)
 	}
 
@@ -133,12 +133,12 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	// never arrived is a different problem, and asking again immediately is not the
 	// answer to it.
 	onceOver := func() (Verdict, error) {
-		if h.cfg.Model.Thinking != "" {
+		if h.config().Model.Thinking != "" {
 			content, reasoning, err := h.ask(callCtx, h.judgeRequest(messages))
 			if err != nil {
 				return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
 			}
-			if h.cfg.Model.Thinking == "show" && strings.TrimSpace(reasoning) != "" {
+			if h.config().Model.Thinking == "show" && strings.TrimSpace(reasoning) != "" {
 				// Kept because a surprising verdict has to be explainable afterwards. It
 				// is never shown to the group: it is free text from a model, and the group
 				// gets the configured category name and nothing else.
@@ -160,7 +160,7 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= h.cfg.judgeRetries()+1; attempt++ {
+	for attempt := 1; attempt <= h.config().judgeRetries()+1; attempt++ {
 		verdict, err := onceOver()
 		if err == nil {
 			if attempt > 1 {
@@ -170,11 +170,11 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 			return verdict, nil
 		}
 		lastErr = err
-		if !errors.Is(err, errUnreadable) || attempt > h.cfg.judgeRetries() {
+		if !errors.Is(err, errUnreadable) || attempt > h.config().judgeRetries() {
 			return Verdict{}, err
 		}
 		h.deps.Logger.Warn("the model's answer could not be read, asking again",
-			"group", groupOpenID, "attempt", attempt, "of", h.cfg.judgeRetries()+1,
+			"group", groupOpenID, "attempt", attempt, "of", h.config().judgeRetries()+1,
 			"error", err)
 		select {
 		case <-callCtx.Done():
@@ -256,7 +256,7 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 		return Verdict{}, fmt.Errorf("%w: the model named %q, which is not a "+
 			"configured category", ErrUnjudged, category)
 	}
-	if payload.Confidence < h.cfg.MinConfidence {
+	if payload.Confidence < h.config().MinConfidence {
 		return Verdict{}, fmt.Errorf("%w: the model was only %.2f sure",
 			ErrUnjudged, payload.Confidence)
 	}
@@ -265,7 +265,7 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 		Recall:     payload.Recall,
 		Reason:     payload.Reason,
 		Confidence: payload.Confidence,
-		Model:      h.cfg.Model.Name,
+		Model:      h.config().Model.Name,
 	}, nil
 }
 
@@ -344,8 +344,8 @@ func fallback(value, whenEmpty string) string {
 
 // categoryNames is the configured categories, in a stable order.
 func (h *handler) categoryNames() []string {
-	names := make([]string, 0, len(h.cfg.Categories))
-	for name := range h.cfg.Categories {
+	names := make([]string, 0, len(h.config().Categories))
+	for name := range h.config().Categories {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -396,12 +396,12 @@ type judgeAnswer struct {
 // judgeRequest turns the configuration and the messages into a request.
 func (h *handler) judgeRequest(messages []openai.ChatCompletionMessage) judgeRequest {
 	request := judgeRequest{
-		Model:           h.cfg.Model.Name,
+		Model:           h.config().Model.Name,
 		Messages:        messages,
-		ReasoningEffort: h.cfg.Model.ReasoningEffort,
-		MaxTokens:       h.cfg.Model.MaxTokens,
+		ReasoningEffort: h.config().Model.ReasoningEffort,
+		MaxTokens:       h.config().Model.MaxTokens,
 	}
-	switch h.cfg.Model.Thinking {
+	switch h.config().Model.Thinking {
 	case "hide", "show":
 		request.Thinking = &judgeThinking{Type: "enabled"}
 	case "off":
@@ -411,7 +411,7 @@ func (h *handler) judgeRequest(messages []openai.ChatCompletionMessage) judgeReq
 		// Temperature means something only without reasoning: the API accepts it in
 		// thinking mode and ignores it, so sending it there would be a setting that
 		// looks applied and is not.
-		temperature := h.cfg.Model.Temperature
+		temperature := h.config().Model.Temperature
 		request.Temperature = &temperature
 	}
 	return request
@@ -426,14 +426,14 @@ func (h *handler) ask(ctx context.Context, request judgeRequest) (string, string
 	if err != nil {
 		return "", "", fmt.Errorf("encoding the judgement: %w", err)
 	}
-	address := strings.TrimSuffix(h.cfg.Model.BaseURL, "/") + "/chat/completions"
+	address := strings.TrimSuffix(h.config().Model.BaseURL, "/") + "/chat/completions"
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, address,
 		bytes.NewReader(body))
 	if err != nil {
 		return "", "", fmt.Errorf("building the judgement request: %w", err)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Authorization", "Bearer "+h.cfg.Model.APIKey)
+	httpRequest.Header.Set("Authorization", "Bearer "+h.config().Model.APIKey)
 
 	response, err := http.DefaultClient.Do(httpRequest)
 	if err != nil {

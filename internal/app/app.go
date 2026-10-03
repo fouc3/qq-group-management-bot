@@ -52,7 +52,8 @@ func NewLogger(cfg config.Log) *slog.Logger {
 // Features are registered before the connection is opened, so no event can
 // arrive before the handlers that should see it exist. Shutdown reverses that
 // order: the connection closes first, then the features release what they hold.
-func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, logger *slog.Logger) error {
+func Run(ctx context.Context, cfg *config.Config, configPath string,
+	registry *feature.Registry, logger *slog.Logger) error {
 	client, err := buildClient(cfg)
 	if err != nil {
 		return err
@@ -116,6 +117,11 @@ func Run(ctx context.Context, cfg *config.Config, registry *feature.Registry, lo
 		closeFeatures(ctx, features, logger)
 		return err
 	}
+
+	// The file is watched from here on: a change is adopted without a restart, and a
+	// change a running bot cannot take is refused whole with the reason. Started after
+	// the wiring above so that nothing can be reconfigured before it is connected.
+	go watchReloads(ctx, configPath, cfg, features, logger)
 	// The blacklist is handed over here as well, before anything is registered,
 	// so no request can arrive while the feature is still on its empty default.
 	for _, instance := range features {

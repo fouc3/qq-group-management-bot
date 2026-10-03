@@ -38,7 +38,7 @@ const (
 // and that message is then judged as its author's own words.
 func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
 	quotedText string) ([]CachedMessage, string, error) {
-	span := time.Duration(h.cfg.ChainMinutes) * time.Minute
+	span := time.Duration(h.config().ChainMinutes) * time.Minute
 
 	if temporaryIndex(quotedIndex) {
 		if window, anchor, err := h.locateWindow(ctx, groupOpenID, quotedText, span); err == nil {
@@ -52,7 +52,7 @@ func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
 	for attempt := 1; attempt <= cacheRetryAttempts; attempt++ {
 		var chain []CachedMessage
 		chain, err = h.cache.Context(ctx, groupOpenID, quotedIndex,
-			h.cfg.ContextBefore, h.cfg.ContextAfter, span)
+			h.config().ContextBefore, h.config().ContextAfter, span)
 		if err == nil {
 			if attempt > 1 {
 				h.deps.Logger.Info("the quoted message arrived while waiting for it",
@@ -98,7 +98,7 @@ func (h *handler) locateWindow(ctx context.Context, groupOpenID, quotedText stri
 		return nil, "", err
 	}
 	chain, err := h.cache.Context(ctx, groupOpenID, located.Idx,
-		h.cfg.ContextBefore, h.cfg.ContextAfter, span)
+		h.config().ContextBefore, h.config().ContextAfter, span)
 	if err != nil {
 		return nil, "", err
 	}
@@ -135,11 +135,11 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: the report does not say "+
 			"which message it is about", ErrUnjudged)
 	}
-	if !h.cfg.JudgingEnabled() {
+	if !h.config().JudgingEnabled() {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: no model is configured, "+
 			"so nothing can be judged", ErrUnjudged)
 	}
-	if !h.cfg.judgingEnabledFor(groupOpenID) {
+	if !h.config().judgingEnabledFor(groupOpenID) {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: judging is turned off "+
 			"for this group", ErrUnjudged)
 	}
@@ -181,7 +181,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	// put beyond judging. There is no sentence somebody can write to become that
 	// account, which is exactly why this one is sound and the content version was
 	// not -- see allowedIn for both attempts at that.
-	if h.cfg.senderExempt(groupOpenID, subject) {
+	if h.config().senderExempt(groupOpenID, subject) {
 		return feature.ModerationVerdict{
 			SubjectOpenID:    subject,
 			QuotedMessageID:  quotedID,
@@ -212,8 +212,8 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 		return report, nil
 	}
 
-	report.Label = h.cfg.LabelFor(verdict.Category)
-	seconds, known := h.cfg.MuteForGroup(groupOpenID, verdict.Category)
+	report.Label = h.config().LabelFor(verdict.Category)
+	seconds, known := h.config().MuteForGroup(groupOpenID, verdict.Category)
 	if !known {
 		// The category came from the configuration's own list, so this cannot
 		// happen in a running bot. Saying so is still better than punishing
