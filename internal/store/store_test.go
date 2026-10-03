@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -314,4 +316,48 @@ func TestMetaRoundTrip(t *testing.T) {
 	if value, _, _ := opened.Meta().Get(ctx, "IMPORTED"); value != "later" {
 		t.Errorf("Get = %q, want the replacement", value)
 	}
+}
+
+// openTestStoreAt builds a database by hand at an older version, with the statements a test
+// gives it, and opens it with this build -- which is what a deployment upgrading from an older
+// release does. The migrations up to that version are the ones this build carries, so the test
+// is against the layout the older build really wrote rather than a guess at it.
+//
+// SQLite only: it is built as a file, and the postgres path is the same code reached through
+// the same migrations.
+func openTestStoreAt(t *testing.T, version int, build string) Store {
+	t.Helper()
+	if dsn := os.Getenv("TEST_PG_DSN"); dsn != "" {
+		t.Skip("a hand-built older database is a file, not a server")
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "older.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+	}
+	for index := 0; index < version; index++ {
+		statements = append(statements, migrations[index])
+	}
+	statements = append(statements,
+		`INSERT INTO meta (key, value) VALUES ('schema_version', '`+strconv.Itoa(version)+`')`,
+		build)
+	for _, statement := range statements {
+		if _, err := raw.ExecContext(ctx, statement); err != nil {
+			raw.Close()
+			t.Fatalf("building a version %d database: %v", version, err)
+		}
+	}
+	raw.Close()
+
+	opened, err := Open(ctx, Config{Driver: "sqlite", DSN: path})
+	if err != nil {
+		t.Fatalf("opening a version %d database: %v", version, err)
+	}
+	t.Cleanup(func() { opened.Close() })
+	return opened
 }

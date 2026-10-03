@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -165,10 +165,8 @@ CREATE INDEX IF NOT EXISTS member_events_by_time ON member_events (event_at);
 	// The content is kept whole. A record that cannot be read back cannot answer what a
 	// group was told, which is most of what an audit is for.
 	//
-	// from_group is written by nobody: a card can only be opened in a single chat, and
-	// the column was added before that was settled. It stays with its default rather
-	// than being dropped, because a migration that removes a column is a migration that
-	// can lose data on somebody else's database.
+	// from_group is written by nobody: a card can only be opened in a single chat, and the
+	// column was added before that was settled. The whole table is replaced by migration 7.
 	`
 CREATE TABLE IF NOT EXISTS broadcasts (
     token          TEXT   NOT NULL,
@@ -183,6 +181,44 @@ CREATE TABLE IF NOT EXISTS broadcasts (
     PRIMARY KEY (token, group_openid)
 );
 CREATE INDEX IF NOT EXISTS broadcasts_by_group ON broadcasts (group_openid, sent_at);
+`,
+	// 7: one row per broadcast, and where it went in a table of its own.
+	//
+	// One notice is one act by one member, and it can reach several groups at once: written
+	// as one row per group, the record answered "who sent this here" out of as many copies of
+	// the same sentence, and nothing said that they were the same notice or that it had also
+	// gone somewhere else. The token is the identity now, the groups are the targets, and the
+	// targets are what an audit asks about -- "what reached this group" -- rather than the
+	// notices themselves.
+	//
+	// The rows that are already there are moved rather than dropped: each group's copy
+	// becomes a target of the one notice it was a copy of, and the flags and the text are
+	// taken from it. sent_at is the earliest of them, which is when the notice went out.
+	`
+ALTER TABLE broadcasts RENAME TO broadcasts_per_group;
+CREATE TABLE IF NOT EXISTS broadcasts (
+    token         TEXT   PRIMARY KEY,
+    sender_openid TEXT   NOT NULL,
+    anonymous     BIGINT NOT NULL DEFAULT 0,
+    markdown      BIGINT NOT NULL DEFAULT 0,
+    content       TEXT   NOT NULL,
+    sent_at       BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broadcast_targets (
+    token        TEXT   NOT NULL,
+    group_openid TEXT   NOT NULL,
+    message_id   TEXT   NOT NULL DEFAULT '',
+    position     BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (token, group_openid)
+);
+CREATE INDEX IF NOT EXISTS targets_by_group ON broadcast_targets (group_openid, token);
+INSERT INTO broadcasts (token, sender_openid, anonymous, markdown, content, sent_at)
+    SELECT token, max(sender_openid), max(anonymous), max(markdown), max(content), min(sent_at)
+    FROM broadcasts_per_group
+    GROUP BY token;
+INSERT INTO broadcast_targets (token, group_openid, message_id, position)
+    SELECT token, group_openid, message_id, 0 FROM broadcasts_per_group;
+DROP TABLE broadcasts_per_group;
 `,
 }
 

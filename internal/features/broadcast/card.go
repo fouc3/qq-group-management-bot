@@ -274,25 +274,30 @@ func displayName(group groupChoice) string {
 
 // broadcastText is the message the groups will see.
 //
-// It is built from the same switches the card shows, and the preview is this function's
-// own answer: what the writer approves is the message, not a description of one. That
-// includes the disclaimer at the end of it, which is a line of the message rather than
-// something added on the way out: what the writer looks at has to be what a group reads.
-func (h *handler) broadcastText(s *session) string {
+// It is built from the same switches the card shows, and the preview is this function's own
+// answer: what the writer approves is the message, not a description of one. That includes
+// the disclaimer at the end of it, which is a line of the message rather than something added
+// on the way out.
+//
+// forGroups is which of the two places it is being written for, because one line of it cannot
+// be the same in both: the platform's mention tag names a member in a group and a single chat
+// refuses a message carrying one whole (40034106, measured), so the preview of a署名 notice
+// says "你" where the notice says their name.
+func (h *handler) broadcastText(s *session, forGroups bool) string {
 	header := "来自管理员的广播"
 	if s.anonymous == off {
-		header = "来自 <@" + s.chat + "> 的广播"
+		header = "来自 " + namedIn(s.chat, forGroups) + " 的广播"
 	}
 	notice, divider := "", ""
 	if s.markdown == on {
-		// Rendered as markdown, so the header is bold and the divider is the rule the
-		// platform draws -- with a blank line in front of it.
+		// Rendered as markdown, so the header is bold and the divider is the rule the platform
+		// draws -- with a blank line in front of it.
 		//
 		// Both of those are load-bearing, and both were measured in a group rather than
 		// reasoned about: a rule on the line straight under the header is a setext heading
-		// underline, which made the header a big title and drew no divider at all. The
-		// blank line is what makes it a divider instead, and the bold is what keeps the
-		// header reading as one.
+		// underline, which made the header a big title and drew no divider at all. The blank
+		// line is what makes it a divider instead, and the bold is what keeps the header
+		// reading as one.
 		notice, divider = "**"+header+"**\n\n"+markdownRule+"\n"+s.content, markdownRule
 	} else {
 		// Taken literally, so the header stays plain and the divider is characters: the
@@ -300,9 +305,21 @@ func (h *handler) broadcastText(s *session) string {
 		notice, divider = header+"\n"+plainDivider+"\n"+escapeMarkdown(s.content), plainDivider
 	}
 	// The body is the writer's text, and this bot is carrying it: who wrote it and who is
-	// answerable for it are not the same thing, and the message goes out under the bot's
-	// name.
+	// answerable for it are not the same thing, and the message goes out under the bot's name.
 	return disclaimer.After(notice, divider)
+}
+
+// namedIn is how a member is written into a message, which depends on where it is going.
+//
+// In a group the platform's mention tag is what renders as their name, and it is the only
+// spelling that does: written as plain text it is a string of characters nobody can read,
+// which is a署名 notice that looks anonymous. A single chat is the other way round -- it
+// refuses the tag whole -- so the preview of one says "你", which is who reads it.
+func namedIn(openID string, forGroups bool) string {
+	if forGroups {
+		return `<qqbot-at-user id="` + openID + `" />`
+	}
+	return "你"
 }
 
 // escapeMarkdown takes the meaning out of the text.

@@ -25,12 +25,11 @@ func (p *platform) record(t *testing.T, content string) {
 	entry := store.Broadcast{
 		Token:        "TOKEN-" + content,
 		SenderOpenID: theAdmin,
-		GroupOpenID:  hereGroup,
 		Anonymous:    true,
 		Markdown:     true,
 		Content:      content,
 		SentAt:       time.Now().Unix() + int64(p.recorded),
-		MessageID:    "MESSAGE-" + content,
+		Targets:      []store.Target{{GroupOpenID: hereGroup, MessageID: "MESSAGE-" + content}},
 	}
 	if err := p.store.Broadcasts().Record(context.Background(), entry); err != nil {
 		t.Fatalf("recording %q: %v", content, err)
@@ -93,11 +92,21 @@ func TestTheRecordTurnsOnePageAtATime(t *testing.T) {
 	p.askPrivately(t, theAdmin)
 
 	first := p.lastText()
-	if !strings.Contains(first, "第 1/2 页") || !strings.Contains(first, "共 7 条") {
-		t.Errorf("the first page does not say where it is:\n%s", first)
+	// The header, in the order it is read: what the record covers and how much of it there is,
+	// then where in it the reader is. The stand-in administrator answers for all three groups
+	// the feature is configured with.
+	if !strings.Contains(first, "（你管理的 3 个群，共 7 条）第 1 页 / 共 2 页") {
+		t.Errorf("the first page does not say what it covers and where it is:\n%s", first)
 	}
 	if !strings.Contains(first, "七") || !strings.Contains(first, "三") {
 		t.Errorf("the first page does not start at the newest:\n%s", first)
+	}
+	// Each line names the group the notice went to rather than its openid.
+	if !strings.Contains(first, "群-HERE") {
+		t.Errorf("the record does not name the group it is about:\n%s", first)
+	}
+	if strings.Contains(first, hereGroup) {
+		t.Errorf("the record shows a group by its openid:\n%s", first)
 	}
 	// Five of the seven: the two oldest are on the next page.
 	for _, absent := range []string{"\n   一\n", "\n   二\n"} {
@@ -114,7 +123,7 @@ func TestTheRecordTurnsOnePageAtATime(t *testing.T) {
 	p.press(t, "下一页", theAdmin)
 
 	second := p.lastText()
-	if !strings.Contains(second, "第 2/2 页") {
+	if !strings.Contains(second, "第 2 页 / 共 2 页") {
 		t.Errorf("the second page does not say where it is:\n%s", second)
 	}
 	if !strings.Contains(second, "二") || !strings.Contains(second, "一") {
@@ -129,7 +138,7 @@ func TestTheRecordTurnsOnePageAtATime(t *testing.T) {
 
 	// And back: a page turned twice is a page read twice.
 	p.press(t, "上一页", theAdmin)
-	if back := p.lastText(); !strings.Contains(back, "第 1/2 页") {
+	if back := p.lastText(); !strings.Contains(back, "第 1 页 / 共 2 页") {
 		t.Errorf("turning back does not show the first page:\n%s", back)
 	}
 }

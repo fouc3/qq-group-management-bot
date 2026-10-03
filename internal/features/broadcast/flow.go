@@ -328,7 +328,14 @@ func (h *handler) waitingIn(chat string) *session {
 
 // showPreview shows the broadcast as the groups will read it, and asks to send it.
 func (h *handler) showPreview(ctx context.Context, s *session) error {
-	lines := []string{"**预览**（按“发送”就会发出去）", "", h.broadcastText(s)}
+	// The one line of it that cannot be the same as the notice is said here rather than left
+	// to be discovered: a single chat does not accept a mention, so a署名 notice previews as
+	// "来自你" and reaches the groups as the writer's own name.
+	note := "**预览**（按“发送”就会发出去）"
+	if s.anonymous == off {
+		note = "**预览**（按“发送”就会发出去；群里看到的是你的名字）"
+	}
+	lines := []string{note, "", h.broadcastText(s, false)}
 	// Sent as a message of its own rather than as an answer to something: the text being
 	// previewed came in as an ordinary message, and the preview is what the groups will
 	// read rather than a reply to the writer.
@@ -382,9 +389,12 @@ func (h *handler) deliver(ctx context.Context, s *session, press command.Press) 
 	if strings.TrimSpace(s.content) == "" {
 		return h.answerWith(press, qqbotsdk.InteractionCodeFailed, "还没有写广播内容。")
 	}
-	text := h.broadcastText(s)
+	// Written for a group, which is where it is going: a署名 notice names its writer with the
+	// platform's mention tag there, and the preview showed "你" in its place.
+	text := h.broadcastText(s, true)
 
 	var sent, refused []string
+	var reached []store.Target
 	for _, groupOpenID := range s.selectedGroups() {
 		// Who may broadcast into a group is asked per group, here rather than when the
 		// card was opened: a single chat has no administrator list of its own, and being
@@ -406,11 +416,20 @@ func (h *handler) deliver(ctx context.Context, s *session, press command.Press) 
 			refused = append(refused, h.callOf(s, groupOpenID)+"（平台拒绝了发送）")
 			continue
 		}
+		messageID := ""
+		if response != nil {
+			messageID = response.ID
+		}
 		sent = append(sent, groupOpenID)
-		h.deposit(ctx, s, groupOpenID, response)
+		reached = append(reached, store.Target{GroupOpenID: groupOpenID, MessageID: messageID})
 		h.logger(groupOpenID).Info("a broadcast was posted", "member", s.chat,
 			"token", s.token, "anonymous", s.anonymous == on, "markdown", s.markdown == on)
 	}
+
+	// One record for the one act it was, with every group it reached: written group by group,
+	// "who sent this here" would be answered out of as many copies of the same sentence, and
+	// nothing would say they were the same notice.
+	h.deposit(ctx, s, reached)
 
 	h.forget(s)
 	h.recallCards(ctx, s)
@@ -426,40 +445,47 @@ func (h *handler) deliver(ctx context.Context, s *session, press command.Press) 
 		"已发出 "+strconv.Itoa(len(sent))+" 个群。")
 }
 
-// deposit writes down what went out and who asked for it.
+// deposit writes down what went out, where it went, and who asked for it.
 //
-// A failure is loud rather than quiet: the group is not told who asked, so this record is
-// the only thing that makes the notice answerable, and losing it is losing the audit. The
-// message has already gone out by the time this runs -- a notice is not taken back for the
-// sake of its record -- but nobody can claim afterwards that it was.
-func (h *handler) deposit(ctx context.Context, s *session, groupOpenID string,
-	sent *qqbotsdk.MessageResponse) {
-	if h.deps.Store == nil {
-		h.logger(groupOpenID).Warn("no data layer, so this broadcast is recorded "+
-			"nowhere but the journal", "token", s.token, "member", s.chat)
+// One record for the one act, however many groups it reached: a notice that went to three
+// groups is one thing somebody decided to do, and a record that split it into three would
+// have to be joined back together by whoever reads it.
+//
+// A failure is loud rather than quiet: the group is not told who asked, so this record is the
+// only thing that makes the notice answerable, and losing it is losing the audit. The message
+// has already gone out by the time this runs -- a notice is not taken back for the sake of its
+// record -- but nobody can claim afterwards that it was.
+func (h *handler) deposit(ctx context.Context, s *session, reached []store.Target) {
+	if len(reached) == 0 {
+		// Nothing was posted, so there is nothing to account for: a record of a notice that
+		// reached no group would be a record of nothing.
 		return
 	}
-	messageID := ""
-	if sent != nil {
-		messageID = sent.ID
+	if h.deps.Store == nil {
+		h.logger(s.chat).Warn("no data layer, so this broadcast is recorded nowhere but "+
+			"the journal", "token", s.token, "member", s.chat)
+		return
 	}
 	err := h.deps.Store.Broadcasts().Record(ctx, store.Broadcast{
 		Token:        s.token,
 		SenderOpenID: s.chat,
-		GroupOpenID:  groupOpenID,
 		Anonymous:    s.anonymous == on,
 		Markdown:     s.markdown == on,
 		Content:      s.content,
 		SentAt:       time.Now().Unix(),
-		MessageID:    messageID,
+		Targets:      reached,
 	})
 	if err != nil {
-		h.logger(groupOpenID).Error("a broadcast was posted and could not be "+
-			"recorded", "error", err, "token", s.token, "member", s.chat)
+		h.logger(s.chat).Error("a broadcast was posted and could not be recorded",
+			"error", err, "token", s.token, "member", s.chat)
 		return
 	}
-	h.logger(groupOpenID).Info("a broadcast was recorded", "token", s.token,
-		"member", s.chat)
+	groups := make([]string, 0, len(reached))
+	for _, target := range reached {
+		groups = append(groups, target.GroupOpenID)
+	}
+	h.deps.Logger.Info("a broadcast was recorded", "token", s.token, "member", s.chat,
+		"groups", groupLogLine(groups))
 }
 
 // adminsOf reports whether this member administers this group.

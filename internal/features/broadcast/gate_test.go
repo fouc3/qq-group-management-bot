@@ -234,10 +234,17 @@ func TestTheAuditShowsOnlyYourOwnGroups(t *testing.T) {
 	if !strings.Contains(said, "你管理的 1 个群") {
 		t.Errorf("the audit does not say what it covers:\n%s", said)
 	}
-	if !strings.Contains(said, otherGroup) {
+	// Named rather than identified: an openid is not something a person can read, and which
+	// group a notice went to is half of what the record is for.
+	if !strings.Contains(said, "群-OTHER") {
 		t.Errorf("the audit does not name the group it is about:\n%s", said)
 	}
-	if strings.Contains(said, hereGroup) {
+	for _, id := range []string{hereGroup, otherGroup, thirdGroup} {
+		if strings.Contains(said, id) {
+			t.Errorf("the audit shows a group by its openid (%s):\n%s", id, said)
+		}
+	}
+	if strings.Contains(said, "群-HERE") {
 		t.Errorf("the audit shows a group this member does not administer:\n%s", said)
 	}
 }

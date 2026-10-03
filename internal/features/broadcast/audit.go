@@ -3,7 +3,6 @@ package broadcast
 import (
 	"context"
 	"errors"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 
 	"github.com/fouc3/qq-group-management-bot/internal/command"
+	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/disclaimer"
 	"github.com/fouc3/qq-group-management-bot/internal/messaging"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
@@ -182,7 +182,7 @@ func (h *handler) showRecord(ctx context.Context, p pager, page int, replyTo str
 	}
 
 	message := messaging.Message{
-		Text:     auditText(posted, page, pages, p.groupOpenID == "", p.covers(len(groups))),
+		Text:     h.auditText(ctx, p, posted, page, pages),
 		Keyboard: pageKeyboard(p, page, pages),
 	}
 	if p.token == "" {
@@ -326,7 +326,12 @@ func pageKeyboard(p pager, page, pages int) *qqbotsdk.Keyboard {
 //
 // The disclaimer is at the end of it because the page quotes what somebody else wrote: the
 // record says who asked for a notice, and the notice's own first line is theirs.
-func auditText(posted []store.Broadcast, page, pages int, withGroup bool, covers string) string {
+//
+// Every group is named rather than identified: an openid is not something a person can read,
+// and "which group" is half of what the record is for. Names come from the platform and are
+// read once per page, with the same budget the card's group list uses.
+func (h *handler) auditText(ctx context.Context, p pager, posted []store.Broadcast, page,
+	pages int) string {
 	start := (page - 1) * auditPageSize
 	end := start + auditPageSize
 	if start > len(posted) {
@@ -337,8 +342,8 @@ func auditText(posted []store.Broadcast, page, pages int, withGroup bool, covers
 	}
 
 	lines := []string{
-		"**广播记录**（" + covers + " · 第 " + strconv.Itoa(page) + "/" + strconv.Itoa(pages) +
-			" 页 · 共 " + strconv.Itoa(len(posted)) + " 条）",
+		"**广播记录**（" + p.covers(len(h.recordGroups(p))) + "，共 " + strconv.Itoa(len(posted)) +
+			" 条）第 " + strconv.Itoa(page) + " 页 / 共 " + strconv.Itoa(pages) + " 页",
 		"",
 	}
 	if len(posted) == 0 {
@@ -350,38 +355,78 @@ func auditText(posted []store.Broadcast, page, pages int, withGroup bool, covers
 		if !entry.Anonymous {
 			how = "署名发出"
 		}
-		where := ""
-		if withGroup {
-			where = " · " + entry.GroupOpenID
-		}
 		lines = append(lines,
-			strconv.Itoa(start+index+1)+". "+when+where+" · "+how+" · 发起人 `"+
-				entry.SenderOpenID+"`",
+			strconv.Itoa(start+index+1)+". "+when+" · "+strings.Join(h.targetNames(ctx, p, entry), "、")+
+				" · "+how+" · 发起人 `"+entry.SenderOpenID+"`",
 			"   "+firstLine(entry.Content, auditLineLimit))
 	}
 	return disclaimer.After(strings.Join(lines, "\n"), markdownRule)
 }
 
-// records reads the newest broadcasts of these groups, newest first across all of them.
+// targetNames are the groups a notice reached that this reading is allowed to name.
+//
+// Only the ones it covers: a notice can reach several groups, and which other groups the bot
+// was asked to post in is not what somebody answering for theirs is reading the record for.
+func (h *handler) targetNames(ctx context.Context, p pager, entry store.Broadcast) []string {
+	mine := map[string]bool{}
+	for _, groupOpenID := range h.recordGroups(p) {
+		mine[groupOpenID] = true
+	}
+	var names []string
+	for _, target := range entry.Targets {
+		if !mine[target.GroupOpenID] {
+			continue
+		}
+		names = append(names, h.callOfGroup(ctx, target.GroupOpenID))
+	}
+	if len(names) == 0 {
+		// A record whose targets are all somewhere else, which a group's own reading cannot
+		// see. Said rather than left blank, so that the line does not look truncated.
+		return []string{"本群之外的群"}
+	}
+	return names
+}
+
+// nameOf is one group's name, read from the platform, or an empty one when it will not say.
+//
+// Under the same budget the card's group list uses: a record is a message somebody is waiting
+// for, and a group that does not answer must not hold it up.
+func (h *handler) nameOf(ctx context.Context, group config.Group) groupChoice {
+	named, cancel := context.WithTimeout(ctx, namingBudget)
+	defer cancel()
+
+	choice := groupChoice{openID: group.OpenID}
+	info, err := h.deps.Client.GetGroupInfo(named, group.OpenID)
+	if err != nil {
+		h.logger(group.OpenID).Debug("a group's name could not be read, so it is called "+
+			"by its id", "error", err)
+		return choice
+	}
+	choice.name = info.GroupName
+	return choice
+}
+
+// callOfGroup is what a group is called in a record: its name, or the openid when the platform
+// will not say.
+func (h *handler) callOfGroup(ctx context.Context, groupOpenID string) string {
+	for _, group := range h.deps.Groups {
+		if group.OpenID == groupOpenID {
+			return displayName(h.nameOf(ctx, group))
+		}
+	}
+	// A group that reached this record and is not in the configuration any more: named by what
+	// is left of it rather than left out, because the line is about where a notice went.
+	return displayName(groupChoice{openID: groupOpenID})
+}
+
+// records reads the newest broadcasts that reached any of these groups, newest first.
 func (h *handler) records(ctx context.Context, groups []string, limit int) ([]store.Broadcast, error) {
 	if h.deps.Store == nil {
 		return nil, errors.New("no data layer")
 	}
-	var posted []store.Broadcast
-	for _, groupOpenID := range groups {
-		found, err := h.deps.Store.Broadcasts().ListByGroup(ctx, groupOpenID, limit)
-		if err != nil {
-			return nil, err
-		}
-		posted = append(posted, found...)
-	}
-	sort.SliceStable(posted, func(first, second int) bool {
-		return posted[first].SentAt > posted[second].SentAt
-	})
-	if len(posted) > limit {
-		posted = posted[:limit]
-	}
-	return posted, nil
+	// Asked of the store once for all of them rather than once per group: a notice that
+	// reached two of these groups is one record, and asking per group would return it twice.
+	return h.deps.Store.Broadcasts().ListByGroups(ctx, groups, limit)
 }
 
 // newTokenOrNothing is a page's token, or empty when one cannot be made.

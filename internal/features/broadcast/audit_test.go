@@ -22,13 +22,13 @@ func broadcastOnce(t *testing.T, p *platform, text string) {
 	p.press(t, "发送", theAdmin)
 }
 
-// TestThePostingIsRecorded covers the record that makes an anonymous notice answerable:
-// the group is not told who asked, and the data layer is where that is kept.
+// TestThePostingIsRecorded covers the record that makes an anonymous notice answerable: the
+// group is not told who asked, and the data layer is where that is kept.
 func TestThePostingIsRecorded(t *testing.T) {
 	p := newPlatform(t)
 	broadcastOnce(t, p, "第一行\n第二行")
 
-	posted, err := p.store.Broadcasts().ListByGroup(context.Background(), hereGroup, 10)
+	posted, err := p.store.Broadcasts().ListByGroups(context.Background(), []string{hereGroup}, 10)
 	if err != nil {
 		t.Fatalf("reading the record: %v", err)
 	}
@@ -39,8 +39,11 @@ func TestThePostingIsRecorded(t *testing.T) {
 	if entry.SenderOpenID != theAdmin {
 		t.Errorf("sender = %q, want the member who asked", entry.SenderOpenID)
 	}
-	if entry.GroupOpenID != hereGroup {
-		t.Errorf("group = %q, want the group this row is about", entry.GroupOpenID)
+	if len(entry.Targets) != 1 || entry.Targets[0].GroupOpenID != hereGroup {
+		t.Errorf("the notice reached %+v, want the group it was sent to", entry.Targets)
+	}
+	if entry.Targets[0].MessageID == "" {
+		t.Error("the record does not say which message it was")
 	}
 	if !entry.Anonymous || !entry.Markdown {
 		t.Errorf("the switches were not recorded: %+v", entry)
@@ -48,17 +51,17 @@ func TestThePostingIsRecorded(t *testing.T) {
 	if entry.Content != "第一行\n第二行" {
 		t.Errorf("content = %q, want what was written", entry.Content)
 	}
-	if entry.MessageID == "" {
-		t.Error("the record does not say which message it was")
-	}
 	if entry.Token == "" {
 		t.Error("the record does not say which card it came from")
 	}
 }
 
-// TestTheRecordIsKeptPerGroup covers what an audit asks group by group: one broadcast
-// into two groups is two answers, not one.
-func TestTheRecordIsKeptPerGroup(t *testing.T) {
+// TestOneNoticeToTwoGroupsIsOneRecord covers what "one broadcast" means in the record.
+//
+// It is one act by one member that reached two groups, so it is one row with two targets: a
+// row per group would answer "who sent this here" out of two copies of the same sentence, and
+// nothing would say the groups got the same notice.
+func TestOneNoticeToTwoGroupsIsOneRecord(t *testing.T) {
 	p := newPlatform(t)
 	p.start(t, theAdmin)
 	p.choose(t, true, true)
@@ -69,13 +72,26 @@ func TestTheRecordIsKeptPerGroup(t *testing.T) {
 	p.press(t, "发送", theAdmin)
 
 	for _, group := range []string{hereGroup, otherGroup} {
-		posted, err := p.store.Broadcasts().ListByGroup(context.Background(), group, 10)
+		posted, err := p.store.Broadcasts().ListByGroups(context.Background(), []string{group}, 10)
 		if err != nil {
 			t.Fatalf("reading %s: %v", group, err)
 		}
 		if len(posted) != 1 {
-			t.Errorf("%s has %d record(s), want its own copy", group, len(posted))
+			t.Fatalf("%s reads %d record(s), want the one notice", group, len(posted))
 		}
+		if len(posted[0].Targets) != 2 {
+			t.Errorf("the notice is recorded with %d target(s), want both groups: %+v",
+				len(posted[0].Targets), posted[0].Targets)
+		}
+	}
+	// And asked about both groups at once, it is still one answer.
+	both, err := p.store.Broadcasts().ListByGroups(context.Background(),
+		[]string{hereGroup, otherGroup}, 10)
+	if err != nil {
+		t.Fatalf("reading both: %v", err)
+	}
+	if len(both) != 1 {
+		t.Errorf("a notice in two of these groups counts %d time(s), want once", len(both))
 	}
 }
 
@@ -148,7 +164,8 @@ func TestABroadcastWithNoRecordIsLoudAboutIt(t *testing.T) {
 	p.handler.deps.Store = nil
 	broadcastOnce(t, p, "没有数据层")
 
-	if posted, err := p.store.Broadcasts().ListByGroup(context.Background(), hereGroup, 10); err != nil {
+	if posted, err := p.store.Broadcasts().ListByGroups(context.Background(),
+		[]string{hereGroup}, 10); err != nil {
 		t.Fatalf("reading the record: %v", err)
 	} else if len(posted) != 0 {
 		t.Errorf("something was recorded with no data layer: %+v", posted)

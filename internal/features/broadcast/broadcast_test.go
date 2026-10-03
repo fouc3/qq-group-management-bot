@@ -181,7 +181,11 @@ func TestTheHeaderSaysWhoAsked(t *testing.T) {
 	if len(posted) != 1 {
 		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
 	}
-	if !strings.Contains(posted[0], "来自 <@"+theAdmin+"> 的广播") {
+	// The platform's own mention tag, which is the only spelling that renders as the member's
+	// name in a group. Written as plain text it is a string of characters nobody can read,
+	// which is a署名 notice that reads exactly like an anonymous one.
+	want := `<qqbot-at-user id="` + theAdmin + `" />`
+	if !strings.Contains(posted[0], "来自 "+want+" 的广播") {
 		t.Errorf("with the switch off the group should be told who asked:\n%s", posted[0])
 	}
 }
