@@ -786,12 +786,15 @@ func (h *handler) whoisCommand(ctx context.Context, data *qqbotsdk.GroupMessageC
 
 // privateWhois answers /whois in a single chat.
 //
-// There is no group to describe there, and what a single chat is good for is the one
-// identifier a group's own event never carries: the openid this member has in a private
-// conversation, which is a different value from the member_openid their group knows them
-// by. Whoever has to be named in a configuration that is read in private needs this one
-// and has no other way to read it -- the broadcast trial's whitelist is the case that
-// asked for this.
+// There is no group to describe there, so it reports the one identifier that is
+// always about the asker: their own openid. It was added on the belief that a
+// single chat carries a different value from the one a group event carries, and
+// that belief is wrong -- measured on this application, the same person reads the
+// same value in both places, and the reply used to say otherwise.
+//
+// What it is still for is reading that value without a group. Somebody who has to
+// be put on a list before they say anything in a group has no other way to find
+// out what to write there.
 //
 // It answers for anybody, and says only what the asker already owns: their own openid.
 // Refusing it to somebody the bot cannot place would make the one value they need
@@ -800,10 +803,10 @@ func (h *handler) privateWhois(ctx context.Context, data *qqbotsdk.C2CMessageCre
 	_ command.Parsed) error {
 	lines := []string{
 		"**私聊**",
-		"你的 user_openid：`" + data.Author.UserOpenID + "`",
+		"你的 openid：`" + data.Author.UserOpenID + "`",
 		"",
-		"这是你在私聊里的 openid。你在群里被认出的 member_openid 是另一个值，" +
-			"两个不能互换：填只在私聊生效的配置（比如广播内测名单）用上面这个。",
+		"这就是你在群里被认出的那个 member_openid —— 两个场景取到的是同一个值。" +
+			"群的管理员名单、以及私聊用的名单（比如广播内测名单）里填的都是它。",
 	}
 	h.replyPrivately(ctx, data, strings.Join(lines, "\n"))
 	return nil

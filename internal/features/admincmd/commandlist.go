@@ -74,7 +74,7 @@ func (h *handler) commandDefs() []command.Def {
 		{
 			Name: "whois",
 			Usage: "{prefix}whois —— 查看本群与成员的 openid（用于填配置）；" +
-				"私聊里用则显示你自己的 user_openid",
+				"私聊里用则显示你自己的 openid",
 			Desc: "查看本群与成员 openid",
 			// The one command answered in a group the bot's own list does not
 			// name yet: running it there is how a group's openid is discovered,
@@ -82,14 +82,14 @@ func (h *handler) commandDefs() []command.Def {
 			Audience:            command.Whois,
 			InUnconfiguredGroup: true,
 			// Both panels, like every other command that is worth offering: a single chat
-			// is where somebody reads their own user_openid, and a command that is only in
+			// is where somebody reads their own openid, and a command that is only in
 			// the help is one they have to be told about first.
 			Panels: bothPanels(),
 			Run:    h.whoisCommand,
-			// A single chat has no group to describe, but it is the only place the
-			// openid that works in one can be read: the two are different values, and a
-			// configuration read in private is written with the private one.
-			PrivateUsage: "{prefix}whois —— 查看你自己的 user_openid（私聊里用）",
+			// A single chat has no group to describe, but it is where somebody can
+			// read their own openid before they have said anything in a group. It is
+			// the same value a group event carries, so one list entry serves both.
+			PrivateUsage: "{prefix}whois —— 查看你自己的 openid（私聊里用）",
 			Private:      h.privateWhois,
 		},
 		{
