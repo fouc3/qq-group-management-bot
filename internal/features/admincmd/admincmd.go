@@ -1056,6 +1056,20 @@ func (h *handler) replyPrivately(ctx context.Context, data *qqbotsdk.C2CMessageC
 	}
 }
 
+// replyPrivatelyWithKeyboard is the same with buttons under the answer.
+//
+// A keyboard in a single chat is a real thing, not a hopeful one: it is what the
+// SDK's own production test uses to get a button clicked, and the click comes back
+// as an interaction with the c2c scene.
+func (h *handler) replyPrivatelyWithKeyboard(ctx context.Context,
+	data *qqbotsdk.C2CMessageCreateData, text string, keyboard *qqbotsdk.Keyboard) {
+	if _, err := h.sendPrivateMessageWithKeyboard(ctx, data.Author.UserOpenID, text,
+		data.ID, keyboard); err != nil {
+		h.deps.Logger.Warn("could not answer a private command",
+			"member", data.Author.UserOpenID, "error", err)
+	}
+}
+
 // parsedCommand is one recognised command.
 type parsedCommand struct {
 	// name is the command word, as written.

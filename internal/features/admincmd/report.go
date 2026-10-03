@@ -110,9 +110,16 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	if err != nil {
 		// No judgement is not a clean verdict: nobody is touched, and the group is
 		// told why rather than left wondering.
+		//
+		// The receipt goes on anyway. A judgement that could not be reached is
+		// recorded too -- "nobody looked" and "nothing was found" are different
+		// facts -- and the number is the only way an administrator can find out
+		// afterwards which of the two happened and why.
 		h.deps.Logger.Warn("could not judge a reported message",
-			"group", groupOpenID, "reporter", reporter, "error", err)
-		h.sayInGroup(ctx, groupOpenID, "送检失败，未采取任何处理。")
+			"group", groupOpenID, "reporter", reporter, "error", err,
+			"receipt", verdict.JudgementID)
+		h.sayInGroup(ctx, groupOpenID,
+			"送检失败，未采取任何处理。"+h.receiptSentence(verdict.JudgementID))
 		return
 	}
 
@@ -154,7 +161,8 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		recallReason = "未发现违规，未执行撤回"
 		penalty := h.moderation.ReportPenaltySeconds()
 		if penalty <= 0 || h.moderation.DryRun() {
-			h.sayInGroup(ctx, groupOpenID, "未发现违规，未采取任何处理。")
+			h.sayInGroup(ctx, groupOpenID,
+				"未发现违规，未采取任何处理。"+h.receiptSentence(verdict.JudgementID))
 			return
 		}
 		duration := time.Duration(penalty) * time.Second
@@ -168,14 +176,14 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 			// platform's rule and not a failure to report.
 			h.sayInGroup(ctx, groupOpenID, fmt.Sprintf(
 				"未发现违规。本应禁言举报者 %d 秒，但未执行：%s。",
-				penalty, shortReason(err)))
+				penalty, shortReason(err))+h.receiptSentence(verdict.JudgementID))
 			return
 		}
 		action, muteSeconds = "report_penalty", penalty
 		h.deps.Logger.Info("a report found nothing, so the reporter was silenced",
 			"group", groupOpenID, "reporter", reporter, "seconds", penalty)
 		h.sayInGroup(ctx, groupOpenID, "未发现违规。举报前请自行确认，已禁言举报者 "+
-			humanDuration(duration)+"。")
+			humanDuration(duration)+"。"+h.receiptSentence(verdict.JudgementID))
 		return
 	}
 	if h.moderation.DryRun() {

@@ -323,15 +323,47 @@ func TestAReceiptIsReadInPrivate(t *testing.T) {
 	if reply == "" {
 		t.Fatal("the private command was not answered")
 	}
-	for _, want := range []string{
-		entry.Reason, entry.Reasoning, "本站价目", "已撤回 2 条消息",
-	} {
-		if !strings.Contains(reply, want) {
-			t.Errorf("the private receipt is missing %q:\n%s", want, reply)
+	// The same two layers as a group: the summary, and the details behind the
+	// button rather than in the same message.
+	if !strings.Contains(reply, "违规回执 "+entry.ID) {
+		t.Fatalf("reply = %q, want the summary", reply)
+	}
+	for _, forbidden := range []string{entry.Reason, entry.Reasoning, "本站价目"} {
+		if strings.Contains(reply, forbidden) {
+			t.Errorf("the private summary leaks %q:\n%s", forbidden, reply)
 		}
+	}
+	if data := h.buttonOf(); data != receiptDetailPrefix+entry.ID {
+		t.Fatalf("button data = %q, want the details button", data)
+	}
+	// A single chat has no administrators for the platform to grey the button out
+	// for, so it is shown to the one reader and the handler is what decides.
+	if permission := h.buttonPermissionOf(); permission != float64(qqbotsdk.PermissionTypeEveryone) {
+		t.Errorf("permission = %v, want the button pressable in a single chat", permission)
 	}
 	// The answer goes into the single chat and nowhere else: a receipt in the
 	// group would publish exactly what this path exists to keep quiet.
+	if h.groupReplies() != 0 {
+		t.Errorf("%d messages reached a group, want none", h.groupReplies())
+	}
+
+	// Pressing it sends the details into the single chat, with no button of their
+	// own: there is nobody to hide them from, and nothing to take back.
+	h.pressPrivate("INTERACTION-1", receiptDetailPrefix+entry.ID, testAdmin)
+	if code, ok := h.lastAnswer(); !ok || code != float64(qqbotsdk.InteractionCodeSuccess) {
+		t.Fatalf("answer = %v, want success", code)
+	}
+	details := h.lastPrivateReply()
+	for _, want := range []string{
+		entry.Reason, entry.Reasoning, "本站价目", "已撤回 1 条，未撤回 1 条",
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("the private details are missing %q:\n%s", want, details)
+		}
+	}
+	if h.lastMessageCarriedKeyboard() {
+		t.Error("the private details carry a keyboard, which only a group's may")
+	}
 	if h.groupReplies() != 0 {
 		t.Errorf("%d messages reached a group, want none", h.groupReplies())
 	}
@@ -342,7 +374,7 @@ func TestAReceiptIsReadInPrivate(t *testing.T) {
 //
 // Everybody may read the summary, here as in a group; the model's words are for
 // the administrator of the group the record belongs to. Being an administrator of
-// some other group is not enough, and the answer says the same thing either way,
+// some other group is not enough, and the refusal says the same thing either way,
 // because a different one would say which group the record belongs to.
 func TestAPrivateReceiptShowsDetailsOnlyToItsOwnAdministrator(t *testing.T) {
 	entry := aJudgement("a1b2c3d4e5f60718")
@@ -364,6 +396,20 @@ func TestAPrivateReceiptShowsDetailsOnlyToItsOwnAdministrator(t *testing.T) {
 				if strings.Contains(reply, forbidden) {
 					t.Errorf("the summary leaked %q:\n%s", forbidden, reply)
 				}
+			}
+
+			// And the button does not open for them. The platform cannot grey it
+			// out here -- a single chat has no administrators -- so the handler
+			// is the whole check rather than the second half of one.
+			sent := h.privateReplies()
+			h.pressPrivate("INTERACTION-PRIVATE", receiptDetailPrefix+entry.ID, member)
+			if code, ok := h.lastAnswer(); !ok ||
+				code != float64(qqbotsdk.InteractionCodeAdminOnly) {
+				t.Errorf("answer = %v, want the administrator-only code", code)
+			}
+			if h.privateReplies() != sent {
+				t.Errorf("the details were sent to somebody who may not read them:\n%s",
+					h.lastPrivateReply())
 			}
 		})
 	}

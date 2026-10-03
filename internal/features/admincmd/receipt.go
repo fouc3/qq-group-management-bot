@@ -111,7 +111,7 @@ func (h *handler) receiptCommand(ctx context.Context, data *qqbotsdk.GroupMessag
 		h.reply(ctx, data, "本群没有这条记录。回执单号只能在它所属的群里查，或者私聊机器人查。")
 		return nil
 	}
-	h.replyWithKeyboard(ctx, data, h.receiptSummary(entry), detailKeyboard(entry.ID))
+	h.replyWithKeyboard(ctx, data, h.receiptSummary(entry), detailKeyboard(entry.ID, true))
 	return nil
 }
 
@@ -178,20 +178,12 @@ func (h *handler) privateCommand(ctx context.Context, data *qqbotsdk.C2CMessageC
 		h.replyPrivately(ctx, data, receiptProblem(ask, err))
 		return nil
 	}
-	sender := data.Author.UserOpenID
-	// The summary is for anybody, for the same reason it is in a group: it is
-	// what the group was already told.
-	answer := h.receiptSummary(entry)
-	if h.IsAdmin(entry.GroupOpenID, sender) {
-		// The details go in the same message rather than behind a button. There
-		// is one reader here and they have already been checked, so a button
-		// would add a step and a way for it to fail with nothing gained -- and a
-		// keyboard in a single chat is not what this feature is here to test.
-		h.deps.Logger.Info("an administrator read a receipt privately",
-			"member", sender, "receipt", entry.ID, "group", entry.GroupOpenID)
-		answer += "\n" + h.receiptDetails(entry)
-	}
-	h.replyPrivately(ctx, data, answer)
+	// The same two layers as in a group: a summary anybody may read, and the
+	// details behind a button. Who may press it is decided when the press
+	// arrives, which is where the record's own group is known -- the summary can
+	// say which group a receipt belongs to, so the button cannot take that back.
+	h.replyPrivatelyWithKeyboard(ctx, data, h.receiptSummary(entry),
+		detailKeyboard(entry.ID, false))
 	return nil
 }
 
@@ -471,24 +463,33 @@ const (
 const receiptRecallWindow = 30 * time.Minute
 
 // detailKeyboard is the button under a summary receipt.
-func detailKeyboard(judgementID string) *qqbotsdk.Keyboard {
-	return receiptKeyboard("receipt_detail", "显示详细信息", receiptDetailPrefix+judgementID)
+//
+// The permission differs by where the receipt is read. In a group the platform's
+// own gate applies, and a button an ordinary member may not press is greyed out
+// before anybody presses it. In a single chat there is no such thing as an
+// administrator, so the button is shown to the one reader and the handler is what
+// decides -- which it does either way, because the platform's administrator list
+// and this bot's are two different lists.
+func detailKeyboard(judgementID string, inGroup bool) *qqbotsdk.Keyboard {
+	permission := qqbotsdk.PermissionTypeEveryone
+	if inGroup {
+		permission = qqbotsdk.PermissionTypeAdmin
+	}
+	return receiptKeyboard("receipt_detail", "显示详细信息",
+		receiptDetailPrefix+judgementID, permission)
 }
 
 // recallKeyboard is the button under a detailed receipt.
+//
+// Group only. A detailed receipt in a single chat has no button: there is one
+// reader, they are the person who asked for it, and nothing else will ever see it.
 func recallKeyboard(token string) *qqbotsdk.Keyboard {
-	return receiptKeyboard("receipt_recall", "撤回详细信息", receiptRecallPrefix+token)
+	return receiptKeyboard("receipt_recall", "撤回详细信息",
+		receiptRecallPrefix+token, qqbotsdk.PermissionTypeAdmin)
 }
 
 // receiptKeyboard builds the one-button keyboard a receipt carries.
-//
-// PermissionTypeAdmin is the platform's own gate, and it is on the button rather
-// than only in the handler: a button somebody may not press is greyed out, which
-// answers "who is this for" before it is pressed. The handler checks the
-// configured administrator list as well, because the platform's idea of an
-// administrator and this bot's are two different lists and only one of them
-// decides what this bot will do.
-func receiptKeyboard(id, label, data string) *qqbotsdk.Keyboard {
+func receiptKeyboard(id, label, data string, permission int) *qqbotsdk.Keyboard {
 	button := qqbotsdk.Button{
 		ID: id,
 		RenderData: &qqbotsdk.RenderData{
@@ -499,7 +500,7 @@ func receiptKeyboard(id, label, data string) *qqbotsdk.Keyboard {
 		Action: &qqbotsdk.Action{
 			Type:          qqbotsdk.ActionTypeCallback,
 			Data:          data,
-			Permission:    &qqbotsdk.Permission{Type: qqbotsdk.PermissionTypeAdmin},
+			Permission:    &qqbotsdk.Permission{Type: permission},
 			UnsupportTips: "请升级 QQ 客户端",
 		},
 	}
@@ -596,11 +597,17 @@ func (h *handler) onInteraction(ctx context.Context, event *qqbotsdk.Event) erro
 	return nil
 }
 
-// showDetails answer the button that asks for the rest of a receipt.
+// showDetails answers the button that asks for the rest of a receipt.
+//
+// The same button is under a group's summary and under a single chat's, and what
+// differs is only where the answer goes and whether it can be taken back again: a
+// detailed receipt in a group carries a recall button, and one in a single chat
+// has nobody to hide it from.
 func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCreateData,
 	judgementID string) error {
-	log := h.deps.Logger.With("group", data.GroupOpenID,
-		"member", data.GroupMemberOpenID, "receipt", judgementID)
+	presser := interactionPresser(data)
+	log := h.deps.Logger.With("scene", data.Scene, "group", data.GroupOpenID,
+		"member", presser, "receipt", judgementID)
 
 	entry, err := h.findJudgement(ctx, judgementID)
 	if err != nil {
@@ -608,18 +615,35 @@ func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCre
 			"error", err)
 		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
 	}
-	if entry.GroupOpenID != data.GroupOpenID ||
-		!h.IsAdmin(entry.GroupOpenID, data.GroupMemberOpenID) {
+	// A press in a group may only be about that group's records, and a press in a
+	// single chat carries no group at all: the record's own group is the one that
+	// decides, and the presser has to administer it.
+	if data.Scene == qqbotsdk.InteractionSceneGroup && entry.GroupOpenID != data.GroupOpenID {
+		log.Warn("refused the details of another group's receipt",
+			"belongs_to", entry.GroupOpenID)
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeAdminOnly)
+	}
+	if !h.IsAdmin(entry.GroupOpenID, presser) {
 		// The platform greys the button out for a group member who is not an
 		// administrator, and this is the check that actually decides: the
 		// configured list is this bot's, and it is not the same list.
-		log.Warn("refused the details of a receipt to a member who may not read them")
+		log.Warn("refused the details of a receipt to somebody who may not read them")
 		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeAdminOnly)
 	}
 
 	// The details are a message of their own rather than an edit: the summary is
-	// what the group asked for and stays where it is, and the details have to
-	// carry their own button to be taken back again.
+	// what was asked for and stays where it is, so that the details can be taken
+	// back without taking the summary with them.
+	if data.Scene != qqbotsdk.InteractionSceneGroup {
+		if err := h.sendPrivateMessage(ctx, presser, h.receiptDetails(entry),
+			""); err != nil {
+			log.Error("could not send the details of a receipt", "error", err)
+			return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+		}
+		log.Info("an administrator read the details of a receipt privately")
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeSuccess)
+	}
+
 	token, err := newReceiptToken()
 	if err != nil {
 		log.Error("could not make a recall token", "error", err)
@@ -645,6 +669,12 @@ func (h *handler) showDetails(ctx context.Context, data *qqbotsdk.InteractionCre
 // would be the bot talking to itself in front of everybody.
 func (h *handler) recallDetails(ctx context.Context, data *qqbotsdk.InteractionCreateData,
 	token string) error {
+	if data.Scene != qqbotsdk.InteractionSceneGroup {
+		// A recall button only ever exists under a group's detailed receipt, so a
+		// press from anywhere else is either a stale button or not ours. Refused
+		// rather than ignored, because the presser is waiting on a spinner.
+		return h.answer(ctx, data.ID, qqbotsdk.InteractionCodeFailed)
+	}
 	log := h.deps.Logger.With("group", data.GroupOpenID,
 		"member", data.GroupMemberOpenID, "token", token)
 
@@ -690,7 +720,11 @@ func (h *handler) answer(ctx context.Context, interactionID string,
 }
 
 // receiptClick reports whether an event is a press of one of this feature's
-// buttons in a group.
+// buttons.
+//
+// A receipt is read in a group and in a single chat, so both scenes are ours. The
+// scene is what says where the answer goes and who the presser is, which is why it
+// is checked here rather than assumed later.
 func receiptClick(event *qqbotsdk.Event) (*qqbotsdk.InteractionCreateData, bool) {
 	value, err := event.Decode()
 	if err != nil {
@@ -700,7 +734,18 @@ func receiptClick(event *qqbotsdk.Event) (*qqbotsdk.InteractionCreateData, bool)
 	if !ok {
 		return nil, false
 	}
-	if data.Scene != qqbotsdk.InteractionSceneGroup {
+	switch data.Scene {
+	case qqbotsdk.InteractionSceneGroup:
+		// The presser and the group are both required: without them there is
+		// nothing to check the permission against and nowhere to answer.
+		if data.GroupOpenID == "" || data.GroupMemberOpenID == "" {
+			return nil, false
+		}
+	case qqbotsdk.InteractionSceneC2C:
+		if data.UserOpenID == "" {
+			return nil, false
+		}
+	default:
 		return nil, false
 	}
 	if data.Data == nil || data.Data.Resolved == nil {
@@ -711,8 +756,18 @@ func receiptClick(event *qqbotsdk.Event) (*qqbotsdk.InteractionCreateData, bool)
 		!strings.HasPrefix(buttonData, receiptRecallPrefix) {
 		return nil, false
 	}
-	if data.GroupOpenID == "" || data.GroupMemberOpenID == "" {
-		return nil, false
-	}
 	return data, true
+}
+
+// interactionPresser is who pressed a button.
+//
+// The two scenes name a person in two different fields, and only one of them is
+// ever set: a group press carries the member openid, a single chat press the user
+// openid. Both are the same kind of value to the administrator list, which is
+// keyed by openid either way.
+func interactionPresser(data *qqbotsdk.InteractionCreateData) string {
+	if data.Scene == qqbotsdk.InteractionSceneC2C {
+		return data.UserOpenID
+	}
+	return data.GroupMemberOpenID
 }

@@ -52,10 +52,10 @@ func (s *stubJudge) JudgeQuoted(_ context.Context, groupOpenID,
 	s.judged++
 	s.lastGroup, s.lastQuoted = groupOpenID, quotedIndex
 	s.quotedText, s.reporter = quotedText, reporter
-	if s.err != nil {
-		return feature.ModerationVerdict{}, s.err
-	}
-	return s.verdict, nil
+	// The verdict comes back even with the error, which is what the moderation
+	// feature does: a judgement that could not be reached is recorded too, and
+	// that record's id is what a receipt on a failure is made of.
+	return s.verdict, s.err
 }
 
 func (s *stubJudge) DryRun() bool { return s.dryRun }
@@ -354,7 +354,13 @@ func TestDryRunTouchesNobody(t *testing.T) {
 // TestNoJudgementTouchesNobody covers a model that could not be read: nobody is
 // punished, and the group is told rather than left waiting.
 func TestNoJudgementTouchesNobody(t *testing.T) {
-	judge := &stubJudge{err: errors.New("the model did not answer")}
+	judge := &stubJudge{
+		err: errors.New("the model did not answer"),
+		// A judgement that could not be reached is recorded too, and the record's
+		// id comes back with the error -- which is what makes the receipt below
+		// possible.
+		verdict: feature.ModerationVerdict{JudgementID: "b37ab13e8d1ebaf3"},
+	}
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
@@ -366,6 +372,10 @@ func TestNoJudgementTouchesNobody(t *testing.T) {
 	if !strings.Contains(reply, "未采取任何处理") {
 		t.Errorf("reply = %q, want it to say nothing was done", reply)
 	}
+	// The receipt is on this answer as much as on a punishment: "nobody looked"
+	// and "nothing was found" are different facts, and the number is the only way
+	// an administrator can tell them apart afterwards.
+	assertChip(t, reply, "/违规查询 b37ab13e", "b37ab13e")
 	if count := h.muteCount(); count != 0 {
 		t.Errorf("an unjudged report sent %d mutes", count)
 	}
@@ -432,7 +442,10 @@ func TestAnUnfoundedReportCanCostTheReporter(t *testing.T) {
 // TestTheReporterIsNotPunishedByDefault covers the default the plan asked for:
 // with no penalty configured, a report that finds nothing costs nothing.
 func TestTheReporterIsNotPunishedByDefault(t *testing.T) {
-	judge := &stubJudge{}
+	judge := &stubJudge{verdict: feature.ModerationVerdict{
+		JudgementID: "b37ab13e8d1ebaf3",
+		Reason:      "只是推荐一个外站链接，没有推广参数",
+	}}
 	h := reportHarness(t, judge)
 
 	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-1"),
@@ -443,6 +456,13 @@ func TestTheReporterIsNotPunishedByDefault(t *testing.T) {
 
 	if strings.Contains(reply, "禁言") {
 		t.Errorf("reply = %q, want nobody silenced", reply)
+	}
+	// A report that found nothing is still a judgement, and it is the one an
+	// administrator is most likely to be asked about afterwards: "why was this let
+	// past?" The receipt is how they get to the model's own words about it.
+	assertChip(t, reply, "/违规查询 b37ab13e", "b37ab13e")
+	if strings.Contains(reply, judge.verdict.Reason) {
+		t.Errorf("the model's words reached the group: %q", reply)
 	}
 	if count := h.muteCount(); count != 0 {
 		t.Errorf("sent %d mutes with no penalty configured", count)

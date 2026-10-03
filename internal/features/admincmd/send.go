@@ -66,11 +66,17 @@ func (h *handler) sendMessageWithKeyboard(ctx context.Context, groupOpenID, text
 // as everything else, because the reasons a send fails are the transport's and
 // have nothing to do with where the message is going.
 func (h *handler) sendPrivateMessage(ctx context.Context, userOpenID, text, replyTo string) error {
-	_, err := h.sendWithRetry(ctx, text, replyTo, nil,
+	_, err := h.sendPrivateMessageWithKeyboard(ctx, userOpenID, text, replyTo, nil)
+	return err
+}
+
+// sendPrivateMessageWithKeyboard is the same with buttons under the message.
+func (h *handler) sendPrivateMessageWithKeyboard(ctx context.Context, userOpenID, text,
+	replyTo string, keyboard *qqbotsdk.Keyboard) (*qqbotsdk.MessageResponse, error) {
+	return h.sendWithRetry(ctx, text, replyTo, keyboard,
 		func(message *qqbotsdk.Message) (*qqbotsdk.MessageResponse, error) {
 			return h.deps.Client.SendC2CMessage(ctx, userOpenID, message)
 		})
-	return err
 }
 
 // sendWithRetry is the retry and the back-off, in one place.

@@ -410,6 +410,22 @@ func (h *harness) press(interactionID, buttonData, memberOpenID, groupOpenID str
 	}`)
 }
 
+// pressPrivate clicks one of the bot's buttons in a single chat.
+//
+// The scene is the only thing that says where the answer goes and who the presser
+// is, and a single chat names them with a different field than a group does.
+func (h *harness) pressPrivate(interactionID, buttonData, userOpenID string) {
+	h.t.Helper()
+	h.dispatch(qqbotsdk.EventInteractionCreate, `{
+		"id": "`+interactionID+`",
+		"type": 11,
+		"scene": "c2c",
+		"chat_type": 2,
+		"user_openid": "`+userOpenID+`",
+		"data": {"type": 11, "resolved": {"button_data": `+jsonString(buttonData)+`}}
+	}`)
+}
+
 // lastAnswer returns the code the bot answered the last button press with, which
 // is how the client is told what happened.
 func (h *harness) lastAnswer() (float64, bool) {
@@ -433,26 +449,55 @@ func (h *harness) buttonOf() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for i := len(h.calls) - 1; i >= 0; i-- {
-		keyboard, ok := h.calls[i]["keyboard"].(map[string]any)
-		if !ok {
+		button := firstButtonOf(h.calls[i])
+		if button == nil {
 			continue
 		}
-		content, _ := keyboard["content"].(map[string]any)
-		rows, _ := content["rows"].([]any)
-		if len(rows) == 0 {
-			continue
-		}
-		row, _ := rows[0].(map[string]any)
-		buttons, _ := row["buttons"].([]any)
-		if len(buttons) == 0 {
-			continue
-		}
-		button, _ := buttons[0].(map[string]any)
 		action, _ := button["action"].(map[string]any)
 		data, _ := action["data"].(string)
 		return data
 	}
 	return ""
+}
+
+// buttonPermissionOf returns the permission of that same button, which is what
+// decides whether a client greys it out.
+func (h *harness) buttonPermissionOf() float64 {
+	h.t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := len(h.calls) - 1; i >= 0; i-- {
+		button := firstButtonOf(h.calls[i])
+		if button == nil {
+			continue
+		}
+		action, _ := button["action"].(map[string]any)
+		permission, _ := action["permission"].(map[string]any)
+		value, _ := permission["type"].(float64)
+		return value
+	}
+	return -1
+}
+
+// firstButtonOf digs the first button out of a sent message, or nil when the
+// message carried no keyboard.
+func firstButtonOf(call map[string]any) map[string]any {
+	keyboard, ok := call["keyboard"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	content, _ := keyboard["content"].(map[string]any)
+	rows, _ := content["rows"].([]any)
+	if len(rows) == 0 {
+		return nil
+	}
+	row, _ := rows[0].(map[string]any)
+	buttons, _ := row["buttons"].([]any)
+	if len(buttons) == 0 {
+		return nil
+	}
+	button, _ := buttons[0].(map[string]any)
+	return button
 }
 
 // lastSentID returns the id the stub platform handed back for the most recent
@@ -464,6 +509,37 @@ func (h *harness) lastSentID() string {
 		return ""
 	}
 	return "SENT-" + strconv.Itoa(h.sentIDs)
+}
+
+// privateReplies counts the messages sent into a single chat.
+func (h *harness) privateReplies() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	count := 0
+	for i, call := range h.calls {
+		if _, ok := call["markdown"]; !ok {
+			continue
+		}
+		if strings.HasPrefix(h.paths[i], "/v2/users/") {
+			count++
+		}
+	}
+	return count
+}
+
+// lastMessageCarriedKeyboard reports whether the most recent message sent had
+// buttons under it.
+func (h *harness) lastMessageCarriedKeyboard() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := len(h.calls) - 1; i >= 0; i-- {
+		if _, ok := h.calls[i]["markdown"]; !ok {
+			continue
+		}
+		_, has := h.calls[i]["keyboard"]
+		return has
+	}
+	return false
 }
 
 // recalledMessages returns the message ids the bot asked the platform to take
