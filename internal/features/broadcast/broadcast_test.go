@@ -181,12 +181,36 @@ func TestTheHeaderSaysWhoAsked(t *testing.T) {
 	if len(posted) != 1 {
 		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
 	}
-	// The platform's own mention tag, which is the only spelling that renders as the member's
-	// name in a group. Written as plain text it is a string of characters nobody can read,
-	// which is a署名 notice that reads exactly like an anonymous one.
+	// The platform's own mention tag, in plain text and nothing wrapped around it: written as
+	// `<@id>` it is a string of characters nobody can read, which is a署名 notice that reads
+	// exactly like an anonymous one -- and whether a tag inside emphasis is still read as a tag
+	// has never been measured here, so it is not put inside any.
 	want := `<qqbot-at-user id="` + theAdmin + `" />`
 	if !strings.Contains(posted[0], "来自 "+want+" 的广播") {
 		t.Errorf("with the switch off the group should be told who asked:\n%s", posted[0])
+	}
+	if strings.Contains(posted[0], "**来自 ") {
+		t.Errorf("the mention is inside the bold span, where it may not render:\n%s", posted[0])
+	}
+}
+
+// TestTheAnonymousHeaderIsStillBold covers the other half of the same line: where there is no
+// name to get wrong, the header keeps the emphasis that makes it read as a header.
+func TestTheAnonymousHeaderIsStillBold(t *testing.T) {
+	p := newPlatform(t)
+	p.start(t, theAdmin)
+	p.choose(t, true, true)
+	p.press(t, "确认", theAdmin)
+	p.press(t, "继续", theAdmin)
+	p.say(t, theAdmin, "大家好")
+	p.press(t, "发送", theAdmin)
+
+	posted := p.notices()
+	if len(posted) != 1 {
+		t.Fatalf("the broadcast was posted %d time(s), want once: %v", len(posted), posted)
+	}
+	if !strings.HasPrefix(posted[0], "**来自管理员的广播**\n\n"+markdownRule) {
+		t.Errorf("an anonymous notice loses its header's emphasis:\n%s", posted[0])
 	}
 }
 

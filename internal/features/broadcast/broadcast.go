@@ -261,7 +261,9 @@ func (h *handler) startPrivately(ctx context.Context, data *qqbotsdk.C2CMessageC
 		return h.say(ctx, chat, data.ID, closed)
 	}
 	if len(h.administers(chat)) == 0 {
-		return h.say(ctx, chat, data.ID, "你不在任何群的管理员名单里，广播发不出去。")
+		return h.say(ctx, chat, data.ID, "你不在任何群的管理员名单里，广播发不出去。"+
+			"私聊的 openid 和群里的不是同一个值：要用私聊，需要把私聊 /whois 查到的 "+
+			"openid 也加进对应群的 admins 里。")
 	}
 	s, err := h.openCard(ctx, chat, data.ID)
 	if err != nil {

@@ -284,29 +284,29 @@ func displayName(group groupChoice) string {
 // refuses a message carrying one whole (40034106, measured), so the preview of a署名 notice
 // says "你" where the notice says their name.
 func (h *handler) broadcastText(s *session, forGroups bool) string {
+	rendered, signed := s.markdown == on, s.anonymous == off
+
 	header := "来自管理员的广播"
-	if s.anonymous == off {
+	if signed {
+		// The name is the one part of this line that has to arrive, so it is written the way
+		// the platform reads as a mention and nothing is wrapped around it: whether a tag
+		// inside emphasis is still read as a tag is not something measured here, and the
+		// cost of being wrong is a署名 notice that reads exactly like an anonymous one.
 		header = "来自 " + namedIn(s.chat, forGroups) + " 的广播"
+	} else if rendered {
+		// Bold where there is no name to get wrong.
+		header = "**" + header + "**"
 	}
-	notice, divider := "", ""
-	if s.markdown == on {
-		// Rendered as markdown, so the header is bold and the divider is the rule the platform
-		// draws -- with a blank line in front of it.
-		//
-		// Both of those are load-bearing, and both were measured in a group rather than
-		// reasoned about: a rule on the line straight under the header is a setext heading
-		// underline, which made the header a big title and drew no divider at all. The blank
-		// line is what makes it a divider instead, and the bold is what keeps the header
-		// reading as one.
-		notice, divider = "**"+header+"**\n\n"+markdownRule+"\n"+s.content, markdownRule
-	} else {
-		// Taken literally, so the header stays plain and the divider is characters: the
-		// markdown rule only is a rule when something renders it.
-		notice, divider = header+"\n"+plainDivider+"\n"+escapeMarkdown(s.content), plainDivider
+
+	divider, body, gap := plainDivider, escapeMarkdown(s.content), "\n"
+	if rendered {
+		// Rendered as markdown: the divider is the rule the platform draws, and the blank line
+		// in front of it is load-bearing rather than spacing. A rule on the line straight under
+		// a line of text is a setext heading underline, which made the header a big title and
+		// drew no divider at all -- measured in a group, not reasoned about.
+		divider, body, gap = markdownRule, s.content, "\n\n"
 	}
-	// The body is the writer's text, and this bot is carrying it: who wrote it and who is
-	// answerable for it are not the same thing, and the message goes out under the bot's name.
-	return disclaimer.After(notice, divider)
+	return disclaimer.After(header+gap+divider+"\n"+body, divider)
 }
 
 // namedIn is how a member is written into a message, which depends on where it is going.

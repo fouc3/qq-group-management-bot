@@ -109,14 +109,23 @@ func (h *handler) auditCommand(ctx context.Context, data *qqbotsdk.GroupMessageC
 
 // auditPrivately shows a member what was broadcast in the groups they administer.
 //
-// In a single chat, and only about their own groups: the record is what somebody who
-// answers for a group needs, and a list of what other groups were told is not theirs to
-// read. Not behind the trial gate either, for the same reason as the group's own.
+// In a single chat, and only about their own groups: the record is what somebody who answers
+// for a group needs, and a list of what other groups were told is not theirs to read. Not
+// behind the trial gate either, for the same reason as the group's own.
+//
+// "Their own groups" is worked out from the id a single chat carries, and the platform gives a
+// member one id per scene: the entry in a group's administrator list is the member_openid,
+// which is not the user_openid a single chat arrives with. Somebody whose two ids differ is
+// therefore not recognised here, and the answer says what to do about it rather than showing
+// them an empty record -- the alternative would be to show every group this bot is in, which is
+// not a record anybody's.
 func (h *handler) auditPrivately(ctx context.Context, data *qqbotsdk.C2CMessageCreateData,
 	_ command.Parsed) error {
 	chat := data.Author.UserOpenID
 	if len(h.administers(chat)) == 0 {
-		return h.say(ctx, chat, "", "你不在任何群的管理员名单里，没有可看的广播记录。")
+		return h.say(ctx, chat, "", "你不在任何群的管理员名单里，没有可看的广播记录。"+
+			"私聊的 openid 和群里的不是同一个值：要用私聊看记录，需要把私聊 "+
+			"/whois 查到的 openid 也加进对应群的 admins 里。")
 	}
 	return h.showRecord(ctx, pager{token: newTokenOrNothing(), member: chat}, 1, data.ID, nil)
 }
