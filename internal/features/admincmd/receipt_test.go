@@ -111,10 +111,16 @@ func TestAnyoneReadsTheSummaryOfAReceipt(t *testing.T) {
 		"违规·广告",
 		`<qqbot-at-user id="` + entry.SubjectOpenID + `"/>`,
 		`<qqbot-at-user id="` + entry.ReporterOpenID + `"/>`,
-		"stub-model",
-		"送检消息：2 条",
-		"已撤回 2 条消息",
-		"10分钟",
+		// Every field is labelled and the label is bold: the message is markdown,
+		// and eight plain lines of "key：value" read as a wall.
+		"**时间**：",
+		"**群**：",
+		"**判定**：",
+		"**被判定人**：",
+		"**举报人**：",
+		"**模型**：stub-model",
+		"**送检消息**：2 条",
+		"**处理**：已撤回 2 条消息 已禁言 10分钟",
 	} {
 		if !strings.Contains(reply, want) {
 			t.Errorf("the summary does not mention %q:\n%s", want, reply)
@@ -122,6 +128,10 @@ func TestAnyoneReadsTheSummaryOfAReceipt(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		entry.Reason, entry.Reasoning, "本站价目", "加群送皮肤", "思考过程",
+		// The duration is already inside the action line, so it gets no line of
+		// its own: "已禁言 10分钟" above "禁言时长：10分钟" is the same fact twice,
+		// and a reader checks both to see whether they agree.
+		"禁言时长",
 	} {
 		if strings.Contains(reply, forbidden) {
 			t.Errorf("the summary leaks %q:\n%s", forbidden, reply)

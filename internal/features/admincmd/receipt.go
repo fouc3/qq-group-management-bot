@@ -249,26 +249,26 @@ func receiptProblem(ask string, err error) string {
 func (h *handler) receiptSummary(entry store.Judgement) string {
 	var out strings.Builder
 	out.WriteString("违规回执 " + entry.ID + "\n")
-	fmt.Fprintf(&out, "时间：%s\n",
+	fmt.Fprintf(&out, "**时间**：%s\n",
 		time.Unix(entry.CreatedAt, 0).Format("2006-01-02 15:04:05"))
-	fmt.Fprintf(&out, "群：%s\n", h.groupLabel(entry.GroupOpenID))
+	fmt.Fprintf(&out, "**群**：%s\n", h.groupLabel(entry.GroupOpenID))
 
 	verdict := entry.Verdict
 	if entry.Category != "" {
 		verdict = "违规·" + h.categoryLabel(entry.Category)
 	}
-	fmt.Fprintf(&out, "判定：%s\n", verdict)
-	fmt.Fprintf(&out, "被判定人：%s\n", atUser(entry.SubjectOpenID))
-	fmt.Fprintf(&out, "举报人：%s\n", atUser(entry.ReporterOpenID))
+	fmt.Fprintf(&out, "**判定**：%s\n", verdict)
+	fmt.Fprintf(&out, "**被判定人**：%s\n", atUser(entry.SubjectOpenID))
+	fmt.Fprintf(&out, "**举报人**：%s\n", atUser(entry.ReporterOpenID))
 	if entry.Model != "" {
-		fmt.Fprintf(&out, "模型：%s\n", entry.Model)
+		fmt.Fprintf(&out, "**模型**：%s\n", entry.Model)
 	}
-	fmt.Fprintf(&out, "送检消息：%d 条\n", len(entry.MessageIDs))
-	fmt.Fprintf(&out, "处理：%s\n", orNone(entry.Action))
-	if entry.MuteSeconds > 0 {
-		fmt.Fprintf(&out, "禁言时长：%s\n",
-			humanDuration(time.Duration(entry.MuteSeconds)*time.Second))
-	}
+	fmt.Fprintf(&out, "**送检消息**：%d 条\n", len(entry.MessageIDs))
+	// No line of its own for the mute: the action already spells out what was
+	// done, and the duration is inside it -- "已撤回 1 条消息 已禁言 10分钟", or
+	// the reason it could not be applied. A field that repeats half of the line
+	// above it is a field a reader has to check twice.
+	fmt.Fprintf(&out, "**处理**：%s\n", orNone(entry.Action))
 	return out.String()
 }
 
@@ -283,11 +283,12 @@ func (h *handler) receiptDetails(entry store.Judgement) string {
 	var out strings.Builder
 	out.WriteString("违规回执 " + entry.ID + " 详细信息\n")
 	if entry.Reason != "" {
-		fmt.Fprintf(&out, "理由：%s\n", entry.Reason)
+		fmt.Fprintf(&out, "**理由**：%s\n", entry.Reason)
 	}
 	h.writeRecalls(&out, entry)
 	if strings.TrimSpace(entry.Reasoning) != "" {
-		fmt.Fprintf(&out, "思考过程：\n%s\n", oneBlock(entry.Reasoning, receiptReasoningLimit))
+		fmt.Fprintf(&out, "**思考过程**：\n%s\n",
+			oneBlock(entry.Reasoning, receiptReasoningLimit))
 	}
 	return out.String()
 }
@@ -316,8 +317,10 @@ func atUser(openID string) string {
 // only copy left is here.
 func (h *handler) writeRecalls(out *strings.Builder, entry store.Judgement) {
 	if len(entry.Recalls) == 0 {
+		// Nothing was attempted, and the record says why in a sentence of its
+		// own: "未发现违规，未执行撤回", "试运行：未执行撤回".
 		if entry.RecallReason != "" {
-			fmt.Fprintf(out, "撤回：未执行（%s）\n", entry.RecallReason)
+			fmt.Fprintf(out, "**撤回**：%s\n", entry.RecallReason)
 		}
 		return
 	}
@@ -329,10 +332,11 @@ func (h *handler) writeRecalls(out *strings.Builder, entry store.Judgement) {
 			left++
 		}
 	}
-	fmt.Fprintf(out, "撤回：已撤回 %d 条，未撤回 %d 条\n", taken, left)
-	if entry.RecallReason != "" {
-		fmt.Fprintf(out, "撤回说明：%s\n", entry.RecallReason)
-	}
+	// The counts, and then what happened to each message with the reason it did
+	// not come back. The summary reason is deliberately not printed here: with
+	// one line per message below it, an aggregate line can only repeat them or
+	// disagree with them.
+	fmt.Fprintf(out, "**撤回**：已撤回 %d 条，未撤回 %d 条\n", taken, left)
 	for _, recall := range entry.Recalls {
 		if recall.Recalled {
 			fmt.Fprintf(out, "· 已撤回：%s\n", oneBlock(recall.Text, receiptTextLimit))
@@ -357,21 +361,32 @@ const (
 
 // oneBlock lays a piece of free text out under a heading.
 //
-// Newlines are kept -- a price list is unreadable without them -- but the text is
-// inert: it was written by a member, so nothing in it may look like part of this
-// receipt's own layout, and a line pretending to be another field must not read
-// as one.
+// A message that is one line goes into the line that introduces it -- "· 已撤回：
+// 试试" -- because indenting it four spaces onto a line of its own reads like a
+// stray fragment. One that has newlines of its own is laid out as a block: a price
+// list is unreadable without them.
+//
+// Either way the text is inert. It was written by a member, so nothing in it may
+// look like part of this receipt's own layout, and a line pretending to be another
+// field must not read as one.
 func oneBlock(text string, limit int) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return "（空）"
 	}
-	var out strings.Builder
-	for _, line := range strings.Split(trimmed, "\n") {
-		out.WriteString("    " + strings.TrimRight(line, "\r") + "\n")
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) == 1 {
+		return cutRunes(strings.TrimRight(lines[0], "\r"), limit)
 	}
-	rendered := strings.TrimRight(out.String(), "\n")
-	return cutRunes(rendered, limit)
+	// The first line stays on the line that introduces it and only the rest is
+	// indented, so that a block reads as one entry rather than as a fragment
+	// floating under a colon.
+	var out strings.Builder
+	out.WriteString(strings.TrimRight(lines[0], "\r"))
+	for _, line := range lines[1:] {
+		out.WriteString("\n    " + strings.TrimRight(line, "\r"))
+	}
+	return cutRunes(out.String(), limit)
 }
 
 // cutRunes truncates on a rune boundary and says that it did.
