@@ -155,7 +155,11 @@ func (r *reloader) structuralChange(fresh *config.Config) string {
 			continue
 		}
 		if _, ok := instance.(feature.Reloadable); !ok {
-			return "功能 " + instance.Name() + " 不支持热重载"
+			// The consequence is spelled out because the reason is what an
+			// operator greps for, and "does not support hot reloading" on its own
+			// reads as though only this feature's section was skipped.
+			return "功能 " + instance.Name() + " 不支持热重载，而它的配置改了；" +
+				"整份配置因此都没有采纳（其他功能的改动也一起未生效），重启机器人后生效"
 		}
 	}
 	return ""
