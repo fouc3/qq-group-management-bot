@@ -262,6 +262,13 @@ func (p *parts) wire() error {
 	if err := feature.InjectModeration(running, p.logger); err != nil {
 		return err
 	}
+	// The commands other features answer are handed to whoever keeps the table, so
+	// that the help a group is shown, the menu it taps and the dispatcher that runs
+	// a command are still one list. It is wired after everything else because it is
+	// the one wiring whose consumer can refuse what it is handed.
+	if err := feature.InjectCommandSources(running, p.logger); err != nil {
+		return err
+	}
 	// The blacklist does not come from a feature: it is the data layer's, in the
 	// two shapes the two features want from it.
 	feature.Inject[joinrequest.Blacklist, joinBarrierAware](running,

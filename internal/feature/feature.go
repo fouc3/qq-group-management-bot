@@ -402,6 +402,32 @@ func InjectModeration(features []Feature, logger *slog.Logger) error {
 	return nil
 }
 
+// CommandSource is a feature that has commands of its own to add to the group's
+// table.
+//
+// There is one table rather than one per feature, so that the help a group is
+// shown, the menu it taps and the dispatcher that runs a command cannot come
+// apart -- and one table means somebody owns it and the others contribute. That
+// is this contract: the owner keeps the table, and a feature that answers commands
+// offers them.
+//
+// What a source hands over is read again whenever the features are wired, which
+// is after any of them is built again. An entry kept from the last wiring would
+// hold a runner belonging to an instance nobody is running.
+type CommandSource interface {
+	// CommandDefs are the commands this feature answers.
+	CommandDefs() []command.Def
+}
+
+// CommandSourceAware is implemented by the feature that keeps the table.
+//
+// It is the one wiring whose consumer can refuse what it is handed: two commands
+// answering to one word is a mistake in the table, and the table is the only place
+// that can see it -- the sources do not know about each other.
+type CommandSourceAware interface {
+	SetCommandSources([]command.Def) error
+}
+
 // Intents unions what every feature asked for, which is what the websocket
 // connection subscribes to.
 func Intents(features []Feature) qqbotsdk.Intent {

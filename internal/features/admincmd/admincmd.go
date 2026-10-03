@@ -159,19 +159,84 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 
 // commands is the table this feature answers.
 //
-// It is built once and on demand, because a handler built by hand -- which is
-// what a test does when it wants one narrow method of it -- has no table yet.
+// Built on first use rather than in New, because the sources that contribute to it
+// are wired after the feature exists -- and rebuilt rather than kept when they
+// change, since a source that was built again hands over new runners.
 func (h *handler) commands() *command.Catalog {
-	h.tableOnce.Do(func() {
-		table, err := command.NewCatalog(h.commandDefs())
+	h.tableMu.Lock()
+	defer h.tableMu.Unlock()
+	if h.table == nil {
+		table, err := command.NewCatalog(append(h.commandDefs(), h.tableFrom...))
 		if err != nil {
 			// New refuses this before the table is ever reached this way, so
 			// there is nobody left to report the mistake to.
 			panic("admincmd: " + err.Error())
 		}
 		h.table = table
-	})
+	}
 	return h.table
+}
+
+// SetCommandSources takes the commands other features offer for this table.
+//
+// It is called every time the features are wired, which is after any of them has
+// been built again, and what it is handed is the whole of what they offer rather
+// than an addition to what they offered before: a source built again offers new
+// runners, and a table that merged instead of replacing would keep answering from
+// an instance nobody is running.
+func (h *handler) SetCommandSources(defs []command.Def) error {
+	table, err := command.NewCatalog(append(h.commandDefs(), defs...))
+	if err != nil {
+		// Refused rather than resolved: a word that invokes two commands leaves
+		// one of them reachable by nothing, and which one is decided by the order
+		// the features happen to be registered in.
+		return err
+	}
+	h.tableMu.Lock()
+	changed := !sameCommands(h.tableFrom, defs)
+	h.tableFrom = append([]command.Def(nil), defs...)
+	h.table = table
+	running := h.registered
+	h.tableMu.Unlock()
+
+	// A table that changed while the bot runs has to reach the menu too: the panel
+	// is published from this table, and a command that a feature started or stopped
+	// offering would otherwise be answered and not offered -- or offered and not
+	// answered. Before registration there is nothing to bring up to date: Register
+	// publishes this table once it is whole.
+	if changed && running {
+		go h.republishCommands()
+	}
+	return nil
+}
+
+// republishCommands brings the menu up to date after the table changed.
+//
+// Under the feature's own context, so that a menu being brought up to date when the
+// feature is built again does not outlive it.
+func (h *handler) republishCommands() {
+	ctx, cancel := context.WithTimeout(h.part, 20*time.Second)
+	defer cancel()
+	h.publishCommands(ctx)
+}
+
+// sameCommands reports whether two sets of offered commands would put the same
+// entries in the menu.
+//
+// It compares what a menu shows -- the word and the explanation beside it -- and
+// not the definitions themselves: a definition carries the runner of whichever
+// instance offered it, and those differ every time a feature is built again. A
+// menu that reads the same is left alone.
+func sameCommands(before, after []command.Def) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for index := range before {
+		if before[index].Name != after[index].Name || before[index].Desc != after[index].Desc {
+			return false
+		}
+	}
+	return true
 }
 
 // handler implements feature.Feature.
@@ -198,9 +263,18 @@ type handler struct {
 	part     context.Context
 	stopPart context.CancelFunc
 
-	// tableOnce and table are the command table, built on first use.
-	tableOnce sync.Once
-	table     *command.Catalog
+	// tableMu guards the table and what other features contributed to it, which
+	// is rebuilt whenever they are wired.
+	tableMu sync.Mutex
+	// registered says that this feature has taken up its work, and therefore that
+	// the menu is published from the table: a table that changes after this point
+	// has to be published again.
+	registered bool
+	// table is the command table, built on first use.
+	table *command.Catalog
+	// tableFrom is what the other features offer for it, replaced rather than
+	// extended on every wiring.
+	tableFrom []command.Def
 
 	// mu guards reports, which is where one member's rate limit is counted.
 	mu sync.Mutex
@@ -298,6 +372,9 @@ func (h *handler) Register(_ context.Context) error {
 
 	// The command list is published here, before any event can arrive, so the
 	// panel a member opens is never a version behind what the bot answers.
+	h.tableMu.Lock()
+	h.registered = true
+	h.tableMu.Unlock()
 	panelCtx, panelCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	h.publishCommands(panelCtx)
 	panelCancel()

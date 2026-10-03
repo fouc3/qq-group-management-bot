@@ -2,6 +2,7 @@ package admincmd
 
 import (
 	"testing"
+	"time"
 
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 )
@@ -40,6 +41,46 @@ func (h *harness) panelScopes() map[string]bool {
 		}
 	}
 	return scopes
+}
+
+// latestPanel returns the panel this bot published last in one scope, or nil.
+//
+// Read backwards, because a panel is published again when the table changes: the
+// first one in the list is what the group was looking at before.
+func (h *harness) latestPanel(scope string) map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for index := len(h.calls) - 1; index >= 0; index-- {
+		call := h.calls[index]
+		if call["scope"] != scope {
+			continue
+		}
+		if panel, ok := call["panel"].(map[string]any); ok {
+			return panel
+		}
+	}
+	return nil
+}
+
+// waitForPanelEntry waits for the panel to offer a command.
+//
+// A table that changed while the bot runs is published again in the background --
+// publishing talks to the platform, so it does not happen on the wiring's own
+// goroutine -- which is why this waits rather than looks.
+func (h *harness) waitForPanelEntry(t *testing.T, scope, name string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if panel := h.latestPanel(scope); panel != nil {
+			if _, ok := panelEntries(t, panel)[name]; ok {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the panel published in %s never offered %s", scope, name)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // panelEntries returns the published entries by name.
