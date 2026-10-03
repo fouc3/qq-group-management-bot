@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -29,6 +30,45 @@ func receiptShort(id string) string {
 	}
 	// Byte slicing is safe here: an id is generated as lowercase hex.
 	return trimmed[:receiptLength]
+}
+
+// commandInput is the platform's tappable command chip.
+//
+// Tapping it writes text into the input box and sends nothing: the member still
+// decides. That is exactly what a receipt needs. The group sees a short number,
+// and the administrator who wants to know what it stood for gets the whole
+// command without typing a Chinese command name and eight hex characters by hand,
+// which is the difference between a receipt people look up and one they don't.
+//
+// Both values are percent-encoded, because the platform requires it and the
+// failure is silent: an unencoded value containing a slash or a space arrives cut
+// short at the first one.
+func commandInput(text, show string) string {
+	return `<qqbot-cmd-input text="` + urlEncode(text) + `" show="` + urlEncode(show) +
+		`" reference="false" />`
+}
+
+// urlEncode percent-encodes a value for an embedded tag.
+//
+// QueryEscape is the wrong function on its own: it writes a space as "+", and
+// this is not a query string, so a plus would arrive as a plus.
+func urlEncode(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+// receiptSentence is the part of a group's answer that carries the receipt
+// number, or nothing when there is no record to point at.
+//
+// One function because two answers need it -- the one after a violation and the
+// one a dry run gets -- and because a sentence assembled twice is a sentence that
+// drifts: a chip in one and a bare number in the other would look like two
+// different features.
+func (h *handler) receiptSentence(judgementID string) string {
+	receipt := receiptShort(judgementID)
+	if receipt == "" {
+		return ""
+	}
+	return "回执单号 " + commandInput(h.cfg.Prefix+"违规查询 "+receipt, receipt) + "。"
 }
 
 // receiptNames are the command names that ask for one receipt.

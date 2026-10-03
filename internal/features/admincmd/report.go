@@ -182,8 +182,8 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 		action = "dry_run"
 		recallReason = "试运行：未执行撤回"
 		h.sayInGroup(ctx, groupOpenID, fmt.Sprintf(
-			"【试运行】判定为【%s】。试运行期间不禁言、不撤回。回执单号 %s。",
-			verdict.Label, receiptShort(verdict.JudgementID)))
+			"【试运行】判定为【%s】。试运行期间不禁言、不撤回。",
+			verdict.Label)+h.receiptSentence(verdict.JudgementID))
 		return
 	}
 
@@ -272,9 +272,7 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
 	// did not see this conversation: any administrator can ask the bot what the
 	// number means, in the group or in a private message, and read the reason, the
 	// chain of thought and the message that was taken back.
-	if receipt := receiptShort(verdict.JudgementID); receipt != "" {
-		answer += "回执单号 " + receipt + "。"
-	}
+	answer += h.receiptSentence(verdict.JudgementID)
 	action, muteSeconds = strings.Join(notes, " "), verdict.MuteSeconds
 	h.sayInGroup(ctx, groupOpenID, answer)
 }

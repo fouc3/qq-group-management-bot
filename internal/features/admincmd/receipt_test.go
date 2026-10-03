@@ -3,6 +3,7 @@ package admincmd
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -293,9 +294,7 @@ func TestTheGroupReplyCarriesTheReceiptNumber(t *testing.T) {
 	waitFor(t, func() bool { return h.lastReply() != reportWaiting })
 
 	reply := h.lastReply()
-	if !strings.Contains(reply, "回执单号 a1b2c3d4") {
-		t.Errorf("reply = %q, want the receipt number", reply)
-	}
+	assertChip(t, reply, "/违规查询 a1b2c3d4", "a1b2c3d4")
 	if strings.Contains(reply, judge.verdict.Reason) {
 		t.Errorf("the model's words reached the group: %q", reply)
 	}
@@ -360,6 +359,101 @@ func TestAMessageThatCouldNotBeWithdrawnIsNotMarked(t *testing.T) {
 	}
 	if outcome.Recalls[0].Reason == "" {
 		t.Error("nothing was recorded about why the message stayed")
+	}
+}
+
+// TestADryRunCarriesTheSameTappableReceipt covers the other sentence that carries
+// a number.
+//
+// A dry run is where the feature is tried out, so it is the one place the chip is
+// most likely to be looked at -- and a chip there and a bare number after a real
+// violation would look like two different features.
+func TestADryRunCarriesTheSameTappableReceipt(t *testing.T) {
+	judge := &stubJudge{dryRun: true, verdict: feature.ModerationVerdict{
+		JudgementID:   "a1b2c3d4e5f60718",
+		Category:      "ad",
+		Label:         "广告",
+		MuteSeconds:   600,
+		SubjectOpenID: "SUBJECT-OPENID",
+	}}
+	h := reportHarness(t, judge)
+
+	if err := h.handler.reportCommand(context.Background(), quotedReport("IDX-QUOTED"),
+		parsedCommand{}); err != nil {
+		t.Fatalf("reportCommand: %v", err)
+	}
+	waitFor(t, func() bool { return h.lastReply() != reportWaiting })
+
+	reply := h.lastReply()
+	if !strings.Contains(reply, "试运行") {
+		t.Fatalf("reply = %q, want the dry-run wording", reply)
+	}
+	assertChip(t, reply, "/违规查询 a1b2c3d4", "a1b2c3d4")
+}
+
+// TestTheChipCarriesAnEncodedCommand covers the encoding, which is the part the
+// platform fails silently on.
+//
+// A value that is not percent-encoded arrives cut short at its first space or
+// slash, so the chip would look right in the source and insert half a command.
+func TestTheChipCarriesAnEncodedCommand(t *testing.T) {
+	chip := commandInput("/违规查询 a1b2c3d4", "a1b2c3d4")
+	if !strings.HasPrefix(chip, `<qqbot-cmd-input text="`) ||
+		!strings.HasSuffix(chip, `" reference="false" />`) {
+		t.Fatalf("chip = %q, want the platform's embedded-text tag", chip)
+	}
+	if strings.Contains(chip, " ") != strings.Contains(chip, " />") {
+		// The only space allowed is the one before the closing slash.
+		t.Errorf("chip = %q, want no raw spaces inside the values", chip)
+	}
+	assertAttribute(t, chip, "text", "/违规查询 a1b2c3d4")
+	assertAttribute(t, chip, "show", "a1b2c3d4")
+
+	// A plus is a plus in a tag value: QueryEscape writes a space as one, and the
+	// platform would read it literally.
+	spaced := commandInput("/违规查询 ab cd", "show")
+	if strings.Contains(spaced, "+") {
+		t.Errorf("chip = %q, want no plus for a space", spaced)
+	}
+	assertAttribute(t, spaced, "text", "/违规查询 ab cd")
+}
+
+// assertChip checks that text contains one chip whose value decodes to the
+// command, and whose label is what the group reads.
+func assertChip(t *testing.T, text, wantCommand, wantShow string) {
+	t.Helper()
+	if !strings.Contains(text, "<qqbot-cmd-input ") {
+		t.Fatalf("no chip in %q", text)
+	}
+	assertAttribute(t, text, "text", wantCommand)
+	assertAttribute(t, text, "show", wantShow)
+	if !strings.Contains(text, "回执单号 ") {
+		t.Errorf("the chip is not introduced as a receipt: %q", text)
+	}
+}
+
+// assertAttribute decodes one attribute of the first tag in text.
+func assertAttribute(t *testing.T, text, name, want string) {
+	t.Helper()
+	opening := `text="`
+	if name == "show" {
+		opening = `show="`
+	}
+	start := strings.Index(text, opening)
+	if start < 0 {
+		t.Fatalf("no %s attribute in %q", name, text)
+	}
+	rest := text[start+len(opening):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatalf("the %s attribute is not closed in %q", name, text)
+	}
+	decoded, err := url.QueryUnescape(rest[:end])
+	if err != nil {
+		t.Fatalf("the %s attribute does not decode: %v", name, err)
+	}
+	if decoded != want {
+		t.Errorf("%s = %q, want %q", name, decoded, want)
 	}
 }
 
