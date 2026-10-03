@@ -13,7 +13,7 @@ import (
 // real endpoint the answer is nearly always well formed -- but "nearly" is not a reason
 // to throw a report away.
 func TestAnUnreadableAnswerIsAskedAgain(t *testing.T) {
-	stub := &modelStub{answers: []string{"我看看啊", `{"verdict":"ok","confidence":0.9}`}}
+	stub := &modelStub{answers: []string{"我看看啊", `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}}
 	h := judgeHarness(t, stub, "")
 
 	verdict, err := h.Judge(context.Background(), "", chainOf("正常聊天"))

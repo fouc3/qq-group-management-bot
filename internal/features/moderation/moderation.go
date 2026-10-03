@@ -157,6 +157,15 @@ type GroupOverride struct {
 	// Enabled turns judging off for one group while it stays on elsewhere. Nil
 	// follows the feature.
 	Enabled *bool `yaml:"enabled"`
+	// Topic is what this group is about, in the group's own words.
+	//
+	// It goes into the instructions, and it changes the judgement in one specific way:
+	// a promotion in the same line of business as the group itself -- the group about
+	// relay stations taking a relay station advertisement -- is a violation even when
+	// it would read as ordinary conversation elsewhere. That is the case that slipped
+	// through without it: a link to a host was judged as normal sharing because the
+	// model was told nothing about who was reading.
+	Topic string `yaml:"topic"`
 	// Allow is what this group calls its own: its site, its announcement page.
 	//
 	// It is not a veto, and it cannot be one. A rule about text is satisfied by
@@ -178,7 +187,7 @@ type GroupOverride struct {
 }
 
 // groupFor is one group's overrides, or an empty set.
-func (c *Config) groupFor(groupOpenID string) GroupOverride {
+func (c Config) groupFor(groupOpenID string) GroupOverride {
 	if c.Groups == nil {
 		return GroupOverride{}
 	}
@@ -476,6 +485,9 @@ type handler struct {
 	cfg   Config
 	deps  feature.Deps
 	cache *Cache
+	// names are the groups' own names, read from the platform when the feature starts.
+	// Written once, before any event can arrive, and only ever read afterwards.
+	names map[string]string
 }
 
 // New builds the feature from its configuration section.
@@ -562,6 +574,24 @@ func (h *handler) Register(ctx context.Context) error {
 	// read and reported rather than assumed. A group that delivers only mentions
 	// gives the cache nothing but the messages that mention the bot, and a report
 	// about somebody else's advertisement would have nothing to judge it with.
+	// The groups' own names, read once here: the judgement is told who is reading,
+	// because whether something is an advertisement depends on what the group is for.
+	// A failure is not fatal -- the topic from the configuration still carries the part
+	// that matters -- so it is logged and the name is left unknown.
+	names := make(map[string]string, len(h.deps.Groups))
+	for _, group := range h.deps.Groups {
+		info, err := h.deps.Client.GetGroupInfo(ctx, group.OpenID)
+		if err != nil {
+			h.deps.Logger.Warn("could not read a group's name",
+				"group", group.OpenID, "error", err)
+			continue
+		}
+		names[group.OpenID] = info.GroupName
+	}
+	h.mu.Lock()
+	h.names = names
+	h.mu.Unlock()
+
 	for _, group := range h.deps.Groups {
 		state, err := h.deps.Client.GetGroupBotState(ctx, group.OpenID)
 		if err != nil {

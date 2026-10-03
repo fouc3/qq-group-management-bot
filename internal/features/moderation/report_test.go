@@ -88,7 +88,7 @@ func cacheChain(t *testing.T, h *handler, group string, texts ...string) string 
 // window, a model that finds an advertisement, and everything a caller needs in
 // order to act.
 func TestAReportBecomesAVerdict(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"reason":"卖号广告","confidence":0.9}`}
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我", "谁在发广告")
@@ -124,7 +124,7 @@ func TestAReportBecomesAVerdict(t *testing.T) {
 // TestACategoryWithoutItsOwnDurationFallsBack covers the configuration the plan
 // calls "one fixed time for every type": fraud names no duration here.
 func TestACategoryWithoutItsOwnDurationFallsBack(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"fraud",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"fraud",` +
 		`"confidence":0.9}`}
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "先交押金")
@@ -145,7 +145,7 @@ func TestACategoryWithoutItsOwnDurationFallsBack(t *testing.T) {
 // is silenced: nothing found means nothing served, and the reporter's fate is the
 // caller's business.
 func TestACleanVerdictHasNoPunishment(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "这条没问题")
 
@@ -168,15 +168,15 @@ func TestNoJudgementIsAnError(t *testing.T) {
 		noModel bool
 	}{
 		"a message nobody cached": {
-			stub: &modelStub{answer: `{"verdict":"ok"}`}, quoted: "NEVER-SEEN"},
+			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"ok"}`}, quoted: "NEVER-SEEN"},
 		"an empty index": {
-			stub: &modelStub{answer: `{"verdict":"ok"}`}, quoted: ""},
+			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"ok"}`}, quoted: ""},
 		"a model that answered nothing readable": {
 			stub: &modelStub{answer: "我不知道"}, quoted: "MID"},
 		"a server error": {
 			stub: &modelStub{status: 500}, quoted: "MID"},
 		"no model configured": {
-			stub: &modelStub{answer: `{"verdict":"ok"}`}, quoted: "MID", noModel: true},
+			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"ok"}`}, quoted: "MID", noModel: true},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -255,7 +255,7 @@ func TestTheAllowListDoesNotExemptAnything(t *testing.T) {
 // TestJudgingCanBeTurnedOffForOneGroup covers one group opting out while the
 // feature stays on everywhere else.
 func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
 	h, group := reportHarness(t, stub, groupSection(t, "    enabled: false\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")
 
@@ -270,7 +270,7 @@ func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
 // TestAGroupCanHaveItsOwnDurations covers the per-group override: the same
 // category is punished for different lengths in different groups.
 func TestAGroupCanHaveItsOwnDurations(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"confidence":0.9}`}
 	h, group := reportHarness(t, stub,
 		groupSection(t, "    categories:\n      ad: \"30m\"\n"))
@@ -306,7 +306,7 @@ func TestAnEmptyAllowEntryIsRefusedAtStartup(t *testing.T) {
 // sentence somebody can write to become the group's own account, which is exactly
 // what could not be said of the content versions.
 func TestASenderTheGroupTrustsIsNotJudged(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"confidence":0.99}`}
 	h, group := reportHarness(t, stub,
 		groupSection(t, "    allow_senders: [\"MEMBER-1\"]\n"))
@@ -333,7 +333,7 @@ func TestASenderTheGroupTrustsIsNotJudged(t *testing.T) {
 // satisfy. The data block is where a member's text goes, and the list must not be
 // there.
 func TestTheGroupsOwnListGoesIntoTheInstructions(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
 	h, group := reportHarness(t, stub,
 		groupSection(t, "    allow: [\"api.mcapple.top\"]\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")

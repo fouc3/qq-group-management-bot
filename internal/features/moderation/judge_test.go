@@ -118,7 +118,7 @@ func chainOf(texts ...string) []CachedMessage {
 
 // TestAViolationIsRead covers the ordinary path.
 func TestAViolationIsRead(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"reason":"卖号广告","confidence":0.9}`}
 	h := judgeHarness(t, stub, "")
 
@@ -138,7 +138,7 @@ func TestAViolationIsRead(t *testing.T) {
 // text out of the instructions: it is all inside one block, and the system
 // message does not contain it.
 func TestTheMessagesAreData(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
 	h := judgeHarness(t, stub, "")
 
 	marker := "加群送皮肤 私聊我"
@@ -187,7 +187,7 @@ func TestTheMessagesAreData(t *testing.T) {
 // TestAnInjectionInTheMessagesIsOnlyContent covers the attempt itself: a member
 // writing instructions cannot change what the code does with the answer.
 func TestAnInjectionInTheMessagesIsOnlyContent(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"reason":"仍然判定为广告","confidence":0.9}`}
 	h := judgeHarness(t, stub, "")
 
@@ -251,7 +251,7 @@ func roleContent(t *testing.T, request, role string) string {
 // TestNewlinesCannotFakeTheLayout covers the layout: a message cannot look like
 // two, or like the end of the block.
 func TestNewlinesCannotFakeTheLayout(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
 	h := judgeHarness(t, stub, "")
 
 	if _, err := h.Judge(context.Background(), "",
@@ -276,18 +276,18 @@ func TestTheAnswerIsRefusedWhenItCannotBeRead(t *testing.T) {
 		extra string
 	}{
 		"a category nobody configured": {
-			stub: &modelStub{answer: `{"verdict":"violation","category":"politics",` +
+			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"politics",` +
 				`"confidence":0.99}`}},
 		"a violation with no category": {
-			stub: &modelStub{answer: `{"verdict":"violation","category":"",` +
+			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"",` +
 				`"confidence":0.99}`}},
 		"an answer that is not JSON": {stub: &modelStub{answer: "我觉得没问题"}},
 		"a model that is not sure": {
-			stub: &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+			stub: &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 				`"confidence":0.2}`}},
 		"a server error": {stub: &modelStub{status: http.StatusInternalServerError}},
 		"no model configured": {
-			stub:  &modelStub{answer: `{"verdict":"ok"}`},
+			stub:  &modelStub{answer: `{"reason":"测试理由","verdict":"ok"}`},
 			extra: "\n", // replaced below
 		},
 	}
@@ -312,7 +312,7 @@ func TestTheAnswerIsRefusedWhenItCannotBeRead(t *testing.T) {
 // a code fence, which is common enough to be worth reading rather than failing.
 func TestFencesAroundTheAnswerAreRead(t *testing.T) {
 	stub := &modelStub{answer: "好的，结果如下：\n```json\n" +
-		`{"verdict":"violation","category":"fraud","reason":"骗钱","confidence":0.8}` +
+		`{"reason":"测试理由","verdict":"violation","category":"fraud","reason":"骗钱","confidence":0.8}` +
 		"\n```\n以上。"}
 	h := judgeHarness(t, stub, "")
 
@@ -328,7 +328,7 @@ func TestFencesAroundTheAnswerAreRead(t *testing.T) {
 // TestNothingToJudgeIsAFailure covers the empty window: it must not become a
 // verdict of any kind.
 func TestNothingToJudgeIsAFailure(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok"}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok"}`}
 	h := judgeHarness(t, stub, "")
 
 	if _, err := h.Judge(context.Background(), "", nil); !errors.Is(err, ErrUnjudged) {
@@ -343,7 +343,7 @@ func TestNothingToJudgeIsAFailure(t *testing.T) {
 // and the prompt says it was, so the model does not read a fragment as the whole
 // conversation.
 func TestTheWindowIsTruncatedAndSaysSo(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"ok","confidence":0.9}`}
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
 	h := judgeHarness(t, stub, "max_chars: 120\n")
 
 	long := strings.Repeat("这是一条很长的消息。", 20)

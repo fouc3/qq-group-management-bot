@@ -77,7 +77,7 @@ categories:
 // TestAJudgementIsWrittenDown covers the record a punishment is reviewed through:
 // it is written when the judgement is reached, before anybody acts on it.
 func TestAJudgementIsWrittenDown(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"reason":"卖号广告","confidence":0.9}`}
 	h, group, judgements := auditedHarness(t, stub)
 	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我")

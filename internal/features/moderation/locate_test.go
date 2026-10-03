@@ -95,7 +95,7 @@ func TestAQuoteIsLocatedByItsText(t *testing.T) {
 // window and never could be. So locating succeeded, and the whole report still came
 // back as "the quoted message is not in the window", which is what a real member hit.
 func TestATemporaryQuoteIsResolvedEndToEnd(t *testing.T) {
-	stub := &modelStub{answer: `{"verdict":"violation","category":"ad",` +
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"violation","category":"ad",` +
 		`"confidence":0.9,"recall":[1]}`}
 	h, group := reportHarness(t, stub, "")
 	// Two messages, and the quote's text names the second one.

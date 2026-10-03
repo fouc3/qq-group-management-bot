@@ -44,6 +44,26 @@ const judgeSystemPrompt = `你是 QQ 群的自动审核助手，只做一件事�
 4. 只输出一个 JSON 对象，前后不要有任何其他文字：
 {"verdict":"ok" 或 "violation","category":"类型名，ok 时留空","recall":[],"reason":"一句话理由","confidence":0 到 1 之间的数}
 
+本群情况，判定时必须结合：
+- 群名：%s
+- 本群主题（本群自己声明的场景，可能未声明）：%s
+
+判定时按"消息与本群主题是否同一场景"分两种情况：
+
+一、同一场景：推广、拉客、引流一律判违规。本群本身就是做这一类服务的，而消息在推同类站点、
+兑换、开服、低价供应、或把人引流到别处 —— 这正是本群最不希望出现的内容，不能因为"内容相关"
+或者"看起来像在聊天"就放过。
+
+二、不同场景：
+1. 普通的推荐、分享、讨论式链接（"这个挺好用""推荐一个"这类）**允许**，不判违规。
+2. 但链接本身是推广/带货性质的，就判为广告。判断依据是链接是否带推广参数或返利痕迹，例如
+   ?key=value 形式的跟踪/邀请/返利参数（?invite=、?ref=、?aff=、?code=、?from=、?utm_ 等）、
+   短链跳转、专属邀请码、返利口令、明显的推广落地页。
+3. 或者消息**明显是在做广告**（招揽、促销、报价、拉人、推销话术，无论有没有链接），同样判为
+   广告。
+
+无论 verdict 是 ok 还是 violation，reason 都必须写；判 ok 时写清为什么认为没问题。
+
 其中 recall 是**应当撤回的消息编号**数组，用消息前面方括号里的数字，例如 [2,5]。判定为
 违规时，把属于该违规者、应当撤回的消息编号都列出来（通常不止一条，比如连续刷的几条广
 告）；判定为 ok 时留空数组。不要列别人的消息。`
@@ -108,7 +128,8 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleSystem,
 			Content: fmt.Sprintf(judgeSystemPrompt,
-				strings.Join(categories, "、"), h.config().allowText(groupOpenID))},
+				strings.Join(categories, "、"), h.config().allowText(groupOpenID),
+				h.groupName(groupOpenID), h.topicFor(groupOpenID))},
 		{Role: openai.ChatMessageRoleUser, Content: judgeUserMessage(chain, h.config().MaxChars)},
 	}
 	request := openai.ChatCompletionRequest{
@@ -242,6 +263,12 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 	}
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		return Verdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
+	}
+	// A reason is required whatever the verdict is. "Nothing was found" with no words
+	// behind it is exactly the answer that cannot be reviewed afterwards, and it is the
+	// one a member asked about a link will want to read.
+	if strings.TrimSpace(payload.Reason) == "" {
+		return Verdict{}, fmt.Errorf("%w: the answer explained nothing", ErrUnjudged)
 	}
 	if strings.TrimSpace(payload.Verdict) != "violation" {
 		// Anything that is not an explicit violation is no violation, which also

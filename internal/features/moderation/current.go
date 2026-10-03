@@ -55,3 +55,22 @@ func (h *handler) Reload(section yaml.Node) error {
 	h.mu.Unlock()
 	return nil
 }
+
+// groupName is what the platform calls this group.
+func (h *handler) groupName(groupOpenID string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if name := h.names[groupOpenID]; name != "" {
+		return name
+	}
+	return "（未知）"
+}
+
+// topicFor is what this group says it is about, or empty when it has not said.
+func (h *handler) topicFor(groupOpenID string) string {
+	topic := h.config().groupFor(groupOpenID).Topic
+	if topic == "" {
+		return "（未声明）"
+	}
+	return topic
+}
