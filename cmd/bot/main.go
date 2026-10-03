@@ -43,7 +43,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger := app.NewLogger(cfg.Log)
+	logger, level := app.NewLogger(cfg.Log)
 
 	// Registering the features here is the whole extension point: a new
 	// feature adds one line to this list and a section to the file.
@@ -61,7 +61,7 @@ func run() error {
 		os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.Run(ctx, cfg, *configPath, registry, logger); err != nil {
+	if err := app.Run(ctx, cfg, *configPath, registry, logger, level); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}

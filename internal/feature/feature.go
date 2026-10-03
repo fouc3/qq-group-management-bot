@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
@@ -85,6 +84,10 @@ func (d Deps) GroupQQID(groupOpenID string) (int64, bool) {
 }
 
 // Feature is one independently switchable behaviour.
+//
+// A feature is built, started and stopped more than once while a bot runs: a
+// configuration change builds the feature it names again. What that asks of one is
+// spelled out on Close, which is where it is easiest to get wrong.
 type Feature interface {
 	// Name is the feature's name: its key under features: in the file, and
 	// the value of the feature log field.
@@ -94,8 +97,17 @@ type Feature interface {
 	Intents() qqbotsdk.Intent
 	// Register declares the feature's event handlers.
 	Register(ctx context.Context) error
-	// Close releases what the feature holds. It may run after a failed or
-	// skipped Register, so it must tolerate having nothing to release.
+	// Close releases what the feature holds.
+	//
+	// It may run after a failed or skipped Register, so it must tolerate having
+	// nothing to release.
+	//
+	// It must also leave nothing of the feature running: the handlers it
+	// registered are cancelled, the button namespaces it claimed are given back,
+	// the work it has in flight is ended, and the waiting for its own goroutines
+	// happens here rather than being left to chance. The instance that replaces it
+	// is built immediately afterwards, and two instances of one feature on one
+	// connection answer every event twice.
 	Close(ctx context.Context) error
 }
 
@@ -106,6 +118,11 @@ type Factory func(section yaml.Node, deps Deps) (Feature, error)
 const enabledKey = "enabled"
 
 // Registry maps feature names to the factories that build them.
+//
+// It is the table and nothing more: what a feature is called and how one is
+// built, not which of them are running. Assembling them -- and building one again
+// later, which is what a reload amounts to -- belongs to the app, where the
+// infrastructure they are handed is built.
 type Registry struct {
 	factories map[string]Factory
 	order     []string
@@ -131,61 +148,21 @@ func (r *Registry) Names() []string {
 	return append([]string(nil), r.order...)
 }
 
-// Build turns the configured sections into features.
+// Factory returns how one registered feature is built.
 //
-// A section that is absent, or present with enabled: false, is skipped. A
-// section whose name was never registered is an error: it is nearly always a
-// typo, and ignoring it would leave the operator believing a feature runs while
-// it does not.
-func (r *Registry) Build(cfg *config.Config, deps Deps) ([]Feature, error) {
-	for _, name := range cfg.FeatureNames() {
-		if _, known := r.factories[name]; !known {
-			return nil, fmt.Errorf("unknown feature %q; registered features are: %s",
-				name, strings.Join(r.Names(), ", "))
-		}
-	}
-
-	built := make([]Feature, 0, len(r.order))
-	// One registry of button namespaces for the features of one bot. The presses
-	// arrive on the single connection they share, so the dispatcher that routes
-	// them is shared too, and it has to exist before the first of them registers
-	// a claim in it.
-	if deps.Buttons == nil {
-		deps.Buttons = command.NewButtons()
-	}
-	for _, name := range r.order {
-		section, configured := cfg.Feature(name)
-		if !configured {
-			continue
-		}
-		on, err := sectionEnabled(name, section)
-		if err != nil {
-			return nil, err
-		}
-		if !on {
-			continue
-		}
-
-		featureDeps := deps
-		featureDeps.Logger = deps.Logger.With("feature", name)
-		instance, err := r.factories[name](section, featureDeps)
-		if err != nil {
-			return nil, fmt.Errorf("feature %s: %w", name, err)
-		}
-		if instance.Name() != name {
-			return nil, fmt.Errorf("feature registered as %q calls itself %q",
-				name, instance.Name())
-		}
-		built = append(built, instance)
-	}
-	return built, nil
+// A name that was never registered is nearly always a typo in the configuration,
+// and the caller is expected to say so: ignoring it would leave an operator
+// believing a feature runs while it does not.
+func (r *Registry) Factory(name string) (Factory, bool) {
+	factory, known := r.factories[name]
+	return factory, known
 }
 
-// sectionEnabled reads the enabled switch.
+// Enabled reports whether a feature's section turns it on.
 //
 // A section that is written out without the switch is on: writing it is already
 // a statement of intent. Only an explicit enabled: false turns it off.
-func sectionEnabled(name string, section yaml.Node) (bool, error) {
+func Enabled(name string, section yaml.Node) (bool, error) {
 	var probe struct {
 		Enabled *bool `yaml:"enabled"`
 	}

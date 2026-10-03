@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,27 +14,22 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
-	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
-	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 // stopTimeout bounds how long shutdown may take.
 const stopTimeout = 15 * time.Second
 
-// NewLogger builds the logger the rest of the program uses.
-func NewLogger(cfg config.Log) *slog.Logger {
-	var level slog.Level
-	switch cfg.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
+// NewLogger builds the logger the rest of the program uses, and the switch its
+// level is set through.
+//
+// The level is a variable rather than a constant because it is the one logging
+// setting that can change while the bot runs: the handler is fixed once built, and
+// every feature holds a copy of the logger, so a new level has to reach the same
+// handler rather than replace it.
+func NewLogger(cfg config.Log) (*slog.Logger, *slog.LevelVar) {
+	level := new(slog.LevelVar)
+	level.Set(levelOf(cfg.Level))
 	options := &slog.HandlerOptions{Level: level}
 
 	var handler slog.Handler
@@ -44,16 +38,19 @@ func NewLogger(cfg config.Log) *slog.Logger {
 	} else {
 		handler = slog.NewTextHandler(os.Stderr, options)
 	}
-	return slog.New(handler)
+	return slog.New(handler), level
 }
 
 // Run builds the bot and serves until ctx is cancelled.
 //
-// Features are registered before the connection is opened, so no event can
+// Every feature is registered before the connection is opened, so no event can
 // arrive before the handlers that should see it exist. Shutdown reverses that
 // order: the connection closes first, then the features release what they hold.
+//
+// What is built here is not built once and for all: a configuration change builds
+// a feature again, which is why the assembly and the lifetimes live in parts.
 func Run(ctx context.Context, cfg *config.Config, configPath string,
-	registry *feature.Registry, logger *slog.Logger) error {
+	registry *feature.Registry, logger *slog.Logger, level *slog.LevelVar) error {
 	client, err := buildClient(cfg)
 	if err != nil {
 		return err
@@ -87,7 +84,10 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 	logger.Info("the data layer is open",
 		"driver", cfg.Database.Driver, "dsn", cfg.Database.DSN)
 
-	features, err := registry.Build(cfg, feature.Deps{
+	// The features, and the lifetimes that a configuration change can restart. They
+	// are built, wired and registered in that order, so that nothing can arrive at
+	// a feature while what it drives still has nothing behind it.
+	live := newParts(registry, feature.Deps{
 		Client: client,
 		OneBot: oneBot,
 		Logger: logger,
@@ -95,62 +95,29 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 		BotQQ:  cfg.Bot.QQ,
 		Store:  database,
 		Redis:  cfg.RedisConfig(),
-	})
-	if err != nil {
+	}, ctx, logger)
+	if err := live.startFromConfig(cfg); err != nil {
 		return err
 	}
-	if len(features) == 0 {
-		return errors.New("app: no feature is enabled; turn one on under features:")
-	}
-	// Features that drive another feature are wired here, after both are built
-	// and before any event can arrive. Each of these is one capability: what one
-	// feature promises another, and what a consumer says when nothing promised it
-	// anything. Every wiring is logged, so "which feature got what" is answerable
-	// from a start rather than by reading the type assertions.
-	if err := feature.InjectVerifier(features, logger); err != nil {
-		closeFeatures(ctx, features, logger)
-		return err
-	}
-	if err := feature.InjectAdminDirectory(features, logger); err != nil {
-		closeFeatures(ctx, features, logger)
-		return err
-	}
-	// The judge is handed over before registration, for the same reason: the
-	// command that reports content must never be reachable while it still has
-	// nothing behind it.
-	if err := feature.InjectModeration(features, logger); err != nil {
-		closeFeatures(ctx, features, logger)
-		return err
-	}
-
-	// The file is watched from here on: a change is adopted without a restart, and a
-	// change a running bot cannot take is refused whole with the reason. Started after
-	// the wiring above so that nothing can be reconfigured before it is connected.
-	go watchReloads(ctx, configPath, cfg, features, logger)
-	// The blacklist is handed over here as well, before anything is registered,
-	// so no request can arrive while a feature is still on its empty default.
-	//
-	// Two shapes of the one list, because the two features want different things
-	// from it: the join-request feature asks whether an applicant is barred, and
-	// the command feature manages the entries. The first goes through the adapter
-	// in blacklist.go, which is the only reason these are two calls rather than
-	// one.
-	feature.Inject[joinrequest.Blacklist, joinBarrierAware](features,
-		barredFromJoining{blacklist: database.Blacklist()}, "the data layer",
-		"the join barrier", logger, joinBarrierAware.SetBlacklist)
-	feature.Inject[admincmd.Blacklist, blacklistAdminAware](features,
-		database.Blacklist(), "the data layer", "the blacklist", logger,
-		blacklistAdminAware.SetBlacklist)
-	for _, instance := range features {
-		if err := instance.Register(ctx); err != nil {
-			closeFeatures(ctx, features, logger)
-			return fmt.Errorf("app: registering %s: %w", instance.Name(), err)
+	defer func() {
+		if err := live.stopAll(); err != nil {
+			logger.Warn("a feature did not stop cleanly", "error", err)
 		}
-		logger.Info("feature ready", "feature", instance.Name())
-	}
-	defer closeFeatures(ctx, features, logger)
+	}()
 
-	intents := feature.Intents(features)
+	// The file is watched from here on: a change is adopted without a restart, by
+	// building the feature it names again. Started after the features are up, so
+	// that nothing can be reconfigured before it is connected.
+	reload := &reloader{
+		path:    configPath,
+		parts:   live,
+		logger:  logger,
+		level:   level,
+		current: cfg,
+	}
+	go watchReloads(ctx, reload)
+
+	intents := live.intents()
 	gateway, err := client.GetGateway(ctx)
 	if err != nil {
 		return fmt.Errorf("app: getting the gateway address: %w", err)
@@ -222,15 +189,4 @@ func buildOneBot(cfg config.OneBot, logger *slog.Logger) (*onebot.Client, error)
 	logger.Info("onebot fallback is configured",
 		"url", cfg.URL, "join_time_tolerance_seconds", cfg.Tolerance())
 	return client, nil
-}
-
-// closeFeatures releases every feature, reporting rather than failing, because
-// shutdown has to finish whatever the features report.
-func closeFeatures(ctx context.Context, features []feature.Feature, logger *slog.Logger) {
-	for _, instance := range features {
-		if err := instance.Close(ctx); err != nil {
-			logger.Warn("a feature did not close cleanly",
-				"feature", instance.Name(), "error", err)
-		}
-	}
 }
