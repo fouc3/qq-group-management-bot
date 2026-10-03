@@ -284,7 +284,7 @@ func displayName(group groupChoice) string {
 // refuses a message carrying one whole (40034106, measured), so the preview of a署名 notice
 // says "你" where the notice says their name.
 func (h *handler) broadcastText(s *session, forGroups bool) string {
-	rendered, signed := s.markdown == on, s.anonymous == off
+	rendered, signed := s.markdown == on, s.signed()
 
 	header := "来自管理员的广播"
 	if signed {

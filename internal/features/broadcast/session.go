@@ -137,6 +137,14 @@ func (s *session) missing() []string {
 	return waiting
 }
 
+// signed reports whether the notice says who asked for it.
+//
+// One question, asked in one place: the header writes the writer's name from this, and the
+// record says whether it did. Two separate readings of the same state would be a record that
+// can contradict the message a group read, and the one thing this record is for is saying
+// which of the two a group saw.
+func (s *session) signed() bool { return s.anonymous == off }
+
 // newToken is what a card's buttons carry back.
 //
 // A token rather than a message id: a message id is about a hundred characters of

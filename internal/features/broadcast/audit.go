@@ -389,9 +389,10 @@ func (h *handler) targetNames(ctx context.Context, p pager, entry store.Broadcas
 		names = append(names, h.callOfGroup(ctx, target.GroupOpenID))
 	}
 	if len(names) == 0 {
-		// A record whose targets are all somewhere else, which a group's own reading cannot
-		// see. Said rather than left blank, so that the line does not look truncated.
-		return []string{"本群之外的群"}
+		// A record whose targets are all somewhere else than what this reading covers. It
+		// should not happen -- a record is only read because it reached one of these groups --
+		// and saying so is better than a blank in the middle of a line.
+		return []string{"其它群"}
 	}
 	return names
 }

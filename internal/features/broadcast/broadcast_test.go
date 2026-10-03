@@ -194,6 +194,36 @@ func TestTheHeaderSaysWhoAsked(t *testing.T) {
 	}
 }
 
+// TestTheRecordAgreesWithTheNoticeAboutTheName covers the one question the record exists to
+// answer, and the thing it must never contradict.
+//
+// The header writes the writer's name or hides it, and the record says which of the two a group
+// read: a record that says "署名" about a message that hid the name is worse than no record at
+// all. The state a card cannot reach a send in is in here too, because that is the one where two
+// separate readings of the same state would have disagreed.
+func TestTheRecordAgreesWithTheNoticeAboutTheName(t *testing.T) {
+	cases := map[string]struct {
+		state     chosen
+		anonymous bool
+	}{
+		"chosen off, so the group is told": {state: off, anonymous: false},
+		"chosen on, so the group is not":   {state: on, anonymous: true},
+		"never chosen":                     {state: unset, anonymous: true},
+	}
+	for _, want := range cases {
+		s := &session{chat: theAdmin, markdown: on, anonymous: want.state}
+		notice := (&handler{}).broadcastText(s, true)
+
+		if named := strings.Contains(notice, theAdmin); named == want.anonymous {
+			t.Errorf("the notice names the writer=%v while the record would say anonymous=%v:"+
+				"\n%s", named, want.anonymous, notice)
+		}
+		if anonymous := !s.signed(); anonymous != want.anonymous {
+			t.Errorf("the record would say anonymous=%v, want %v", anonymous, want.anonymous)
+		}
+	}
+}
+
 // TestTheAnonymousHeaderIsStillBold covers the other half of the same line: where there is no
 // name to get wrong, the header keeps the emphasis that makes it read as a header.
 func TestTheAnonymousHeaderIsStillBold(t *testing.T) {

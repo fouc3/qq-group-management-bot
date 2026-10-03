@@ -469,11 +469,14 @@ func (h *handler) deposit(ctx context.Context, s *session, reached []store.Targe
 	err := h.deps.Store.Broadcasts().Record(ctx, store.Broadcast{
 		Token:        s.token,
 		SenderOpenID: s.chat,
-		Anonymous:    s.anonymous == on,
-		Markdown:     s.markdown == on,
-		Content:      s.content,
-		SentAt:       time.Now().Unix(),
-		Targets:      reached,
+		// The same question the notice's header answers, rather than a second reading of the
+		// same state: a record that says "署名" about a message that hid the name is worse than
+		// no record at all.
+		Anonymous: !s.signed(),
+		Markdown:  s.markdown == on,
+		Content:   s.content,
+		SentAt:    time.Now().Unix(),
+		Targets:   reached,
 	})
 	if err != nil {
 		h.logger(s.chat).Error("a broadcast was posted and could not be recorded",
