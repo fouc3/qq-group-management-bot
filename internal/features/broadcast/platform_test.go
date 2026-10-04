@@ -167,9 +167,9 @@ func (p *platform) lastMessageHadKeyboard() bool {
 	return carried
 }
 
-// olderCloseToken is the token of the record being held, so that a test can press the close
-// button a page sent before it was taken away still carries.
-func (p *platform) olderCloseToken(t *testing.T) string {
+// heldPageToken is the token of the record being held, so that a test can press a button the
+// page it is looking at was not sent with.
+func (p *platform) heldPageToken(t *testing.T) string {
 	t.Helper()
 	p.handler.mu.Lock()
 	defer p.handler.mu.Unlock()
@@ -187,7 +187,7 @@ func (p *platform) olderCloseToken(t *testing.T) string {
 //
 // Built by hand rather than read off a page, because the page that offered it is gone: the only
 // place it exists is in a chat somebody has already been sent.
-func (p *platform) pressPagePayload(t *testing.T, token, kind, member string) {
+func (p *platform) pressPagePayload(t *testing.T, token, kind, extra, member string) {
 	t.Helper()
 	press := command.Press{
 		Data: &qqbotsdk.InteractionCreateData{
@@ -198,7 +198,7 @@ func (p *platform) pressPagePayload(t *testing.T, token, kind, member string) {
 		EventID: "EVENT-OLDER",
 		// The namespace is taken off, which is what the command layer hands over: the layer that
 		// claims the buttons is the one that knows whose they are.
-		Payload: strings.TrimPrefix(buttonData(token, kind, "1"), buttonPrefix),
+		Payload: strings.TrimPrefix(buttonData(token, kind, extra), buttonPrefix),
 	}
 	if err := p.handler.onPress(context.Background(), press); err != nil {
 		t.Fatalf("pressing a button left in the chat: %v", err)

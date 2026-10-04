@@ -76,13 +76,6 @@ func (h *handler) lookupPage(token string) (*pager, bool) {
 	return p, found
 }
 
-// forgetPage stops a record being read, so that a press on an old page cannot bring it back.
-func (h *handler) forgetPage(p *pager) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.pages, p.token)
-}
-
 // auditCommand shows what was broadcast in this group, and who asked for it.
 //
 // Asked in a group, and about that group: the record is what the group's own administrators
@@ -132,6 +125,13 @@ func (h *handler) auditPrivately(ctx context.Context, data *qqbotsdk.C2CMessageC
 }
 
 // onPagePress turns a page of the record.
+//
+// It is only ever told to go to a page, because that is all a page button asks for now. The
+// button the pages used to carry, which asked for the record to go away, is not answered
+// here: it is read as a page button and turns to the page it named, which is the page already
+// up. Answering it at all is the point -- a button left in a chat that answers nothing leaves
+// whoever presses it watching a spinner -- and there is nothing left for it to do, because the
+// way to finish with a record is to delete it where it is.
 func (h *handler) onPagePress(ctx context.Context, press command.Press, asked action) error {
 	p, found := h.lookupPage(asked.token)
 	if !found {
@@ -151,15 +151,6 @@ func (h *handler) onPagePress(ctx context.Context, press command.Press, asked ac
 	page, err := strconv.Atoi(asked.extra)
 	if err != nil {
 		return h.answer(press, qqbotsdk.InteractionCodeFailed)
-	}
-	if asked.kind == kindPageClose {
-		// No page offers this any more, and the pages that were already sent when it was
-		// offered still carry it: a button in somebody's chat that answers nothing leaves them
-		// watching a spinner, so it is still answered -- by taking the page away, which is what
-		// it says.
-		h.forgetPage(p)
-		h.recallPage(ctx, *p)
-		return h.answer(press, qqbotsdk.InteractionCodeSuccess)
 	}
 
 	// The button carries the page it goes to rather than a direction to work out: what a

@@ -66,12 +66,19 @@ const (
 	// The page buttons of a record: the same namespace, and a press on one is told from a
 	// press on a card by knowing these, so that a page never has to be looked up in the
 	// cards that are open.
-	kindPagePrev  = "pprev"
-	kindPageNext  = "pnext"
+	kindPagePrev = "pprev"
+	kindPageNext = "pnext"
+	// kindPageClose is a page button no page is sent with any more: the way to finish with a
+	// record is to delete it where it is. It is still named, and still read as a page button,
+	// so that the button the pages sent before it was dropped is answered as one and
+	// answered at all.
 	kindPageClose = "pclose"
 )
 
 // isPage reports whether this press is one of a record's page buttons.
+//
+// The close button counts, though no page carries one: what is pressed in a chat is not
+// always what is sent now.
 func (a action) isPage() bool {
 	switch a.kind {
 	case kindPagePrev, kindPageNext, kindPageClose:

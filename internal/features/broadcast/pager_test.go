@@ -166,27 +166,28 @@ func TestASinglePageCarriesNoKeyboard(t *testing.T) {
 	}
 }
 
-// TestACloseButtonFromAnOlderPageStillWorks covers the button the pages used to carry.
+// TestAnOlderPageButtonWithNowhereToGoSaysSo covers the button the pages used to carry.
 //
-// No page offers it any more, and a page sent before that change is still in somebody's chat
-// with it. A button that answers nothing leaves whoever presses it watching a spinner, so it is
-// still answered -- by taking the page away, which is what it says.
-func TestACloseButtonFromAnOlderPageStillWorks(t *testing.T) {
+// No page offers a way to close the record any more, and a page sent before that change is
+// still in somebody's chat with it. It is read as a page button -- there is nothing else it
+// could be -- and what it asks for is a page, which this record answers for as long as it has
+// one. A button that answers nothing leaves whoever presses it watching a spinner, so it is
+// answered even so, and it does not take the record with it.
+func TestAnOlderPageButtonWithNowhereToGoSaysSo(t *testing.T) {
 	p := newPlatform(t)
 	p.record(t, "一")
 	p.askPrivately(t, theAdmin)
 
-	token := p.olderCloseToken(t)
-	before := len(p.recalls)
-	p.pressPagePayload(t, token, kindPageClose, theAdmin)
+	token := p.heldPageToken(t)
+	// The button the old pages sent named the page it was on, and this is what is left of it:
+	// pressing it again is pressing the page that is already up.
+	p.pressPagePayload(t, token, kindPageClose, "1", theAdmin)
 
-	if len(p.recalls) == before {
-		t.Error("an older page's close button left the page in the chat")
+	if codes := p.answered; len(codes) == 0 || codes[len(codes)-1] != qqbotsdk.InteractionCodeSuccess {
+		t.Errorf("a page button that leads nowhere was answered %v", codes)
 	}
-	// Forgotten rather than merely hidden: the same button pressed again finds nothing.
-	p.pressPagePayload(t, token, kindPageClose, theAdmin)
-	if said := p.lastText(); !strings.Contains(said, "已经过期") {
-		t.Errorf("a closed record can still be turned:\n%s", said)
+	if len(p.handler.pages) != 1 {
+		t.Error("a button that cannot be placed took the record away")
 	}
 }
 
