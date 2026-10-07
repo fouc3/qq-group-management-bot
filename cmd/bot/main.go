@@ -27,6 +27,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinverify"
 	"github.com/fouc3/qq-group-management-bot/internal/features/memberlog"
 	"github.com/fouc3/qq-group-management-bot/internal/features/moderation"
+	"github.com/fouc3/qq-group-management-bot/internal/features/muteguard"
 )
 
 func main() {
@@ -54,6 +55,7 @@ func run() error {
 	registry.Add(admincmd.Name, admincmd.New)
 	registry.Add(moderation.Name, moderation.New)
 	registry.Add(memberlog.Name, memberlog.New)
+	registry.Add(muteguard.Name, muteguard.New)
 	// After the command feature, because what this one answers is put into that
 	// feature's table rather than into a table of its own.
 	registry.Add(broadcast.Name, broadcast.New)

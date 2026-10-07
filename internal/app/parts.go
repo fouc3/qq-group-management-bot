@@ -16,6 +16,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
+	"github.com/fouc3/qq-group-management-bot/internal/mutelog"
 )
 
 // parts is the set of features one bot is running, and the operations that keep
@@ -57,6 +58,13 @@ func newParts(registry *feature.Registry, deps feature.Deps, ctx context.Context
 	logger *slog.Logger) *parts {
 	if deps.Buttons == nil {
 		deps.Buttons = command.NewButtons()
+	}
+	// One record of the mutes this bot applied, for the same reason as the button
+	// registry above: the features that mute and the feature that lifts somebody
+	// else's mute are different ones, and the platform does not say who applied a
+	// mute.
+	if deps.Mutes == nil {
+		deps.Mutes = mutelog.New()
 	}
 	return &parts{
 		registry: registry,
