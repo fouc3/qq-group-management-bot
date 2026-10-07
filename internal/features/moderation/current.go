@@ -1,6 +1,7 @@
 package moderation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -49,10 +50,20 @@ func (h *handler) Reload(section yaml.Node) error {
 	if fresh.ContextScope != inForce.ContextScope {
 		return errors.New("context_scope 改了：取窗方式在启动时决定，需要重启")
 	}
+	if fresh.HighRisk.MaxInFlight != inForce.HighRisk.MaxInFlight {
+		// The room for automatic judgements is a channel made at startup, so a new
+		// number here would be a setting that reads as applied and is not.
+		return errors.New("high_risk max_in_flight 改了：可同时进行的自动判定数在启动时" +
+			"决定，需要重启")
+	}
 
 	h.mu.Lock()
 	h.cfg = fresh
 	h.mu.Unlock()
+	// The list is read again: the switch that decides whether it is enforced may
+	// just have been turned back on, and a mark that ran out while it was off has
+	// to be gone from memory as well as from the next read of the table.
+	h.loadWatches(context.Background())
 	return nil
 }
 

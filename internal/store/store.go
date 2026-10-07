@@ -30,6 +30,11 @@ type Pending struct {
 	// Seconds rather than a time type because the column is an integer in both
 	// dialects, and a stored time would otherwise be formatted by whichever
 	// driver wrote it.
+	//
+	// HeldUntil is zero for a hold that has no expiry of its own, which is what a
+	// pseudo-mute is: it lasts until the member verifies, so there is no moment at
+	// which anybody would release them, and a filter that asked whether the hold
+	// is still in the future would drop exactly those rows.
 	JoinedAt  int64
 	Deadline  int64
 	HeldUntil int64
@@ -65,6 +70,13 @@ type Store interface {
 	Pending() PendingStore
 	// Blacklist holds the applicants barred from joining.
 	Blacklist() BlacklistStore
+	// Watches holds the members whose messages are judged as they arrive.
+	//
+	// Not a second blacklist, though it is shaped like one: a barred applicant is
+	// kept out of the group, while a watched member is already in it and every
+	// message of theirs costs a judgement. What the two share is being a list an
+	// administrator writes and a moment it stops applying.
+	Watches() WatchStore
 	// Judgements holds the record of what was judged and what followed.
 	Judgements() JudgementStore
 	// MemberEvents holds who joined a group and who left it.
@@ -101,7 +113,9 @@ type PendingStore interface {
 	//
 	// Released entries are left out rather than returned and filtered by the
 	// caller: their mute is over, so there is nothing left to answer or to act
-	// on, and handing them back only invites a caller to do so by mistake.
+	// on, and handing them back only invites a caller to do so by mistake. An
+	// entry with no expiry of its own is not a released one and is returned:
+	// nothing releases it but the member verifying.
 	Load(ctx context.Context, now time.Time) ([]Pending, error)
 	// Put records an entry, replacing any entry with the same token.
 	Put(ctx context.Context, entry Pending) error
@@ -127,6 +141,47 @@ type BlacklistStore interface {
 	Remove(ctx context.Context, key string) error
 	// List returns entries, newest first.
 	List(ctx context.Context, limit int) ([]Barred, error)
+}
+
+// Watch is one member whose messages are judged as they arrive.
+//
+// It is keyed on the member alone and not on a group, because what it describes
+// is a member rather than a membership: a spammer marked in one group is the same
+// person in the next one, and the punishment for what a judgement finds is still
+// decided by the group it was found in.
+type Watch struct {
+	ID           string
+	MemberOpenID string
+	Reason       string
+	AddedAt      int64
+	AddedBy      string
+	// ExpiresAt is when the watch ends, as a Unix timestamp.
+	//
+	// Every watch has one. A list that makes every message of a member cost a
+	// judgement is a list somebody has to revisit, and a mark that never expires
+	// is one nobody ever revisits: the entry stops being a decision and becomes a
+	// fact about the past that nobody remembers making. A zero is therefore
+	// refused rather than read as "for ever".
+	ExpiresAt int64
+}
+
+// WatchStore holds the members whose messages are judged as they arrive.
+type WatchStore interface {
+	// List returns the watches still in force, newest first.
+	List(ctx context.Context, now time.Time) ([]Watch, error)
+	// Add records a watch, replacing any earlier one for the same member.
+	//
+	// Replacing is what makes re-marking somebody an extension rather than a
+	// second entry: two rows for one member would be two answers to "until
+	// when", and the caller has just given the answer it means.
+	Add(ctx context.Context, entry Watch) error
+	// Remove forgets the watch for one member, and reports whether there was one.
+	//
+	// The answer is returned rather than left to a caller that reads the list
+	// first: the two would race with the other administrators, and removing
+	// something that was not there and reporting success is the one outcome that
+	// leaves an operator believing a list changed when it did not.
+	Remove(ctx context.Context, memberOpenID string) (bool, error)
 }
 
 // Config says which database to open and how.

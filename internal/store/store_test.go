@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,104 +172,219 @@ func TestPendingRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBlacklistBarredCoversBothIdentities covers the lookup, including the case
-// that would silently refuse everybody: an applicant whose member openid is
-// empty must not match the rows that only name a union openid.
-func TestBlacklistBarredCoversBothIdentities(t *testing.T) {
+// TestAHoldWithNoExpiryIsAlwaysLoaded covers the row a pseudo-mute leaves behind.
+//
+// held_until is zero for a hold that nobody releases -- the member is held until
+// they verify -- so a load that asks whether the hold is still in the future has to
+// keep it: read as an ordinary moment, the zero would be a hold that ended before
+// the epoch and every one of them would be dropped as released.
+func TestAHoldWithNoExpiryIsAlwaysLoaded(t *testing.T) {
 	opened := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now()
 
-	if err := opened.Blacklist().Add(ctx, Barred{
-		ID: "ENTRY-1", MemberOpenID: "MEMBER-1", UnionOpenID: "UNION-1",
-		Reason: "test", AddedAt: now.Unix(),
-	}); err != nil {
-		t.Fatalf("Add: %v", err)
+	entry := Pending{
+		Token:        "TOKEN-NO-EXPIRY",
+		GroupOpenID:  "GROUP-1",
+		MemberOpenID: "MEMBER-2",
+		JoinedAt:     now.Unix(),
+		Deadline:     now.Add(48 * time.Hour).Unix(),
+		HeldUntil:    0,
+		Settings:     `{"MuteMode":"pseudo"}`,
+	}
+	if err := opened.Pending().Put(ctx, entry); err != nil {
+		t.Fatalf("Put: %v", err)
 	}
 
-	for name, identity := range map[string][2]string{
-		"by member openid": {"MEMBER-1", ""},
-		"by union openid":  {"", "UNION-1"},
-		"by both":          {"MEMBER-1", "UNION-1"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			barred, err := opened.Blacklist().Barred(ctx, identity[0], identity[1], now)
-			if err != nil {
-				t.Fatalf("Barred: %v", err)
-			}
-			if !barred {
-				t.Error("Barred = false, want true")
-			}
-		})
+	entries, err := opened.Pending().Load(ctx, now.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Load returned %d entries a year later, want the hold that never "+
+			"runs out", len(entries))
+	}
+	if entries[0].HeldUntil != 0 {
+		t.Errorf("HeldUntil = %d, want the zero it was written with", entries[0].HeldUntil)
 	}
 
-	t.Run("somebody else is not barred", func(t *testing.T) {
-		barred, err := opened.Blacklist().Barred(ctx, "OTHER-MEMBER", "OTHER-UNION", now)
-		if err != nil {
-			t.Fatalf("Barred: %v", err)
-		}
-		if barred {
-			t.Error("Barred = true for somebody who is not on the list")
-		}
-	})
-
-	t.Run("no identity at all is not barred", func(t *testing.T) {
-		barred, err := opened.Blacklist().Barred(ctx, "", "", now)
-		if err != nil {
-			t.Fatalf("Barred: %v", err)
-		}
-		if barred {
-			t.Error("Barred = true with no identity, which would refuse everybody")
-		}
-	})
-
-	t.Run("an expired entry stops barring", func(t *testing.T) {
-		if err := opened.Blacklist().Add(ctx, Barred{
-			ID: "ENTRY-2", MemberOpenID: "MEMBER-2",
-			AddedAt: now.Unix(), ExpiresAt: now.Add(-time.Hour).Unix(),
-		}); err != nil {
-			t.Fatalf("Add: %v", err)
-		}
-		barred, err := opened.Blacklist().Barred(ctx, "MEMBER-2", "", now)
-		if err != nil {
-			t.Fatalf("Barred: %v", err)
-		}
-		if barred {
-			t.Error("Barred = true for an entry that has expired")
-		}
-	})
+	// Moving the deadline keeps that reading: the pseudo-mute is renewed by
+	// nothing, so what reaches here is a deadline moving and the hold staying
+	// open, and storing the zero moment's own year instead would turn it into a
+	// hold that has already ended.
+	if err := opened.Pending().MoveDeadline(ctx, entry.Token,
+		now.Add(96*time.Hour), time.Time{}); err != nil {
+		t.Fatalf("MoveDeadline: %v", err)
+	}
+	entries, err = opened.Pending().Load(ctx, now.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("Load after the update: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Load returned %d entries after the update, want the open hold",
+			len(entries))
+	}
+	if entries[0].HeldUntil != 0 || entries[0].Deadline != now.Add(96*time.Hour).Unix() {
+		t.Errorf("after the update: %+v", entries[0])
+	}
 }
 
-// TestBlacklistListAndRemove covers the calls an operator's command uses.
-func TestBlacklistListAndRemove(t *testing.T) {
+// TestAWatchRoundTrip covers the high risk list: what is written is what is read
+// back, replacing a mark replaces it rather than adding to it, and removing it says
+// whether there was one.
+func TestAWatchRoundTrip(t *testing.T) {
 	opened := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now()
 
-	if err := opened.Blacklist().Add(ctx, Barred{
-		ID: "ENTRY-1", MemberOpenID: "MEMBER-1", Reason: "spam", AddedAt: now.Unix(),
+	if err := opened.Watches().Add(ctx, Watch{
+		ID:           "WATCH-1",
+		MemberOpenID: "MEMBER-1",
+		Reason:       "广告",
+		AddedAt:      now.Unix(),
+		AddedBy:      "ADMIN-1",
+		ExpiresAt:    now.Add(7 * 24 * time.Hour).Unix(),
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	entries, err := opened.Blacklist().List(ctx, 10)
+
+	entries, err := opened.Watches().List(ctx, now)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Reason != "spam" {
-		t.Fatalf("List returned %+v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("List returned %d entries, want 1", len(entries))
+	}
+	got := entries[0]
+	if got.MemberOpenID != "MEMBER-1" || got.Reason != "广告" || got.AddedBy != "ADMIN-1" ||
+		got.ExpiresAt != now.Add(7*24*time.Hour).Unix() {
+		t.Errorf("List returned %+v, want what was written", got)
 	}
 
-	// Removing by the identity an operator would have to hand is the useful case:
-	// the row's ID is not something anyone types.
-	if err := opened.Blacklist().Remove(ctx, "MEMBER-1"); err != nil {
+	// Re-marking somebody replaces their entry rather than adding a second one:
+	// two rows for one member would be two answers to "until when".
+	later := now.Add(30 * 24 * time.Hour)
+	if err := opened.Watches().Add(ctx, Watch{
+		ID:           "WATCH-2",
+		MemberOpenID: "MEMBER-1",
+		Reason:       "again",
+		AddedAt:      now.Unix(),
+		ExpiresAt:    later.Unix(),
+	}); err != nil {
+		t.Fatalf("Add over an existing mark: %v", err)
+	}
+	entries, err = opened.Watches().List(ctx, now)
+	if err != nil {
+		t.Fatalf("List after re-marking: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ExpiresAt != later.Unix() {
+		t.Errorf("after re-marking: %+v, want one entry ending later", entries)
+	}
+
+	// A mark that has run out is not returned: there is nothing to enforce, and
+	// handing it back would invite a caller to judge somebody for ever.
+	expired, err := opened.Watches().List(ctx, later.Add(time.Second))
+	if err != nil {
+		t.Fatalf("List after the mark ran out: %v", err)
+	}
+	if len(expired) != 0 {
+		t.Errorf("List returned %d marks that had run out, want none", len(expired))
+	}
+
+	removed, err := opened.Watches().Remove(ctx, "MEMBER-1")
+	if err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	barred, err := opened.Blacklist().Barred(ctx, "MEMBER-1", "", now)
-	if err != nil {
-		t.Fatalf("Barred: %v", err)
+	if !removed {
+		t.Error("Remove reported nothing removed although the mark was there")
 	}
-	if barred {
-		t.Error("the entry is still barred after being removed")
+	// Removing what is not there is a fact, not a failure: it is what keeps a
+	// command from reporting a change that did not happen.
+	removed, err = opened.Watches().Remove(ctx, "MEMBER-1")
+	if err != nil {
+		t.Fatalf("Remove again: %v", err)
+	}
+	if removed {
+		t.Error("Remove reported a removal for a member who was not marked")
+	}
+}
+
+// TestAWatchMustEnd covers the rule there is nowhere else to put: an entry with no
+// moment it ends is refused rather than read as permanent.
+func TestAWatchMustEnd(t *testing.T) {
+	opened := openTestStore(t)
+	ctx := context.Background()
+
+	err := opened.Watches().Add(ctx, Watch{
+		ID:           "WATCH-1",
+		MemberOpenID: "MEMBER-1",
+		AddedAt:      time.Now().Unix(),
+	})
+	if err == nil {
+		t.Fatal("a mark with no expiry was accepted")
+	}
+	if !strings.Contains(err.Error(), "ends") {
+		t.Errorf("err = %v, want it to say what is missing", err)
+	}
+	entries, err := opened.Watches().List(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the refused mark was stored anyway: %+v", entries)
+	}
+}
+
+// TestCountViolationsCountsOneMember covers what the automatic mark is decided
+// from: the judgements that found this member breaking a rule, across every group,
+// and only those -- a judgement that never happened is not a violation.
+func TestCountViolationsCountsOneMember(t *testing.T) {
+	opened := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	record := func(id, group, subject, verdict string) {
+		t.Helper()
+		if err := opened.Judgements().Record(ctx, Judgement{
+			ID:            id,
+			GroupOpenID:   group,
+			SubjectOpenID: subject,
+			Verdict:       verdict,
+			CreatedAt:     now.Unix(),
+		}); err != nil {
+			t.Fatalf("Record %s: %v", id, err)
+		}
+	}
+	record("J-1", "GROUP-1", "MEMBER-1", JudgementViolation)
+	record("J-2", "GROUP-2", "MEMBER-1", JudgementViolation)
+	record("J-3", "GROUP-1", "MEMBER-1", JudgementOK)
+	record("J-4", "GROUP-1", "MEMBER-2", JudgementViolation)
+
+	count, err := opened.Judgements().CountViolations(ctx, "MEMBER-1", time.Time{})
+	if err != nil {
+		t.Fatalf("CountViolations: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want the two violations of this member in either "+
+			"group", count)
+	}
+
+	// A moment is a lower bound, so a count from after the records is nothing.
+	count, err = opened.Judgements().CountViolations(ctx, "MEMBER-1", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CountViolations since later: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d since a moment after every record, want none", count)
+	}
+
+	// Nobody is not somebody who was caught.
+	count, err = opened.Judgements().CountViolations(ctx, "", time.Time{})
+	if err != nil {
+		t.Fatalf("CountViolations with no subject: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d for no subject, want none", count)
 	}
 }
 

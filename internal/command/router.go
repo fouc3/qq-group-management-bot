@@ -11,6 +11,14 @@ import (
 // takes.
 type EventHandler func(ctx context.Context, event *qqbotsdk.Event) error
 
+// HeldBack reports whether a member's messages are being taken back by the join
+// verification, so that nothing is answered at all.
+//
+// It is a question about somebody else's state, which is why it is asked rather
+// than worked out here: only the feature that holds the member knows, and it knows
+// for exactly as long as the hold lasts.
+type HeldBack func(groupOpenID, memberOpenID string) bool
+
 // Handlers is what a feature answers, by the kind of message it arrives in.
 type Handlers struct {
 	// Group handles a group message, whichever of the two event types carried
@@ -54,6 +62,14 @@ type Router struct {
 	// registrations are the handlers this router declared, kept so that a feature
 	// that stops stops answering.
 	registrations []*qqbotsdk.Registration
+	// heldBack is asked before a group message reaches the handlers above, and a
+	// member it names for is one whose message is not answered at all. Nil when
+	// nothing holds anybody back, which is every bot without the verification.
+	//
+	// It is guarded by mu rather than being a plain field, because the wiring that
+	// hands it over runs while the bot is already answering: a feature built again
+	// is wired again, and a message can arrive in the middle of that.
+	heldBack HeldBack
 }
 
 // NewRouter returns a router for one feature, claiming its buttons in the
@@ -63,6 +79,21 @@ type Router struct {
 // one of its own, for the reason ButtonsOrOwn gives.
 func NewRouter(owner string, buttons *Buttons) *Router {
 	return &Router{Seen: NewSeen(), owner: owner, buttons: ButtonsOrOwn(buttons)}
+}
+
+// SetHeldBack hands over the question asked before a group message is answered.
+//
+// A member whose messages are being taken back is one the group cannot see: an
+// answer to them would be a message about something nobody else can read, and the
+// answer itself is not taken back. So nothing is answered -- no command, no help,
+// no failure, and the message is not even counted as one this feature looked at.
+//
+// It is about the group and the member, not about the message: a hold is over a
+// member for as long as it lasts, so every message of theirs is the same answer.
+func (r *Router) SetHeldBack(held HeldBack) {
+	r.mu.Lock()
+	r.heldBack = held
+	r.mu.Unlock()
 }
 
 // Register declares the events on the client.
@@ -92,9 +123,10 @@ func (r *Router) Register(client *qqbotsdk.Client, handlers Handlers) error {
 		// showed, while a mention-only group delivers the same message as
 		// GROUP_AT_MESSAGE_CREATE. Registering only one of them made the bot
 		// unable to see commands at all in one of the two modes.
+		group := r.unlessHeldBack(handlers.Group)
 		r.registrations = append(r.registrations,
-			client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, handlers.Group),
-			client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, handlers.Group))
+			client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, group),
+			client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, group))
 	}
 	if handlers.Private != nil {
 		r.registrations = append(r.registrations,
@@ -108,6 +140,60 @@ func (r *Router) Register(client *qqbotsdk.Client, handlers Handlers) error {
 		r.buttons.Register(client)
 	}
 	return nil
+}
+
+// unlessHeldBack wraps a group handler so that a message from a member who is
+// being held back never reaches it.
+//
+// Dropped before the handler rather than inside it, for the reason Seen gives: a
+// message this feature never looked at must not be recorded as one it handled, and
+// the only way to be sure it was not looked at is not to call.
+//
+// The sender is read out of the event here instead of by the handler, because the
+// question is asked of whoever holds the member, and a feature that had to ask it
+// would have to know that holds exist at all. The message is not logged here: the
+// hold that drops it says so where it takes the message back, and that is the one
+// line worth having.
+func (r *Router) unlessHeldBack(handler EventHandler) EventHandler {
+	return func(ctx context.Context, event *qqbotsdk.Event) error {
+		groupOpenID, memberOpenID, readable := senderOf(event)
+		if !readable {
+			// Nothing to ask about: the handler is called and says what it thinks
+			// of a group event it cannot read, which is the same answer it gave
+			// before there was a hold to ask about.
+			return handler(ctx, event)
+		}
+		if r.holds(groupOpenID, memberOpenID) {
+			return nil
+		}
+		return handler(ctx, event)
+	}
+}
+
+// holds asks the verification whether this member's messages are being taken
+// back.
+func (r *Router) holds(groupOpenID, memberOpenID string) bool {
+	r.mu.Lock()
+	held := r.heldBack
+	r.mu.Unlock()
+	return held != nil && held(groupOpenID, memberOpenID)
+}
+
+// senderOf reads who sent a group message, and whether the event said.
+//
+// An event that does not decode, or that is not a group message at all, is not
+// this function's to complain about: it reports that nothing could be read, and
+// the handler it was on its way to does the complaining as it always did.
+func senderOf(event *qqbotsdk.Event) (groupOpenID, memberOpenID string, readable bool) {
+	value, err := event.Decode()
+	if err != nil {
+		return "", "", false
+	}
+	data, ok := value.(*qqbotsdk.GroupMessageCreateData)
+	if !ok || data.Author == nil || data.Author.MemberOpenID == "" {
+		return "", "", false
+	}
+	return data.GroupOpenID, data.Author.MemberOpenID, true
 }
 
 // Stop stops this feature answering, and gives back what it claimed.

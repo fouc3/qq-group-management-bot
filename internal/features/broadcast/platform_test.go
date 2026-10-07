@@ -167,44 +167,6 @@ func (p *platform) lastMessageHadKeyboard() bool {
 	return carried
 }
 
-// heldPageToken is the token of the record being held, so that a test can press a button the
-// page it is looking at was not sent with.
-func (p *platform) heldPageToken(t *testing.T) string {
-	t.Helper()
-	p.handler.mu.Lock()
-	defer p.handler.mu.Unlock()
-	if len(p.handler.pages) != 1 {
-		t.Fatalf("the record is held under %d token(s), want one", len(p.handler.pages))
-	}
-	for token := range p.handler.pages {
-		return token
-	}
-	return ""
-}
-
-// pressPagePayload presses a page button that is not on any page any more, the way a button
-// left in a chat is pressed.
-//
-// Built by hand rather than read off a page, because the page that offered it is gone: the only
-// place it exists is in a chat somebody has already been sent.
-func (p *platform) pressPagePayload(t *testing.T, token, kind, extra, member string) {
-	t.Helper()
-	press := command.Press{
-		Data: &qqbotsdk.InteractionCreateData{
-			ID:         "INTERACTION-OLDER",
-			Scene:      qqbotsdk.InteractionSceneC2C,
-			UserOpenID: member,
-		},
-		EventID: "EVENT-OLDER",
-		// The namespace is taken off, which is what the command layer hands over: the layer that
-		// claims the buttons is the one that knows whose they are.
-		Payload: strings.TrimPrefix(buttonData(token, kind, extra), buttonPrefix),
-	}
-	if err := p.handler.onPress(context.Background(), press); err != nil {
-		t.Fatalf("pressing a button left in the chat: %v", err)
-	}
-}
-
 // lastText is what the last message sent says.
 func (p *platform) lastText() string {
 	markdown, _ := p.card()["markdown"].(map[string]any)

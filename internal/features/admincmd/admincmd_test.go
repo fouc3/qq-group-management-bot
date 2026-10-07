@@ -118,7 +118,10 @@ type stubVerifier struct {
 	resent    []string
 	// pending names the members the stub reports as waiting to verify.
 	pending map[string]bool
-	fail    bool
+	// pseudo names the members the stub reports as held back without a mute, whose
+	// messages are therefore taken back and answered by nobody.
+	pseudo map[string]bool
+	fail   bool
 }
 
 func (s *stubVerifier) Reverify(_ context.Context, groupOpenID, memberOpenID string) error {
@@ -145,6 +148,15 @@ func (s *stubVerifier) IsPending(groupOpenID, memberOpenID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pending[groupOpenID+"/"+memberOpenID]
+}
+
+// IsPseudoMuted is what the router asks before a group message is answered: a
+// member the verification is holding back without a mute is one whose messages are
+// being taken back as they arrive.
+func (s *stubVerifier) IsPseudoMuted(groupOpenID, memberOpenID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pseudo[groupOpenID+"/"+memberOpenID]
 }
 
 func (s *stubVerifier) Resend(_ context.Context, groupOpenID, memberOpenID string) error {
@@ -767,6 +779,37 @@ func TestCloseStopsAnswering(t *testing.T) {
 	h.send("/菜单", testAdmin, testGroupOpenID)
 	if replies := h.groupReplies(); replies != 1 {
 		t.Errorf("a closed feature answered a later message: %d replies", replies)
+	}
+}
+
+// TestAMemberHeldWithoutAMuteIsAnsweredNothing covers the wiring between the two
+// features: the verification takes the member's message out of the group, and this
+// feature is the one that would answer it.
+//
+// An answer would be a message about something the group cannot read -- and the
+// answer itself is not taken back, so it would be the one thing left of what they
+// said.
+func TestAMemberHeldWithoutAMuteIsAnsweredNothing(t *testing.T) {
+	h := newHarness(t, baseSection)
+	h.verifier.mu.Lock()
+	h.verifier.pseudo = map[string]bool{testGroupOpenID + "/" + testAdmin: true}
+	h.verifier.mu.Unlock()
+
+	h.send("/菜单", testAdmin, testGroupOpenID)
+	if replies := h.groupReplies(); replies != 0 {
+		t.Errorf("replies = %d, want none: this member is being held back without a "+
+			"mute, so nothing of theirs is answered", replies)
+	}
+
+	// The hold is the only reason, and it is the verification's answer that
+	// decides it: somebody who is not held back is answered as usual.
+	h.verifier.mu.Lock()
+	h.verifier.pseudo = nil
+	h.verifier.mu.Unlock()
+	h.send("/菜单", testAdmin, testGroupOpenID)
+	if replies := h.groupReplies(); replies != 1 {
+		t.Errorf("replies = %d, want the command answered once the member is held "+
+			"back no longer", replies)
 	}
 }
 

@@ -147,6 +147,17 @@ type JudgementStore interface {
 	// ErrJudgementNotFound when nothing matches, ErrAmbiguousJudgement when the
 	// prefix is too short to mean one thing.
 	Find(ctx context.Context, idOrPrefix string) (Judgement, error)
+	// CountViolations counts the judgements that found one member breaking a rule.
+	//
+	// Scoped to the member rather than to a group, which is the opposite of Recent,
+	// and deliberately: this is the question "has this person been caught doing this
+	// before", and the answer is about them wherever they did it. A zero moment
+	// counts every record there is.
+	//
+	// A judgement that never happened is not a violation and is not counted here:
+	// the verdict column separates "found violating" from "nobody looked", and
+	// this is the first of the two.
+	CountViolations(ctx context.Context, subjectOpenID string, since time.Time) (int, error)
 }
 
 // judgementStore implements JudgementStore.
@@ -231,6 +242,25 @@ LIMIT 50`), groupOpenID, subjectOpenID, since.Unix())
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+// CountViolations implements JudgementStore.
+func (j judgementStore) CountViolations(ctx context.Context, subjectOpenID string,
+	since time.Time) (int, error) {
+	if strings.TrimSpace(subjectOpenID) == "" {
+		// Nobody is not a member who has been caught: counting the records that
+		// name no subject would answer a different question with a real number.
+		return 0, nil
+	}
+	var count int
+	err := j.store.db.QueryRowContext(ctx, j.store.query(`
+SELECT count(*) FROM moderation_judgements
+WHERE subject_openid = ? AND verdict = ? AND created_at >= ?`),
+		subjectOpenID, JudgementViolation, since.Unix()).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("counting a member's violations: %w", err)
+	}
+	return count, nil
 }
 
 // Find implements JudgementStore.

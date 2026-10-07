@@ -121,19 +121,33 @@ func quoteCandidates(text string) []string {
 //
 // A quote of a message that is itself a quote carries a temporary index, which no
 // ordinary message event ever has, so the cache cannot be asked about it directly.
-// The quoted text can be asked about: what the quote shows is what some cached
-// message said, and within a few minutes of a report there is normally exactly one
-// such message.
+// The quoted text can be asked about instead: what the quote shows is what some
+// cached message said, and within a few minutes of a report there is normally
+// exactly one message of the named sender that says it.
 //
-// Exactly one, or nothing. Two messages saying the same thing is not a reason to
-// pick either -- the wrong pick would silence the wrong member -- so that is
-// reported as a miss, and the caller is expected to treat it as no judgement rather
-// than as a guess.
-func (c *Cache) Locate(ctx context.Context, groupOpenID, quotedText string,
+// author is required, and it is the whole point of the search. Finding a message by
+// its text alone is not finding it: two members can say the same thing, and the
+// platform names the sender only sometimes. Without a name to check the text
+// against, a match would be a guess about *whose* message it is -- and a guess here
+// is what a punishment is then applied to. An empty author therefore locates
+// nothing, and says so.
+//
+// Exactly one message *of that author*, or nothing. Two messages of theirs saying
+// the same thing is not a reason to pick either -- the wrong pick would silence the
+// wrong message -- so that is reported as a miss, and the caller is expected to
+// treat it as no judgement rather than as a guess.
+func (c *Cache) Locate(ctx context.Context, groupOpenID, quotedText, author string,
 	within time.Duration) (CachedMessage, error) {
 	candidates := quoteCandidates(quotedText)
 	if groupOpenID == "" || len(candidates) == 0 {
 		return CachedMessage{}, ErrNotCached
+	}
+	if strings.TrimSpace(author) == "" {
+		// Said as its own refusal rather than as an empty search: the caller has to
+		// tell the group something, and "the platform named no sender, so a text
+		// match would not say whose message it is" is what actually happened.
+		return CachedMessage{}, fmt.Errorf("%w: the platform named no sender, so a "+
+			"text match would not say whose message it is", ErrNotCached)
 	}
 	if c.paused() {
 		return CachedMessage{}, ErrUnavailable
@@ -155,6 +169,12 @@ func (c *Cache) Locate(ctx context.Context, groupOpenID, quotedText string,
 		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
 			continue
 		}
+		// The name first, because it is what makes the text mean anything: a
+		// message somebody else sent is not the message that was quoted, however
+		// identical it reads.
+		if decoded.User != author {
+			continue
+		}
 		if decoded.Text == "" {
 			continue
 		}
@@ -172,8 +192,8 @@ func (c *Cache) Locate(ctx context.Context, groupOpenID, quotedText string,
 	case 0:
 		return CachedMessage{}, ErrNotCached
 	default:
-		return CachedMessage{}, fmt.Errorf("%w: %d cached messages match the quoted text",
-			ErrNotCached, len(found))
+		return CachedMessage{}, fmt.Errorf("%w: %d cached messages of that member match "+
+			"the quoted text", ErrNotCached, len(found))
 	}
 }
 

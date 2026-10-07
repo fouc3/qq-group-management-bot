@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -220,6 +220,30 @@ INSERT INTO broadcast_targets (token, group_openid, message_id, position)
     SELECT token, group_openid, message_id, 0 FROM broadcasts_per_group;
 DROP TABLE broadcasts_per_group;
 `,
+	// 8: the members whose messages are judged as they arrive.
+	//
+	// Keyed on the member alone: what an administrator marks is a person, and the
+	// same person is a spammer in whichever group they are in. The groups they are
+	// in are the groups the bot manages, so there is nothing to record here about
+	// which one the mark was made in.
+	//
+	// expires_at has no "for ever" value, unlike the blacklist's zero. Every watch
+	// ends: what it buys is a judgement of every message the member sends, and a
+	// mark nobody has to revisit is one nobody ever revisits. The store refuses a
+	// zero rather than reading it as permanent, so the rule cannot be forgotten by
+	// a caller that does not know it.
+	`
+CREATE TABLE IF NOT EXISTS high_risk_watches (
+    id            TEXT   PRIMARY KEY,
+    member_openid TEXT   NOT NULL,
+    reason        TEXT   NOT NULL DEFAULT '',
+    added_at      BIGINT NOT NULL,
+    added_by      TEXT   NOT NULL DEFAULT '',
+    expires_at    BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS high_risk_by_member ON high_risk_watches (member_openid);
+CREATE INDEX IF NOT EXISTS high_risk_by_expiry ON high_risk_watches (expires_at);
+`,
 }
 
 // sqlStore is the database/sql implementation, shared by both dialects.
@@ -234,11 +258,98 @@ func (s *sqlStore) query(statement string) string { return s.dialect.rewrite(sta
 
 func (s *sqlStore) Pending() PendingStore          { return pendingStore{s} }
 func (s *sqlStore) Blacklist() BlacklistStore      { return blacklistStore{s} }
+func (s *sqlStore) Watches() WatchStore            { return watchStore{s} }
 func (s *sqlStore) Judgements() JudgementStore     { return judgementStore{s} }
 func (s *sqlStore) MemberEvents() MemberEventStore { return memberEventStore{s} }
 func (s *sqlStore) Broadcasts() BroadcastStore     { return broadcastStore{s} }
 func (s *sqlStore) Meta() MetaStore                { return metaStore{s} }
 func (s *sqlStore) Close() error                   { return s.db.Close() }
+
+// watchStore implements WatchStore.
+type watchStore struct{ store *sqlStore }
+
+// List implements WatchStore.
+//
+// Expired watches are left out rather than returned for the caller to filter: a
+// caller that had to check would have to be changed every time the meaning of a
+// moment changed, and the one question anybody asks about this list -- is this
+// member watched -- is answered by a row being here at all.
+func (w watchStore) List(ctx context.Context, now time.Time) ([]Watch, error) {
+	rows, err := w.store.db.QueryContext(ctx, w.store.query(`
+SELECT id, member_openid, reason, added_at, added_by, expires_at
+FROM high_risk_watches
+WHERE expires_at > ?
+ORDER BY added_at DESC`), now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("listing the high risk list: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []Watch
+	for rows.Next() {
+		var entry Watch
+		if err := rows.Scan(&entry.ID, &entry.MemberOpenID, &entry.Reason,
+			&entry.AddedAt, &entry.AddedBy, &entry.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("reading a high risk entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+// Add implements WatchStore.
+func (w watchStore) Add(ctx context.Context, entry Watch) error {
+	if strings.TrimSpace(entry.ID) == "" {
+		return errors.New("store: a watch needs an id")
+	}
+	if strings.TrimSpace(entry.MemberOpenID) == "" {
+		return errors.New("store: a watch needs the member it is about")
+	}
+	if entry.ExpiresAt == 0 {
+		// Refused here rather than read as "for ever", because the feature that
+		// writes one is the one place the rule could be forgotten, and a
+		// permanent row would then be a member nobody ever reconsiders.
+		return errors.New("store: a watch needs the moment it ends")
+	}
+	if entry.AddedAt == 0 {
+		entry.AddedAt = time.Now().Unix()
+	}
+	_, err := w.store.db.ExecContext(ctx, w.store.query(`
+INSERT INTO high_risk_watches
+    (id, member_openid, reason, added_at, added_by, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (member_openid) DO UPDATE SET
+    reason     = excluded.reason,
+    added_by   = excluded.added_by,
+    expires_at = excluded.expires_at`),
+		entry.ID, entry.MemberOpenID, entry.Reason, entry.AddedAt, entry.AddedBy,
+		entry.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("recording a watch: %w", err)
+	}
+	return nil
+}
+
+// Remove implements WatchStore.
+func (w watchStore) Remove(ctx context.Context, memberOpenID string) (bool, error) {
+	if strings.TrimSpace(memberOpenID) == "" {
+		return false, errors.New("store: removing a watch needs the member it is about")
+	}
+	result, err := w.store.db.ExecContext(ctx,
+		w.store.query(`DELETE FROM high_risk_watches WHERE member_openid = ?`),
+		memberOpenID)
+	if err != nil {
+		return false, fmt.Errorf("forgetting a watch: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		// The deletion happened; only the count of it could not be read. Reported
+		// as removed, because the row is gone either way and telling an operator
+		// otherwise would have them try again.
+		return true, nil
+	}
+	return removed > 0, nil
+}
 
 // metaStore implements MetaStore.
 type metaStore struct{ store *sqlStore }
@@ -332,11 +443,15 @@ type pendingStore struct{ store *sqlStore }
 // Load implements PendingStore. Entries the platform has already released are
 // left out: nothing is left to answer for them, and returning them would invite
 // a caller to act on a mute that no longer exists.
+//
+// A held_until of zero is an entry nobody ever releases, and the filter has to say
+// so: it is a hold with no expiry of its own, which is what a pseudo-mute is, and
+// asking whether it is still in the future would drop every one of them.
 func (p pendingStore) Load(ctx context.Context, now time.Time) ([]Pending, error) {
 	rows, err := p.store.db.QueryContext(ctx, p.store.query(`
 SELECT token, group_openid, member_openid, joined_at, deadline, held_until, reported, settings
 FROM pending_verifications
-WHERE held_until > ?
+WHERE held_until = 0 OR held_until > ?
 ORDER BY deadline`), now.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("loading pending verifications: %w", err)
@@ -407,13 +522,26 @@ func (p pendingStore) MarkReported(ctx context.Context, token string, _ time.Tim
 }
 
 // MoveDeadline implements PendingStore.
+//
+// The zero moment is stored as zero rather than as its own year: it is how a hold
+// with no expiry of its own is written down, and Load's filter reads that value
+// as "this one never runs out".
 func (p pendingStore) MoveDeadline(ctx context.Context, token string, deadline, heldUntil time.Time) error {
 	if _, err := p.store.db.ExecContext(ctx, p.store.query(`
 UPDATE pending_verifications SET deadline = ?, held_until = ? WHERE token = ?`),
-		deadline.Unix(), heldUntil.Unix(), token); err != nil {
+		deadline.Unix(), expiryStamp(heldUntil), token); err != nil {
 		return fmt.Errorf("moving a deadline: %w", err)
 	}
 	return nil
+}
+
+// expiryStamp renders the moment a hold runs out, with zero for a hold that has
+// no expiry of its own.
+func expiryStamp(moment time.Time) int64 {
+	if moment.IsZero() {
+		return 0
+	}
+	return moment.Unix()
 }
 
 // blacklistStore implements BlacklistStore.

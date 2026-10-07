@@ -356,7 +356,21 @@ func (h *handler) Intents() qqbotsdk.Intent {
 }
 
 // SetVerifier implements feature.VerifierAware.
-func (h *handler) SetVerifier(verifier feature.Verifier) { h.verifier = verifier }
+//
+// The verification is also handed to the router, which is what makes a member it
+// is holding back go unanswered: an answer to a message that is taken back would
+// be a message about something the group cannot read. A method value rather than a
+// closure over this handler, so that the router reads it under its own lock
+// instead of reading a field the wiring may be writing at that moment -- a feature
+// built again is wired again while the bot is already answering.
+func (h *handler) SetVerifier(verifier feature.Verifier) {
+	h.verifier = verifier
+	if verifier == nil {
+		h.router.SetHeldBack(nil)
+		return
+	}
+	h.router.SetHeldBack(verifier.IsPseudoMuted)
+}
 
 // IsAdmin implements feature.AdminDirectory.
 // LooksLikeACommand implements feature.Commands.
@@ -979,6 +993,9 @@ func (h *handler) unmute(ctx context.Context, data *qqbotsdk.GroupMessageCreateD
 		h.reply(ctx, data, "解除禁言失败："+err.Error())
 		return nil
 	}
+	// The bot's own record goes with it: this mute is over, so a feature that
+	// lifts other people's mutes must not read it as one of the bot's own any more.
+	h.deps.Mutes.Forget(data.GroupOpenID, target)
 	h.deps.Logger.Info("an administrator lifted a mute",
 		"group", data.GroupOpenID, "member", target)
 	h.reply(ctx, data, atTag(target)+" 的禁言已解除。")
@@ -1181,6 +1198,9 @@ func (h *handler) mute(ctx context.Context, data *qqbotsdk.GroupMessageCreateDat
 		h.reply(ctx, data, "禁言失败："+err.Error())
 		return nil
 	}
+	// This mute is the bot's own, so a feature that lifts other people's mutes
+	// leaves it alone -- an administrator asked for it by name.
+	h.deps.Mutes.Record(data.GroupOpenID, target, until)
 	h.deps.Logger.Info("an administrator muted a member",
 		"group", data.GroupOpenID, "member", target, "until", until.Format(time.RFC3339))
 	h.reply(ctx, data, fmt.Sprintf("已禁言 %s。", humanDuration(wanted)))

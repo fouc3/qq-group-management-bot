@@ -93,7 +93,8 @@ func TestAReportBecomesAVerdict(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "正常聊天", "加群送皮肤 私聊我", "谁在发广告")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -129,7 +130,8 @@ func TestACategoryWithoutItsOwnDurationFallsBack(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "先交押金")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -149,7 +151,8 @@ func TestACleanVerdictHasNoPunishment(t *testing.T) {
 	h, group := reportHarness(t, stub, "")
 	quoted := cacheChain(t, h, group, "这条没问题")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -188,7 +191,8 @@ func TestNoJudgementIsAnError(t *testing.T) {
 			if testCase.noModel {
 				h.cfg.Model.Name = ""
 			}
-			_, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
+			_, err := h.JudgeQuoted(context.Background(), group,
+				feature.QuotedMessage{Index: quoted}, "REPORTER-1")
 			if !errors.Is(err, ErrUnjudged) {
 				t.Fatalf("err = %v, want ErrUnjudged", err)
 			}
@@ -223,35 +227,6 @@ func groupSection(t *testing.T, body string) string {
 	return "groups:\n  \"G-" + t.Name() + "\":\n" + body
 }
 
-// TestTheAllowListDoesNotExemptAnything records why the content exemption was
-// removed instead of repaired.
-//
-// Both of these were reported as working, and both did work. The second is the
-// first with one character inserted, which is all it takes when the rule is about
-// text: an exemption keyed on what a message says is satisfied by what the message
-// says.
-func TestTheAllowListDoesNotExemptAnything(t *testing.T) {
-	cases := map[string]string{
-		"the allowed word carried as a shield": "deepseek0.01x https://q1.1110103.xyz/（意思是ds模型中转站0.01倍率）\n防屏蔽：api.mcapple.top",
-		"the same, with the advertisement's own domain broken up so the " +
-			"extractor cannot see it": "deepseek0.01x https://q1删.1110103删.删xyz/\n防屏蔽：api.mcapple.top",
-	}
-	cfg := Config{
-		Categories: map[string]Category{"ad": {Label: "广告", Mute: "10m"}},
-		Groups: map[string]GroupOverride{
-			"G-1": {Allow: []string{"api.mcapple.top"}},
-		},
-	}
-	for name, text := range cases {
-		t.Run(name, func(t *testing.T) {
-			if matched, allowed := cfg.allowedIn("G-1", text); allowed {
-				t.Errorf("exempted by %q, which is how an advertisement gets past "+
-					"the judge:\n%s", matched, text)
-			}
-		})
-	}
-}
-
 // TestJudgingCanBeTurnedOffForOneGroup covers one group opting out while the
 // feature stays on everywhere else.
 func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
@@ -259,7 +234,8 @@ func TestJudgingCanBeTurnedOffForOneGroup(t *testing.T) {
 	h, group := reportHarness(t, stub, groupSection(t, "    enabled: false\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")
 
-	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1"); !errors.Is(err, ErrUnjudged) {
+	if _, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1"); !errors.Is(err, ErrUnjudged) {
 		t.Fatalf("err = %v, want ErrUnjudged", err)
 	}
 	if len(stub.requests) != 0 {
@@ -276,7 +252,8 @@ func TestAGroupCanHaveItsOwnDurations(t *testing.T) {
 		groupSection(t, "    categories:\n      ad: \"30m\"\n"))
 	quoted := cacheChain(t, h, group, "加群送皮肤 私聊我")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -314,7 +291,8 @@ func TestASenderTheGroupTrustsIsNotJudged(t *testing.T) {
 	// group declared.
 	quoted := cacheChain(t, h, group, "本群公告", "官方说明")
 
-	report, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1")
+	report, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1")
 	if err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
@@ -338,7 +316,8 @@ func TestTheGroupsOwnListGoesIntoTheInstructions(t *testing.T) {
 		groupSection(t, "    allow: [\"api.mcapple.top\"]\n"))
 	quoted := cacheChain(t, h, group, "正常聊天")
 
-	if _, err := h.JudgeQuoted(context.Background(), group, quoted, "", "REPORTER-1"); err != nil {
+	if _, err := h.JudgeQuoted(context.Background(), group,
+		feature.QuotedMessage{Index: quoted}, "REPORTER-1"); err != nil {
 		t.Fatalf("JudgeQuoted: %v", err)
 	}
 	request := stub.lastRequest(t)

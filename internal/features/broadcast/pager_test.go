@@ -114,13 +114,9 @@ func TestTheRecordTurnsOnePageAtATime(t *testing.T) {
 			t.Errorf("the first page shows more than five entries:\n%s", first)
 		}
 	}
-	// Nothing to go back to on the first page, so no button offering it -- and nothing offering
-	// to close the record either: what a reader is finished with they can delete where it is.
+	// Nothing to go back to on the first page, so no button offering it.
 	if buttons := p.cardButtons(); buttons["上一页"] != "" {
 		t.Error("the first page offers a page before it")
-	}
-	if buttons := p.cardButtons(); buttons["关闭"] != "" {
-		t.Error("a page offers a way to close it")
 	}
 
 	before := len(p.recalls)
@@ -163,31 +159,6 @@ func TestASinglePageCarriesNoKeyboard(t *testing.T) {
 	// The message that was sent is the last one, and it carries no keyboard at all.
 	if p.lastMessageHadKeyboard() {
 		t.Error("a record with one page carries buttons under it")
-	}
-}
-
-// TestAnOlderPageButtonWithNowhereToGoSaysSo covers the button the pages used to carry.
-//
-// No page offers a way to close the record any more, and a page sent before that change is
-// still in somebody's chat with it. It is read as a page button -- there is nothing else it
-// could be -- and what it asks for is a page, which this record answers for as long as it has
-// one. A button that answers nothing leaves whoever presses it watching a spinner, so it is
-// answered even so, and it does not take the record with it.
-func TestAnOlderPageButtonWithNowhereToGoSaysSo(t *testing.T) {
-	p := newPlatform(t)
-	p.record(t, "一")
-	p.askPrivately(t, theAdmin)
-
-	token := p.heldPageToken(t)
-	// The button the old pages sent named the page it was on, and this is what is left of it:
-	// pressing it again is pressing the page that is already up.
-	p.pressPagePayload(t, token, kindPageClose, "1", theAdmin)
-
-	if codes := p.answered; len(codes) == 0 || codes[len(codes)-1] != qqbotsdk.InteractionCodeSuccess {
-		t.Errorf("a page button that leads nowhere was answered %v", codes)
-	}
-	if len(p.handler.pages) != 1 {
-		t.Error("a button that cannot be placed took the record away")
 	}
 }
 

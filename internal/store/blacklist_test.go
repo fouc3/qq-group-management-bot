@@ -53,6 +53,16 @@ func TestBarredFindsEitherIdentity(t *testing.T) {
 		}
 	})
 
+	t.Run("no identity at all is not barred", func(t *testing.T) {
+		barred, err := opened.Blacklist().Barred(ctx, "", "", now)
+		if err != nil {
+			t.Fatalf("Barred: %v", err)
+		}
+		if barred {
+			t.Error("Barred = true with no identity, which would refuse everybody")
+		}
+	})
+
 	t.Run("an entry that only names a union openid", func(t *testing.T) {
 		if err := opened.Blacklist().Add(ctx, Barred{
 			ID: "ENTRY-2", UnionOpenID: "UNION-2", AddedAt: now.Unix(),

@@ -19,8 +19,19 @@ func counting(seen *int) EventHandler {
 // message hands one raw group message to the client's dispatcher.
 func message(t *testing.T, client *qqbotsdk.Client, id string) {
 	t.Helper()
-	body := `{"id": "` + id + `", "group_openid": "GROUP-OPENID",
-		"author": {"member_openid": "MEMBER-OPENID"}, "content": "hello"}`
+	messageFrom(t, client, id, "MEMBER-OPENID")
+}
+
+// messageFrom hands one raw group message from a named member to the dispatcher.
+func messageFrom(t *testing.T, client *qqbotsdk.Client, id, memberOpenID string) {
+	t.Helper()
+	dispatch(t, client, `{"id": "`+id+`", "group_openid": "GROUP-OPENID",
+		"author": {"member_openid": "`+memberOpenID+`"}, "content": "hello"}`)
+}
+
+// dispatch hands one raw group message body to the client's dispatcher.
+func dispatch(t *testing.T, client *qqbotsdk.Client, body string) {
+	t.Helper()
 	payload := &qqbotsdk.Payload{
 		ID:   "EVENT-ID",
 		Op:   qqbotsdk.OpDispatch,
@@ -30,6 +41,75 @@ func message(t *testing.T, client *qqbotsdk.Client, id string) {
 	if err := client.Dispatcher().DispatchSync(context.Background(),
 		qqbotsdk.NewEvent(payload, "test")); err != nil {
 		t.Fatalf("dispatching: %v", err)
+	}
+}
+
+// TestAMemberBeingHeldBackIsAnsweredNothing covers the half of a take-back that
+// the verification cannot do itself.
+//
+// The message is taken out of the group by the feature that holds the member, and
+// the answer to it would be posted by the feature whose handler this is: an answer
+// would be a message about something nobody else can read, and the answer itself is
+// not taken back.
+func TestAMemberBeingHeldBackIsAnsweredNothing(t *testing.T) {
+	client := testClient(t)
+	var answered int
+	router := NewRouter("commands", nil)
+	router.SetHeldBack(func(_ string, memberOpenID string) bool {
+		return memberOpenID == "MEMBER-HELD"
+	})
+	if err := router.Register(client, Handlers{Group: counting(&answered)}); err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+
+	messageFrom(t, client, "HELD-1", "MEMBER-HELD")
+	if answered != 0 {
+		t.Errorf("a message from a member who is being held back was answered %d "+
+			"time(s), want none", answered)
+	}
+
+	// And the hold is the only reason: the same message from somebody who is not
+	// being held is answered as it always was.
+	messageFrom(t, client, "OTHER-1", "MEMBER-OTHER")
+	if answered != 1 {
+		t.Errorf("answered %d of a message from somebody who is not held, want 1",
+			answered)
+	}
+}
+
+// TestNothingHeldBackAnswersAsBefore covers the default a bot without the
+// verification runs with: nobody is held back, so nothing is dropped.
+func TestNothingHeldBackAnswersAsBefore(t *testing.T) {
+	client := testClient(t)
+	var answered int
+	router := NewRouter("commands", nil)
+	if err := router.Register(client, Handlers{Group: counting(&answered)}); err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+
+	message(t, client, "MESSAGE-1")
+	if answered != 1 {
+		t.Errorf("answered %d of a message with nothing held back, want 1", answered)
+	}
+}
+
+// TestAMessageWithNoSenderStillReachesTheHandler covers the fallback: an event that
+// says nothing about who sent it cannot be matched against a hold, and the handler
+// is the place that knows what to say about it. Dropping it here would take the
+// complaint away from the only place equipped to make it.
+func TestAMessageWithNoSenderStillReachesTheHandler(t *testing.T) {
+	client := testClient(t)
+	var answered int
+	router := NewRouter("commands", nil)
+	router.SetHeldBack(func(string, string) bool { return true })
+	if err := router.Register(client, Handlers{Group: counting(&answered)}); err != nil {
+		t.Fatalf("registering: %v", err)
+	}
+
+	dispatch(t, client, `{"id": "NO-AUTHOR", "group_openid": "GROUP-OPENID"}`)
+	if answered != 1 {
+		t.Errorf("answered %d of a message that names no sender, want the handler to "+
+			"have seen it", answered)
 	}
 }
 

@@ -106,6 +106,13 @@ func (h *handler) recordJudgement(ctx context.Context, groupOpenID, reporterOpen
 		return report
 	}
 	report.JudgementID = id
+	if entry.Verdict == store.JudgementViolation {
+		// Counted from the record rather than by whichever path got here, so that a
+		// report and an automatic judgement both count towards one total: what is
+		// being counted is judgements, and whether somebody has been caught before
+		// must not depend on how the last one was noticed.
+		h.markIfCaughtEnough(ctx, entry.SubjectOpenID)
+	}
 	return report
 }
 

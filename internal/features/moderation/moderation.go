@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
@@ -23,6 +24,16 @@ const (
 	DefaultContextBefore = 10
 	DefaultContextAfter  = 10
 	DefaultChainMinutes  = 10
+	// DefaultAutoMarkFor is how long a mark made without an administrator lasts
+	// when the file does not say: a week. Long enough to cover a campaign, short
+	// enough that nobody has to remember it, and written in Go's own syntax
+	// because that is what a configuration file uses.
+	DefaultAutoMarkFor = "168h"
+	// DefaultMaxInFlight is how many automatic judgements run at once when the
+	// file does not say. Small on purpose: each one is a model call that takes
+	// seconds, and the cap is what stops a marked member talking quickly from
+	// becoming a burst of them.
+	DefaultMaxInFlight = 3
 )
 
 // The two ways the window around a quoted message is chosen.
@@ -72,6 +83,9 @@ type Config struct {
 	// the section turns it on, because it punishes somebody for being wrong rather
 	// than for doing wrong.
 	ReportPenalty *Penalty `yaml:"report_penalty"`
+	// HighRisk is the list of members whose messages are judged as they arrive,
+	// and what happens to the marks nobody asked for.
+	HighRisk HighRisk `yaml:"high_risk"`
 	// Groups holds one group's differences from the section above it.
 	Groups map[string]GroupOverride `yaml:"groups"`
 	// DryRun judges and reports without muting or recalling anything.
@@ -147,6 +161,41 @@ type Penalty struct {
 	Enabled bool `yaml:"enabled"`
 	// Mute is how long it lasts.
 	Mute string `yaml:"mute"`
+}
+
+// HighRisk is the list of members whose messages are judged as they arrive.
+//
+// It is the one thing this feature keeps about a member rather than about a
+// message, and it is shaped like the join blacklist because it is written by the
+// same people: an administrator names somebody, and the naming expires. What it
+// does instead is the opposite of keeping them out -- a marked member is already
+// in the group, and every message of theirs is sent for judging as it arrives.
+type HighRisk struct {
+	// Enabled turns the list on. A block written without it is on, like the
+	// feature's own switch: writing it out is already a statement of intent.
+	Enabled *bool `yaml:"enabled"`
+	// AutoMarkAfter is how many judgements that found one member breaking a rule
+	// it takes to mark them without an administrator doing it. Zero, the default,
+	// turns the automatic marking off.
+	//
+	// It is counted over everything the bot has judged about that member, in every
+	// group, because the question it answers is "has this person been caught doing
+	// this before" and not "in here".
+	AutoMarkAfter int `yaml:"auto_mark_after"`
+	// AutoMarkFor is how long a mark nobody chose lasts, in the same duration
+	// syntax as a category: 168h, or 7d.
+	//
+	// A mark made by hand carries the moment its administrator gave it, and this is
+	// the one that has none -- so it has to be configured rather than inherited,
+	// because there is no permanent entry anywhere in this list.
+	AutoMarkFor string `yaml:"auto_mark_for"`
+	// MaxInFlight is how many of these judgements may be running at once.
+	//
+	// Every message of a marked member is judged, and a judgement takes seconds: a
+	// marked member talking quickly would otherwise open as many model calls as
+	// they have messages, which is a bill and a rate limit rather than a policy.
+	// What does not fit is reported and skipped.
+	MaxInFlight int `yaml:"max_in_flight"`
 }
 
 // GroupOverride is one group's differences from the section above it.
@@ -360,6 +409,23 @@ func (c *Config) applyDefaults() error {
 		dryRun := true
 		c.DryRun = &dryRun
 	}
+	if c.HighRisk.Enabled == nil {
+		on := true
+		c.HighRisk.Enabled = &on
+	}
+	if c.HighRisk.AutoMarkAfter < 0 {
+		return fmt.Errorf("high_risk auto_mark_after %d: want zero or more",
+			c.HighRisk.AutoMarkAfter)
+	}
+	if strings.TrimSpace(c.HighRisk.AutoMarkFor) == "" {
+		c.HighRisk.AutoMarkFor = DefaultAutoMarkFor
+	}
+	if _, err := time.ParseDuration(c.HighRisk.AutoMarkFor); err != nil {
+		return fmt.Errorf("high_risk auto_mark_for %q: %w", c.HighRisk.AutoMarkFor, err)
+	}
+	if c.HighRisk.MaxInFlight <= 0 {
+		c.HighRisk.MaxInFlight = DefaultMaxInFlight
+	}
 
 	// The durations are parsed here rather than where they are used, so that a
 	// typo is refused at startup instead of becoming a silent default on the day
@@ -485,9 +551,36 @@ type handler struct {
 	cfg   Config
 	deps  feature.Deps
 	cache *Cache
+	// verifier is the join verification, when one is running. It is asked before
+	// a message is written down, because a member held back without a mute is
+	// having their messages taken back as they arrive, and what was taken back
+	// must not be kept here.
+	//
+	// Nil when no feature provides verification, which is a deployment rather
+	// than a mistake: with nobody holding anybody, every message is cached.
+	verifier feature.Verifier
 	// names are the groups' own names, read from the platform when the feature starts.
 	// Written once, before any event can arrive, and only ever read afterwards.
 	names map[string]string
+
+	// watchMu guards watched, which is the high risk list as the message path
+	// reads it: the list itself is in the data layer, and a query per group message
+	// would make this feature's busiest question its slowest one.
+	watchMu sync.Mutex
+	// watched is the member openids that are marked, each with the moment their
+	// mark ends. A mark that has run out is removed as it is found.
+	watched map[string]int64
+
+	// part is cancelled when this feature stops, and the judgements that outlive
+	// the message they were started for run under it: a judgement takes seconds,
+	// and one started by a member who is no longer talking must not be left to
+	// silence somebody on behalf of an instance nobody is running.
+	part     context.Context
+	stopPart context.CancelFunc
+	// judging is the room left for those judgements, and judgingOut counts the
+	// ones in flight so that Close can wait for them to notice the cancellation.
+	judging    chan struct{}
+	judgingOut sync.WaitGroup
 }
 
 // New builds the feature from its configuration section.
@@ -499,16 +592,31 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	return &handler{
+	instance := &handler{
 		cfg:  cfg,
 		deps: deps,
 		cache: NewCache(deps.Redis, time.Duration(cfg.CacheHours)*time.Hour,
 			deps.Logger),
-	}, nil
+		watched: map[string]int64{},
+		judging: make(chan struct{}, cfg.HighRisk.MaxInFlight),
+	}
+	instance.part, instance.stopPart = context.WithCancel(context.Background())
+	return instance, nil
 }
 
 // Name implements feature.Feature.
 func (h *handler) Name() string { return Name }
+
+// SetVerifier implements feature.VerifierAware: it is handed the join
+// verification, which is what says whose messages are being taken back as they
+// arrive.
+//
+// It is handed over rather than asked of the store, because the answer changes
+// while the bot runs: a member verifies and is held no longer, and the only place
+// that knows is the feature holding them.
+func (h *handler) SetVerifier(verifier feature.Verifier) {
+	h.verifier = verifier
+}
 
 // DryRun implements feature.Moderation.
 //
@@ -568,7 +676,16 @@ func (h *handler) Register(ctx context.Context) error {
 		"max_tokens", h.config().Model.MaxTokens,
 		"retries", h.config().judgeRetries(),
 		"context", fmt.Sprintf("%d before, %d after, %d minutes",
-			h.config().ContextBefore, h.config().ContextAfter, h.config().ChainMinutes))
+			h.config().ContextBefore, h.config().ContextAfter, h.config().ChainMinutes),
+		"high_risk", h.config().HighRisk.on(),
+		"auto_mark_after", h.config().HighRisk.AutoMarkAfter,
+		"auto_mark_for", h.config().HighRisk.AutoMarkFor,
+		"max_in_flight", h.config().HighRisk.MaxInFlight)
+
+	// The high risk list is read once here rather than per message: what it
+	// decides is whether a message costs a judgement, and that question is asked
+	// of every message a group receives.
+	h.loadWatches(ctx)
 
 	// The receive setting decides whether this feature can work at all, so it is
 	// read and reported rather than assumed. A group that delivers only mentions
@@ -621,7 +738,18 @@ func (h *handler) Register(ctx context.Context) error {
 }
 
 // Close implements feature.Feature.
-func (h *handler) Close(context.Context) error { return h.cache.Close() }
+// Close implements feature.Feature.
+//
+// The judgements in flight are cancelled and waited for, in that order: an
+// instance that has been replaced must not go on to silence somebody, and a
+// judgement is seconds of work whose answer belongs to nobody once the
+// configuration it was made under is gone. Cancelling ends the model call, which
+// is where the seconds are, so the wait is short rather than the model's timeout.
+func (h *handler) Close(context.Context) error {
+	h.stopPart()
+	h.judgingOut.Wait()
+	return h.cache.Close()
+}
 
 // onMessage caches one group message.
 //
@@ -641,6 +769,19 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		return nil
 	}
 	if !h.deps.InGroup(data.GroupOpenID) {
+		return nil
+	}
+
+	// A message from somebody the verification is holding back without a mute is
+	// being taken back from the group as it arrives, and a message that never
+	// stayed in the group is not something the group read: writing it down here
+	// would keep it quotable for as long as the cache remembers, which is how a
+	// report would come to be filed about a message nobody could have seen. The
+	// order does not matter -- the take-back and this happen on the same event --
+	// because both are decided from the same held-member record.
+	if h.heldBack(data.GroupOpenID, data.Author.MemberOpenID) {
+		h.deps.Logger.Debug("not caching a message from a member who has not verified",
+			"group", data.GroupOpenID, "member", data.Author.MemberOpenID)
 		return nil
 	}
 
@@ -670,8 +811,33 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 			// message would drown everything else in the file.
 			h.deps.Logger.Debug("could not cache a group message", "error", err)
 		}
+		// Not judged either, and for the same reason it could not be cached: the
+		// window a judgement is made in is read out of the cache, so a message
+		// that is not in it has nothing to be judged with.
+		return nil
 	}
+
+	// A member on the high risk list is judged as they speak, which is the whole
+	// of what being on it does. The index is what the window is built around, so a
+	// message the platform gave no index for is one this cannot judge -- which is
+	// the same reason a report about it would have to go by its text.
+	if index == "" || !h.isWatched(data.Author.MemberOpenID) {
+		return nil
+	}
+	h.judgeWatcher(data.GroupOpenID, message)
 	return nil
+}
+
+// heldBack reports whether the verification is holding this member back by taking
+// their messages back rather than by muting them.
+//
+// The question is the verification's to answer and not this feature's to guess:
+// which members are held, and whether their group holds them this way, are both
+// decided from its configuration. All that is asked here is whether the two
+// happen to be the same message.
+func (h *handler) heldBack(groupOpenID, memberOpenID string) bool {
+	return h.verifier != nil && memberOpenID != "" &&
+		h.verifier.IsPseudoMuted(groupOpenID, memberOpenID)
 }
 
 // sentAt is when a message was sent, in Unix milliseconds.

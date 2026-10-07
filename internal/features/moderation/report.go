@@ -26,46 +26,64 @@ const (
 
 // resolveWindow finds the messages to judge.
 //
-// Two ways in, because the platform gives two kinds of index. An ordinary quote
-// carries the message's own index, which the cache holds -- and a miss there is worth
-// waiting on, because the mention that carries the command can be delivered before
-// the message it quotes. A quote of a message that is itself a quote carries a
-// temporary index instead, which no ordinary event ever has and the cache can never
-// hold, so waiting for it is waiting for nothing, and the quoted text is the only way
-// in.
+// Two things can name the quoted message, and only one of them is a name:
 //
-// The text is a locator and never evidence: it chooses which cached message is meant,
-// and that message is then judged as its author's own words.
-func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
-	quotedText string) ([]CachedMessage, string, error) {
+//   - an index the cache holds, which identifies it outright. The scene's
+//     ref_msg_idx and the quoted element's msg_idx are both this, and either may
+//     be the usable one -- a quote of a message that is itself a quote comes with a
+//     temporary index in the scene, which no event ever carries and the cache can
+//     never hold, while the element may still name the message properly;
+//   - the text the quote showed, which identifies nothing by itself. Two members
+//     can say the same thing, so the text only means something next to the author
+//     the platform named, and it is used only when no index names the message at
+//     all.
+//
+// When neither is available the honest answer is that the message cannot be told
+// apart from the rest, and that is returned rather than guessed at: the caller
+// answers the group about a report that could not be resolved, and nobody is
+// judged from a name that does not exist.
+//
+// A miss on a real index is waited on, because the mention carrying the command
+// can be delivered before the message it quotes arrives. Waiting on a temporary
+// one is waiting for nothing.
+func (h *handler) resolveWindow(ctx context.Context, groupOpenID string,
+	quoted feature.QuotedMessage) ([]CachedMessage, string, error) {
 	span := time.Duration(h.config().ChainMinutes) * time.Minute
+	index := usableIndex(quoted)
 
-	if temporaryIndex(quotedIndex) {
-		if window, anchor, err := h.locateWindow(ctx, groupOpenID, quotedText, span); err == nil {
-			h.deps.Logger.Info("the quoted message was found by its text",
-				"group", groupOpenID, "anchor", anchor)
+	if index == "" {
+		// Nothing names the message, so the text and the author are all there is.
+		window, anchor, err := h.locateWindow(ctx, groupOpenID, quoted, span)
+		if err == nil {
+			h.deps.Logger.Info("the quoted message was found by its text and author",
+				"group", groupOpenID, "author", quoted.Author, "anchor", anchor)
 			return window, anchor, nil
 		}
+		return nil, "", fmt.Errorf("%w: %v", feature.ErrUnidentifiedQuote, err)
 	}
 
 	var err error
 	for attempt := 1; attempt <= cacheRetryAttempts; attempt++ {
 		var chain []CachedMessage
-		chain, err = h.cache.Context(ctx, groupOpenID, quotedIndex,
+		chain, err = h.cache.Context(ctx, groupOpenID, index,
 			h.config().ContextBefore, h.config().ContextAfter, span)
 		if err == nil {
 			if attempt > 1 {
 				h.deps.Logger.Info("the quoted message arrived while waiting for it",
 					"attempt", attempt)
 			}
-			return chain, quotedIndex, nil
+			return chain, index, nil
 		}
 		if !errors.Is(err, ErrNotCached) {
 			return nil, "", err
 		}
-		if window, anchor, locateErr := h.locateWindow(ctx, groupOpenID, quotedText, span); locateErr == nil {
-			h.deps.Logger.Info("the quoted message was found by its text",
-				"group", groupOpenID, "anchor", anchor, "attempt", attempt)
+		// The quote may name the message with an index the cache stored under a
+		// different one, which is what the text and the author are for. It is only
+		// tried when the platform named the sender: see Locate.
+		if window, anchor, locateErr := h.locateWindow(ctx, groupOpenID, quoted, span); locateErr == nil {
+			h.deps.Logger.Info("the quoted message was found by its text and author",
+				"group", groupOpenID, "author", quoted.Author, "anchor", anchor,
+				"attempt", attempt)
 			return window, anchor, nil
 		}
 		if attempt == cacheRetryAttempts {
@@ -82,18 +100,36 @@ func (h *handler) resolveWindow(ctx context.Context, groupOpenID, quotedIndex,
 	return nil, "", err
 }
 
-// locateWindow finds a quoted message by what the quote showed of it, then reads the
-// window around it by the index that message really has.
+// usableIndex is the message's own name, or nothing when the platform gave none.
+//
+// The scene's index first because it is the documented one, then the quoted
+// element's, which is where a quote of a quote names the message properly when the
+// scene has fallen back to a temporary handle. Both are the same value for an
+// ordinary quote, so only the temporary case can tell them apart.
+func usableIndex(quoted feature.QuotedMessage) string {
+	for _, index := range []string{quoted.Index, quoted.ElementIndex} {
+		trimmed := strings.TrimSpace(index)
+		if trimmed == "" || temporaryIndex(trimmed) {
+			continue
+		}
+		return trimmed
+	}
+	return ""
+}
+
+// locateWindow finds a quoted message by what the quote showed of it and who the
+// platform said sent it, then reads the window around it by the index that message
+// really has.
 //
 // The index it returns is the point of the second return value: a message found this
 // way is named in the window by its own index, not by the temporary one the quote
 // carried, and anything that goes looking for the anchor has to be told which.
-func (h *handler) locateWindow(ctx context.Context, groupOpenID, quotedText string,
-	span time.Duration) ([]CachedMessage, string, error) {
-	if strings.TrimSpace(quotedText) == "" {
+func (h *handler) locateWindow(ctx context.Context, groupOpenID string,
+	quoted feature.QuotedMessage, span time.Duration) ([]CachedMessage, string, error) {
+	if strings.TrimSpace(quoted.Text) == "" {
 		return nil, "", ErrNotCached
 	}
-	located, err := h.cache.Locate(ctx, groupOpenID, quotedText, locateWithin)
+	located, err := h.cache.Locate(ctx, groupOpenID, quoted.Text, quoted.Author, locateWithin)
 	if err != nil {
 		return nil, "", err
 	}
@@ -117,9 +153,9 @@ func temporaryIndex(index string) bool {
 // which could not be reached is recorded too. "Nothing was found" and "nobody
 // looked" are different facts, and a record that only held the first would answer
 // the wrong question afterwards.
-func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
-	quotedText, reporterOpenID string) (feature.ModerationVerdict, error) {
-	report, err := h.judgeQuoted(ctx, groupOpenID, quotedIndex, quotedText)
+func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID string,
+	quoted feature.QuotedMessage, reporterOpenID string) (feature.ModerationVerdict, error) {
+	report, err := h.judgeQuoted(ctx, groupOpenID, quoted)
 	if errors.Is(err, feature.ErrAlreadyPunished) {
 		// A second record would say a second judgement happened, and none did:
 		// the answer is that this message was dealt with already, which the
@@ -137,9 +173,9 @@ func (h *handler) JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 // Everything that is not a judgement is an error. A cache miss and an unreadable
 // answer both mean nobody knows whether the message is acceptable, and a caller
 // that confused that with acceptable would quietly drop a real report.
-func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
-	quotedText string) (feature.ModerationVerdict, error) {
-	if strings.TrimSpace(quotedIndex) == "" {
+func (h *handler) judgeQuoted(ctx context.Context, groupOpenID string,
+	quoted feature.QuotedMessage) (feature.ModerationVerdict, error) {
+	if strings.TrimSpace(quoted.Index) == "" && strings.TrimSpace(quoted.ElementIndex) == "" {
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: the report does not say "+
 			"which message it is about", ErrUnjudged)
 	}
@@ -162,12 +198,14 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID, quotedIndex,
 	// message really has when the quote only came with its text -- looking for the
 	// temporary index here would never find anything, which is exactly the bug this
 	// return value exists to prevent.
-	chain, anchor, err := h.resolveWindow(ctx, groupOpenID, quotedIndex, quotedText)
+	chain, anchor, err := h.resolveWindow(ctx, groupOpenID, quoted)
 	if err != nil {
-		// Already taken back is not a failure to judge, so it goes out as itself
-		// rather than wrapped in the "nobody looked" error, which would tell the
-		// group the opposite of what happened.
-		if errors.Is(err, feature.ErrAlreadyPunished) {
+		// Two answers are not "the judgement failed", and they go out as themselves:
+		// a message that was already taken back, and a quote the platform did not
+		// name well enough to tell apart from the rest. Wrapping either in "nobody
+		// looked" would tell the group the opposite of what happened.
+		if errors.Is(err, feature.ErrAlreadyPunished) ||
+			errors.Is(err, feature.ErrUnidentifiedQuote) {
 			return feature.ModerationVerdict{}, err
 		}
 		return feature.ModerationVerdict{}, fmt.Errorf("%w: %v", ErrUnjudged, err)
