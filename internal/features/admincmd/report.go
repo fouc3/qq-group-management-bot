@@ -138,6 +138,21 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID string,
 		h.sayInGroup(ctx, groupOpenID, "这条消息已经处理过了（已被撤回），不再重复判定。")
 		return
 	}
+	if errors.Is(err, feature.ErrPictureNotJudgeable) {
+		// The message is a picture and the model is not allowed to be shown
+		// pictures. Named as its own answer rather than as a failed judgement:
+		// nothing went wrong here, and a reporter told "送检失败" would keep trying,
+		// because nothing in that sentence says an image cannot be reported in this
+		// group at all.
+		h.deps.Logger.Info("a report was about a picture, which this deployment "+
+			"does not judge", "group", groupOpenID, "reporter", reporter,
+			"error", err, "receipt", verdict.JudgementID)
+		h.sayInGroup(ctx, groupOpenID,
+			"无法举报图片消息：这条消息带图，而本群没有开启识图判定"+
+				"（moderation.model.vision），看不到图就没法判。"+
+				h.receiptSentence(verdict.JudgementID))
+		return
+	}
 	if err != nil {
 		// No judgement is not a clean verdict: nobody is touched, and the group is
 		// told why rather than left wondering.

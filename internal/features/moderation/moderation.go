@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/imagecache"
 )
 
 // Name is this feature's key under features: in the configuration.
@@ -34,6 +36,29 @@ const (
 	// seconds, and the cap is what stops a marked member talking quickly from
 	// becoming a burst of them.
 	DefaultMaxInFlight = 3
+)
+
+// Defaults for the images section, so that an empty block is a working one.
+const (
+	// DefaultImageDownloadSeconds is how long one message's pictures may take to
+	// arrive in total. It runs on the path that caches the message, so it is short:
+	// a picture that is not here within it is a judgement without that picture.
+	DefaultImageDownloadSeconds = 8
+	// DefaultImagesPerMessage is how many pictures of one message are kept: enough
+	// for the ordinary post, few enough that a message with fifty attachments is
+	// not fifty downloads.
+	DefaultImagesPerMessage = 4
+	// DefaultImageCompressAboveBytes is the size over which a picture is shrunk
+	// before it is sent to the model: 256 KiB, which is where a phone photo lands
+	// once it has been through the platform.
+	DefaultImageCompressAboveBytes = 256 << 10
+	// DefaultImageMaxBytes is the size over which a picture is dropped instead of
+	// kept: 2 MiB, above what shrinking produces, so it only fires on something
+	// nothing here can make small.
+	DefaultImageMaxBytes = 2 << 20
+	// DefaultImageMaxEdge is the longest side a shrunk picture is kept at, which is
+	// the size pictures are usually fed to a model at.
+	DefaultImageMaxEdge = 1568
 )
 
 // The two ways the window around a quoted message is chosen.
@@ -86,6 +111,14 @@ type Config struct {
 	// HighRisk is the list of members whose messages are judged as they arrive,
 	// and what happens to the marks nobody asked for.
 	HighRisk HighRisk `yaml:"high_risk"`
+	// Images is where the pictures members post are kept until the messages they
+	// came with age out.
+	//
+	// Kept whether or not the model is allowed to look at them, and that is
+	// deliberate: the platform hands one picture over exactly once, so a
+	// deployment that turns the eyes on later has no way of getting back the
+	// pictures that arrived before it did.
+	Images Images `yaml:"images"`
 	// Groups holds one group's differences from the section above it.
 	Groups map[string]GroupOverride `yaml:"groups"`
 	// DryRun judges and reports without muting or recalling anything.
@@ -130,6 +163,19 @@ type Model struct {
 	// at most three. Nil means the default; zero means never, which is a real choice
 	// for somebody paying per call.
 	Retries *int `yaml:"retries"`
+	// Vision says whether this model is allowed to be shown the pictures members
+	// posted.
+	//
+	// Off unless it is turned on, because the two ways of being wrong are not
+	// equal: a model that cannot see, sent a picture, may answer about the picture
+	// anyway -- which is a punishment invented out of nothing. So the default is
+	// the honest one, and a picture that reaches a judgement without this switch
+	// having been set is refused rather than described.
+	//
+	// Turning it on is a statement about the endpoint behind Name, not about this
+	// bot: a model that cannot see answers an image request with an error, which
+	// every path here already treats as no judgement rather than as no violation.
+	Vision bool `yaml:"vision"`
 }
 
 // defaultJudgeRetries is how many times an unreadable answer is asked for again when
@@ -196,6 +242,99 @@ type HighRisk struct {
 	// they have messages, which is a bill and a rate limit rather than a policy.
 	// What does not fit is reported and skipped.
 	MaxInFlight int `yaml:"max_in_flight"`
+}
+
+// Images is where the pictures members post are kept.
+//
+// Every field has a default, so an empty block is a working configuration: the
+// pictures go to the deployment's own cache directory and are shrunk if they are
+// large and dropped if they are very large.
+//
+// The three limits are pointers because zero is a meaning of its own for each of
+// them -- keep every picture, do not shrink, do not limit -- and a plain field could
+// not tell that apart from leaving the field out. Same shape as retries under model.
+type Images struct {
+	// Dir is the directory the pictures are written to. Empty means the user's
+	// cache directory, which is where something that may be lost belongs.
+	Dir string `yaml:"dir"`
+	// DownloadTimeoutSeconds bounds the whole of one message's pictures, not each
+	// of them: this runs on the path that caches the message, and a per picture
+	// budget multiplied by the number of pictures is a stall with a misleading
+	// name.
+	DownloadTimeoutSeconds int `yaml:"download_timeout_seconds"`
+	// MaxPerMessage is how many pictures of one message are kept. A message with
+	// more than this keeps the first of them. Zero keeps every one.
+	MaxPerMessage *int `yaml:"max_per_message"`
+	// CompressAboveBytes is the size over which a picture is shrunk before it is
+	// stored. Zero turns compression off, which is a real choice for somebody
+	// whose model takes whatever size the platform delivers.
+	CompressAboveBytes *int64 `yaml:"compress_above_bytes"`
+	// MaxBytes is the size over which a picture is not stored at all, applied to
+	// what would actually be stored -- so a picture under this after shrinking is
+	// kept. Zero means no limit.
+	//
+	// A picture dropped by this is a report about that message that cannot be
+	// judged, so raising it costs disk and lowering it costs the judgement.
+	MaxBytes *int64 `yaml:"max_bytes"`
+	// MaxEdge is the longest side a shrunk picture is kept at. Zero uses 1568,
+	// which is the size a picture is usually fed to a model at.
+	MaxEdge int `yaml:"max_edge"`
+}
+
+// applyDefaults fills in what the image section leaves out.
+//
+// The numbers are here rather than only in the image cache because an operator
+// reading the section should be able to see what an empty block comes to.
+func (i *Images) applyDefaults() error {
+	if strings.TrimSpace(i.Dir) == "" {
+		dir, err := imagecache.DefaultDir()
+		if err != nil {
+			return fmt.Errorf("finding a place to keep pictures: %w", err)
+		}
+		i.Dir = dir
+	}
+	if i.DownloadTimeoutSeconds <= 0 {
+		i.DownloadTimeoutSeconds = DefaultImageDownloadSeconds
+	}
+	if i.MaxPerMessage == nil {
+		maxPerMessage := DefaultImagesPerMessage
+		i.MaxPerMessage = &maxPerMessage
+	}
+	if *i.MaxPerMessage < 0 {
+		return fmt.Errorf("images max_per_message %d: want zero or more",
+			*i.MaxPerMessage)
+	}
+	if i.CompressAboveBytes == nil {
+		// Small enough to reach: a phone photo is megabytes, and one of those in
+		// front of the judge costs more than the judgement.
+		compressAbove := int64(DefaultImageCompressAboveBytes)
+		i.CompressAboveBytes = &compressAbove
+	}
+	if i.MaxBytes == nil {
+		// The size a shrunk picture is refused at. It is above what shrinking ever
+		// produces, so it only ever fires on something the platform sent that
+		// nothing here can make small.
+		maxBytes := int64(DefaultImageMaxBytes)
+		i.MaxBytes = &maxBytes
+	}
+	if *i.CompressAboveBytes < 0 || *i.MaxBytes < 0 {
+		return errors.New("images compress_above_bytes and max_bytes are sizes, so " +
+			"neither can be negative -- zero means the limit is off")
+	}
+	if i.MaxEdge <= 0 {
+		i.MaxEdge = DefaultImageMaxEdge
+	}
+	if *i.MaxBytes > 0 && *i.CompressAboveBytes > *i.MaxBytes {
+		// Refused rather than quietly reordered: the operator who wrote this meant
+		// one of the two numbers to be somewhere it is not, and a picture that goes
+		// straight from "too big to send as it is" to "dropped" is a report that can
+		// never be judged.
+		return fmt.Errorf("images compress_above_bytes (%d) is above max_bytes "+
+			"(%d), so every picture over the compression threshold would also be "+
+			"over the limit and none would ever be shrunk",
+			*i.CompressAboveBytes, *i.MaxBytes)
+	}
+	return nil
 }
 
 // GroupOverride is one group's differences from the section above it.
@@ -426,6 +565,9 @@ func (c *Config) applyDefaults() error {
 	if c.HighRisk.MaxInFlight <= 0 {
 		c.HighRisk.MaxInFlight = DefaultMaxInFlight
 	}
+	if err := c.Images.applyDefaults(); err != nil {
+		return err
+	}
 
 	// The durations are parsed here rather than where they are used, so that a
 	// typo is refused at startup instead of becoming a silent default on the day
@@ -551,6 +693,13 @@ type handler struct {
 	cfg   Config
 	deps  feature.Deps
 	cache *Cache
+	// pictures is where the pictures members post are kept until their messages
+	// age out.
+	//
+	// Nil when the directory could not be prepared, which is a cache that is not
+	// working rather than a feature that is not working: judgements are made
+	// without pictures, and the reason is in the log at startup.
+	pictures pictureCache
 	// verifier is the join verification, when one is running. It is asked before
 	// a message is written down, because a member held back without a mute is
 	// having their messages taken back as they arrive, and what was taken back
@@ -597,11 +746,70 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		deps: deps,
 		cache: NewCache(deps.Redis, time.Duration(cfg.CacheHours)*time.Hour,
 			deps.Logger),
-		watched: map[string]int64{},
-		judging: make(chan struct{}, cfg.HighRisk.MaxInFlight),
+		pictures: newPictureCache(cfg, deps.Logger),
+		watched:  map[string]int64{},
+		judging:  make(chan struct{}, cfg.HighRisk.MaxInFlight),
 	}
 	instance.part, instance.stopPart = context.WithCancel(context.Background())
 	return instance, nil
+}
+
+// pictureCache is where the pictures members post are kept, as this feature uses it.
+//
+// Declared here rather than taken as the image cache itself, so that the seam is
+// visible in one place and a judgement can be tested without a directory of pictures
+// on disk. The interface is this feature's, not the cache's: what it asks for is
+// fetching, reading, and the type to serve a picture as.
+type pictureCache interface {
+	// FetchAll downloads one message's pictures and returns what was kept.
+	FetchAll(ctx context.Context, messageID string, urls []string) []string
+	// Read returns one stored picture by the name FetchAll returned.
+	Read(ref string) ([]byte, error)
+	// MIME is the type a stored picture is served as.
+	MIME(ref string) string
+	// Dir is where the pictures are kept, for the line that says so at startup.
+	Dir() string
+	// Sweep removes the pictures that have outlived their messages.
+	Sweep(ctx context.Context)
+}
+
+// newPictureCache prepares the place pictures are kept.
+//
+// A failure here is a warning rather than a refusal to start: the pictures are a
+// cache, and a deployment whose cache directory is misconfigured is still a
+// deployment that judges text -- saying so once at startup is what turns an
+// operator's typo into a thing they can find, and the alternative (refusing to
+// build the feature) would take the judging down with the pictures.
+func newPictureCache(cfg Config, log *slog.Logger) pictureCache {
+	// The limits are dereferenced rather than passed as they are: the image cache's
+	// own zero values mean the same thing as these do, so a section that was never
+	// defaulted keeps working.
+	maxPerMessage, compressAbove, maxBytes := 0, int64(0), int64(0)
+	if cfg.Images.MaxPerMessage != nil {
+		maxPerMessage = *cfg.Images.MaxPerMessage
+	}
+	if cfg.Images.CompressAboveBytes != nil {
+		compressAbove = *cfg.Images.CompressAboveBytes
+	}
+	if cfg.Images.MaxBytes != nil {
+		maxBytes = *cfg.Images.MaxBytes
+	}
+	cache, err := imagecache.New(imagecache.Config{
+		Dir:                cfg.Images.Dir,
+		Retention:          time.Duration(cfg.CacheHours) * time.Hour,
+		DownloadTimeout:    time.Duration(cfg.Images.DownloadTimeoutSeconds) * time.Second,
+		MaxPerMessage:      maxPerMessage,
+		CompressAboveBytes: compressAbove,
+		MaxBytes:           maxBytes,
+		MaxEdge:            cfg.Images.MaxEdge,
+		Logger:             log,
+	})
+	if err != nil {
+		log.Warn("the pictures members post will not be kept, so judgements will "+
+			"not be able to look at them", "dir", cfg.Images.Dir, "error", err)
+		return nil
+	}
+	return cache
 }
 
 // Name implements feature.Feature.
@@ -734,7 +942,46 @@ func (h *handler) Register(ctx context.Context) error {
 	// which the cache treats as one message.
 	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, h.onMessage)
 	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, h.onMessage)
+
+	// Once at startup, so that a bot which was down for longer than the retention
+	// does not keep its pictures until the next one arrives in a group that may
+	// never send another.
+	if h.pictures != nil {
+		// Said out loud, because the answer to "are pictures being kept, and where"
+		// is otherwise a directory nobody has looked at: the settings here decide
+		// whether a report about a picture can be judged at all.
+		h.deps.Logger.Info("pictures members post will be kept",
+			"dir", h.pictures.Dir(),
+			"hours", h.cfg.CacheHours,
+			"vision", h.cfg.Model.Vision,
+			"per_message", imageValue(h.cfg.Images.MaxPerMessage),
+			"compress_above_bytes", imageValue64(h.cfg.Images.CompressAboveBytes),
+			"max_bytes", imageValue64(h.cfg.Images.MaxBytes))
+		go h.pictures.Sweep(h.part)
+	} else if h.cfg.Model.Vision {
+		// A model told to look at pictures with nowhere to keep them: every message
+		// that carries one will be judged without it, which is worth saying here
+		// rather than discovering from a verdict weeks later.
+		h.deps.Logger.Warn("model vision is on but no pictures are being kept, so " +
+			"judgements will not see them")
+	}
 	return nil
+}
+
+// imageValue is a configured limit as a number for the log, with nil said as nil.
+func imageValue(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+// imageValue64 is the same for the two byte counts.
+func imageValue64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 // Close implements feature.Feature.
@@ -800,9 +1047,22 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		Text: data.Content,
 	}
 	if len(data.Attachments) > 0 {
-		// Described rather than stored: the judge needs to know a picture was
-		// sent, and downloading it is not this feature's business.
+		// Counted rather than described: a judgement is told how many attachments
+		// there were, and the pictures among them are fetched below and sent as
+		// pictures. A voice clip's transcription and a shared file's name are not
+		// something this feature reads, and neither is anything a judgement acts on.
 		message.Atts = []string{fmt.Sprintf("%d attachment(s)", len(data.Attachments))}
+	}
+	if urls := pictureURLs(data.Attachments); len(urls) > 0 {
+		// Fetched here, on the event that carried them, because this is the only
+		// moment a picture is reachable: the URL is a presigned link with a short
+		// life and no endpoint fetches a message back afterwards. What could not be
+		// fetched is still counted, so that a report about a picture can be answered
+		// as one instead of reaching the judge as a message that says nothing.
+		message.ImgCount = len(urls)
+		if h.pictures != nil {
+			message.Imgs = h.pictures.FetchAll(ctx, data.ID, urls)
+		}
 	}
 
 	if err := h.cache.Record(ctx, data.GroupOpenID, message); err != nil {
@@ -826,6 +1086,24 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 	}
 	h.judgeWatcher(data.GroupOpenID, message)
 	return nil
+}
+
+// pictureURLs is the pictures among a message's attachments, in the order they
+// were posted.
+//
+// The test is the SDK's own IsImage, so what counts as a picture is decided in one
+// place: the types the platform documents, which is jpeg, png and gif. A voice clip
+// with a wav conversion and a file sharing link are attachments too, and neither is
+// something a judgement can be shown.
+func pictureURLs(attachments []qqbotsdk.MessageAttachment) []string {
+	var urls []string
+	for _, attachment := range attachments {
+		if !attachment.IsImage() || strings.TrimSpace(attachment.URL) == "" {
+			continue
+		}
+		urls = append(urls, attachment.URL)
+	}
+	return urls
 }
 
 // heldBack reports whether the verification is holding this member back by taking

@@ -268,6 +268,11 @@ type Moderation interface {
 	// ErrUnidentifiedQuote is returned when nothing the platform gave is enough to
 	// say which message was meant. That is not the same as "the judgement failed":
 	// the report was fine and trying it again the same way will fail the same way.
+	//
+	// ErrPictureNotJudgeable is returned when the message carries a picture and the
+	// model is not allowed to be shown pictures. Also not "the judgement failed",
+	// and also not worth trying again: the switch behind it is the group's to
+	// change.
 	JudgeQuoted(ctx context.Context, groupOpenID string, quoted QuotedMessage,
 		reporterOpenID string) (ModerationVerdict, error)
 	// DryRun reports whether judgements are only to be recorded and reported.
@@ -389,6 +394,16 @@ var ErrUnidentifiedQuote = errors.New("the quoted message cannot be identified")
 // answer to give the group, and it is not the same answer as "the judgement
 // failed", which is what every other error from the seam means.
 var ErrAlreadyPunished = errors.New("the message has already been taken back")
+
+// ErrPictureNotJudgeable reports a report about a message whose content is a picture,
+// in a deployment whose model is not allowed to be shown pictures.
+//
+// It is a sentinel in this package rather than inside the moderation feature because
+// the caller has to recognise it, and for the same reason as the two above: "the
+// pictures in this message cannot be judged here" is an answer to give the group, and
+// it is not the same answer as "the judgement failed". A judgement that failed is
+// worth trying again; this is not, until the switch behind it is turned on.
+var ErrPictureNotJudgeable = errors.New("the message is a picture and pictures are not judged")
 
 // ModerationVerdict is what a judgement came to.
 type ModerationVerdict struct {

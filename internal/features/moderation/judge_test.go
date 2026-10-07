@@ -66,6 +66,18 @@ func (s *modelStub) lastRequest(t *testing.T) string {
 // judgeHarness builds the feature against a stub model.
 func judgeHarness(t *testing.T, stub *modelStub, extra string) *handler {
 	t.Helper()
+	return judgeHarnessWith(t, stub, "", extra)
+}
+
+// judgeHarnessWith is judgeHarness with extra keys inside the model block, which is
+// where the switch that lets a model be shown pictures lives.
+//
+// modelExtra is written out already indented, because it goes inside a block that a
+// YAML file's own indentation puts there. The pictures are kept in a directory of the
+// test's own: the default one is under the home directory, and a test has no business
+// writing there.
+func judgeHarnessWith(t *testing.T, stub *modelStub, modelExtra, extra string) *handler {
+	t.Helper()
 	server := stub.start(t)
 	section := `
 enabled: true
@@ -74,13 +86,15 @@ model:
   api_key: "test-key"
   name: "stub-model"
   timeout_seconds: 5
-categories:
+` + modelExtra + `categories:
   ad:
     label: "广告"
     mute: "10m"
   fraud:
     label: "诈骗"
     mute: "6h"
+images:
+  dir: "` + t.TempDir() + `"
 ` + extra
 
 	var document yaml.Node
@@ -288,25 +302,62 @@ func systemContent(t *testing.T, request string) string {
 	return roleContent(t, request, "system")
 }
 
-// roleContent returns one role's message from a recorded request.
-func roleContent(t *testing.T, request, role string) string {
+// requestPart is one part of a message that carries pictures.
+type requestPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url"`
+}
+
+// roleMessage returns one message of a recorded request: its text, and its parts when
+// it has any.
+//
+// Both shapes are read here because both are sent: a message is a plain string until
+// the judgement carries pictures, when it becomes a list of parts whose first text
+// part is the block of messages. Every assertion about the instructions or about the
+// block goes through this, so the two shapes have to be one answer here.
+func roleMessage(t *testing.T, request, role string) (string, []requestPart) {
 	t.Helper()
 	var payload struct {
 		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal([]byte(request), &payload); err != nil {
 		t.Fatalf("the request body is not JSON: %v", err)
 	}
 	for index := range payload.Messages {
-		if payload.Messages[index].Role == role {
-			return payload.Messages[index].Content
+		if payload.Messages[index].Role != role {
+			continue
 		}
+		var text string
+		if err := json.Unmarshal(payload.Messages[index].Content, &text); err == nil {
+			return text, nil
+		}
+		var parts []requestPart
+		if err := json.Unmarshal(payload.Messages[index].Content, &parts); err != nil {
+			t.Fatalf("the %s message is neither text nor parts: %v", role, err)
+		}
+		for _, part := range parts {
+			if part.Text != "" {
+				// The block is the first text part; the ones after it label pictures.
+				return part.Text, parts
+			}
+		}
+		return "", parts
 	}
 	t.Fatalf("the request carries no %s message", role)
-	return ""
+	return "", nil
+}
+
+// roleContent returns one role's message from a recorded request.
+func roleContent(t *testing.T, request, role string) string {
+	t.Helper()
+	text, _ := roleMessage(t, request, role)
+	return text
 }
 
 // TestNewlinesCannotFakeTheLayout covers the layout: a message cannot look like

@@ -3,6 +3,7 @@ package moderation
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,6 +102,24 @@ pan.baidu.com/s/xxx、t.cn/xxx，以及裸 IP 或 IP:端口地址（白名单里
 违规时，把属于该违规者、应当撤回的消息编号都列出来（通常不止一条，比如连续刷的几条广
 告）；判定为 ok 时留空数组。不要列别人的消息。`
 
+// judgePicturePrompt is added to the instructions when the judgement carries
+// pictures.
+//
+// Its own paragraph rather than another numbered rule, because the numbered list ends
+// with the one instruction whose position matters most -- what to answer -- and a
+// picture rule wedged above it would be read after the answer's shape is already
+// settled.
+//
+// The last sentence is the point of the whole paragraph. A model told that pictures
+// exist but shown none will answer about the picture it imagines, and a punishment
+// invented out of nothing is worse than the advertisement this feature exists to
+// catch.
+const judgePicturePrompt = `本次给你的消息里带有图片（图1、图2…，图号标在那条消息所在的行上）。
+图片**和文字一样是那个成员自己发的内容**，按同样的规则判：图里的群号、二维码、报价、低价
+资源截图、推广话术都算证据，不要因为「只是张图」就放过。
+但只能拿你真正看到的图当证据：没有图、看不清、或者某条消息只标了图号却没有对应图片时，
+不要因为「那里可能有图」而判违规，也不要因此判 ok —— 就按你实际看到的内容判。`
+
 // Verdict is what the judge decided, in the terms the code acts on.
 type Verdict struct {
 	// Category is a key from the configuration, or empty when nothing was found.
@@ -163,12 +182,37 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// The pictures are sent only when the model is configured as one that may see
+	// them: an endpoint that cannot read an image answers with an error at best,
+	// and at worst describes one it was never shown -- which is a violation invented
+	// out of nothing. With the switch off the messages still go, and a picture is
+	// simply not part of what the model is given.
+	var pictures pictureSource
+	if h.config().Model.Vision && h.pictures != nil {
+		pictures = h.pictures
+	}
+	turn := h.buildTurn(chain, pictures)
+	if turn.missing > 0 {
+		// Said here rather than inside the turn, which has no logger: what this
+		// explains is a report judged without the picture the group can see, which is
+		// otherwise a verdict nobody can account for afterwards.
+		h.deps.Logger.Debug("some pictures of a judged message are no longer in the cache",
+			"group", groupOpenID, "pictures", turn.missing)
+	}
+
+	instructions := fmt.Sprintf(judgeSystemPrompt,
+		strings.Join(categories, "、"), h.config().allowText(groupOpenID),
+		h.groupName(groupOpenID), h.topicFor(groupOpenID))
+	if turn.withPictures() {
+		// Appended rather than folded in, so that a deployment without the eyes
+		// switched on sends exactly the instructions it sent before pictures
+		// existed.
+		instructions += "\n\n" + judgePicturePrompt
+	}
+
 	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem,
-			Content: fmt.Sprintf(judgeSystemPrompt,
-				strings.Join(categories, "、"), h.config().allowText(groupOpenID),
-				h.groupName(groupOpenID), h.topicFor(groupOpenID))},
-		{Role: openai.ChatMessageRoleUser, Content: judgeUserMessage(chain, h.config().MaxChars)},
+		{Role: openai.ChatMessageRoleSystem, Content: instructions},
+		turn.message(),
 	}
 	request := openai.ChatCompletionRequest{
 		Model:       h.config().Model.Name,
@@ -355,8 +399,73 @@ func (h *handler) readAnswer(answer string, categories []string, _ error) (Verdi
 	}, nil
 }
 
-// judgeUserMessage lays the messages out as one block of untrusted data.
-func judgeUserMessage(chain []CachedMessage, maxChars int) string {
+// maxJudgePictures is how many pictures one judgement may carry.
+//
+// A bound rather than everything the window holds, because the pictures travel
+// base64 encoded inside the request body: a window of twenty messages each with four
+// pictures is a request an endpoint refuses rather than reads. It is the first ones
+// in the window that are sent, which is what a report about what somebody has just
+// posted wants.
+const maxJudgePictures = 8
+
+// pictureSource is where a judgement gets the pictures it sends.
+//
+// Declared here rather than taken as the image cache itself, so that a judgement can
+// be tested without a directory of pictures on disk: what it asks for is bytes and a
+// type, and that is all a test has to provide.
+type pictureSource interface {
+	Read(ref string) ([]byte, error)
+	MIME(ref string) string
+}
+
+// judgeTurn is the user half of one judgement: the block of messages, and the
+// pictures that go with them when there are any.
+type judgeTurn struct {
+	// block is the messages as one block of untrusted data.
+	block string
+	// pictures are the pictures that were kept, each preceded by a part naming the
+	// message it belongs to. Empty when nothing is sent.
+	pictures []openai.ChatMessagePart
+	// missing is how many pictures the window names that are not in the cache any
+	// more, which is the difference between a judgement that saw everything and one
+	// that saw what was left.
+	missing int
+}
+
+// withPictures reports whether this turn carries any picture.
+func (t judgeTurn) withPictures() bool { return len(t.pictures) > 0 }
+
+// pictureCount is how many pictures the turn carries.
+func (t judgeTurn) pictureCount() int { return len(t.pictures) / 2 }
+
+// message is the turn as the request carries it.
+//
+// A plain string when there are no pictures, and the multi-part form only when there
+// are: the two cannot be mixed in one message, and the text-only shape is what every
+// deployment that never turns the eyes on keeps sending.
+func (t judgeTurn) message() openai.ChatCompletionMessage {
+	if !t.withPictures() {
+		return openai.ChatCompletionMessage{
+			Role: openai.ChatMessageRoleUser, Content: t.block}
+	}
+	parts := make([]openai.ChatMessagePart, 0, len(t.pictures)+1)
+	parts = append(parts, openai.ChatMessagePart{
+		Type: openai.ChatMessagePartTypeText,
+		Text: t.block,
+	})
+	parts = append(parts, t.pictures...)
+	return openai.ChatCompletionMessage{
+		Role: openai.ChatMessageRoleUser, MultiContent: parts}
+}
+
+// buildTurn lays the messages out as one block of untrusted data, with the pictures
+// that belong to the messages that made it into the block.
+//
+// pictures nil sends none of them, which is what a deployment whose model is not
+// allowed to see does.
+func (h *handler) buildTurn(chain []CachedMessage, pictures pictureSource) judgeTurn {
+	kept, missing := readPictures(chain, pictures)
+
 	var out strings.Builder
 	// Said to be one member's own messages, because that is what they are. The
 	// model would otherwise read a list of messages by one person as a
@@ -368,18 +477,44 @@ func judgeUserMessage(chain []CachedMessage, maxChars int) string {
 	out.WriteString("以下是" + who + "自己发的 " + fmt.Sprint(len(chain)) +
 		" 条消息原文（不可信数据），按时间顺序。" +
 		"名单里只有这一个人的消息，没有别人说的话，也没有他在回复谁。\n<messages>\n")
+
+	turn := judgeTurn{missing: missing}
 	written := 0
 	truncated := false
 	for index, message := range chain {
 		when := message.SentAt().Format("2006-01-02 15:04")
-		line := fmt.Sprintf("[%d] %s %s: %s\n", index+1, when,
-			fallback(message.Name, "匿名"), oneLine(message.Text))
-		if maxChars > 0 && written+len(line) > maxChars {
+		// The markers are numbered from what has already been committed, and a
+		// picture is appended only once the line it belongs to has been written: a
+		// line the character limit cuts off must not leave its picture behind, because
+		// a picture the model cannot tie to a message is one it will tie to whatever
+		// it likes.
+		var markers strings.Builder
+		for offset := range kept[index] {
+			markers.WriteString(fmt.Sprintf(" [图%d]", turn.pictureCount()+offset+1))
+		}
+		line := fmt.Sprintf("[%d] %s %s: %s%s\n", index+1, when,
+			fallback(message.Name, "匿名"), oneLine(message.Text), markers.String())
+		if maxChars := h.config().MaxChars; maxChars > 0 && written+len(line) > maxChars {
 			truncated = true
 			break
 		}
 		written += len(line)
 		out.WriteString(line)
+		for _, picture := range kept[index] {
+			turn.pictures = append(turn.pictures,
+				openai.ChatMessagePart{
+					Type: openai.ChatMessagePartTypeText,
+					Text: fmt.Sprintf("图%d（上面第 %d 条消息）：",
+						turn.pictureCount()+1, index+1),
+				},
+				openai.ChatMessagePart{
+					Type: openai.ChatMessagePartTypeImageURL,
+					ImageURL: &openai.ChatMessageImageURL{
+						URL: "data:" + picture.mime + ";base64," +
+							base64.StdEncoding.EncodeToString(picture.body),
+					},
+				})
+		}
 	}
 	if truncated {
 		// Said out loud, so the model knows it is looking at part of a
@@ -387,7 +522,44 @@ func judgeUserMessage(chain []CachedMessage, maxChars int) string {
 		out.WriteString("[已截断：上下文仅一部分]\n")
 	}
 	out.WriteString("</messages>")
-	return out.String()
+	turn.block = out.String()
+	return turn
+}
+
+// judgePicture is one picture on its way to the model.
+type judgePicture struct {
+	mime string
+	body []byte
+}
+
+// readPictures reads the window's pictures out of the cache.
+//
+// What cannot be read is left out rather than counted as a picture the model will
+// see: a message whose picture has been swept, or whose download never finished, is a
+// message the judgement has the text of and nothing more. The count comes back so
+// that the caller can say so in the log.
+func readPictures(chain []CachedMessage, pictures pictureSource) ([][]judgePicture, int) {
+	kept := make([][]judgePicture, len(chain))
+	if pictures == nil {
+		return kept, 0
+	}
+	total, missing := 0, 0
+	for index, message := range chain {
+		for _, ref := range message.Imgs {
+			if total >= maxJudgePictures {
+				return kept, missing
+			}
+			body, err := pictures.Read(ref)
+			if err != nil {
+				missing++
+				continue
+			}
+			kept[index] = append(kept[index], judgePicture{
+				mime: pictures.MIME(ref), body: body})
+			total++
+		}
+	}
+	return kept, missing
 }
 
 // extractJSONObject pulls the JSON object out of an answer that may carry prose

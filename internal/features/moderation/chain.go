@@ -26,9 +26,26 @@ type CachedMessage struct {
 	TS int64 `json:"ts"`
 	// Text is the message body.
 	Text string `json:"text,omitempty"`
-	// Atts are short descriptions of the attachments, which is all the judge
-	// needs and all that is worth keeping.
+	// Atts are short descriptions of the attachments: how many there were, which is
+	// all a judgement is told about the ones it cannot be shown.
+	//
+	// The pictures among them are not described here: they are kept (see Imgs), and
+	// what is sent for them is the picture itself.
 	Atts []string `json:"att,omitempty"`
+	// ImgCount is how many pictures the message carried, whether or not any of
+	// them could be kept.
+	//
+	// It is what lets a report about a picture be answered as one, and it is
+	// deliberately separate from Imgs: a picture that could not be fetched is a
+	// message that had a picture, and telling a judgement it had none would be
+	// telling it the wrong thing about somebody.
+	ImgCount int `json:"imgc,omitempty"`
+	// Imgs are the names of the stored pictures, in the order they were posted.
+	//
+	// Names, not paths: the pictures live in the deployment's own cache directory,
+	// and what is written down here comes back from a Redis that may be shared
+	// with something else. See imagecache.Read.
+	Imgs []string `json:"imgs,omitempty"`
 	// Punished records that this message has been taken back, and it is set only
 	// once it really has been.
 	//

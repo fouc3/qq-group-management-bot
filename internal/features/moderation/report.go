@@ -100,6 +100,34 @@ func (h *handler) resolveWindow(ctx context.Context, groupOpenID string,
 	return nil, "", err
 }
 
+// unjudgeablePicture reports whether a report cannot be judged because of the
+// pictures on the message it is about.
+//
+// Two cases, and both are refusals rather than judgements:
+//
+//   - the model is not allowed to be shown pictures. Then a message that carries one
+//     is a message this deployment cannot judge at all, whatever else it says: the
+//     picture is the part that matters and it would be silently missing.
+//   - the model may see them, but this message's pictures are no longer in the cache
+//     -- the download failed, they were over the size limit, or they have been swept.
+//     That is only fatal for a message that is pictures and nothing else: a message
+//     with words in it is still something the judge can read, and refusing it would
+//     throw away a report the group made about words it can see.
+func unjudgeablePicture(reported CachedMessage, vision bool) error {
+	if reported.ImgCount == 0 {
+		return nil
+	}
+	if !vision {
+		return fmt.Errorf("%w: the reported message carries %d picture(s)",
+			feature.ErrPictureNotJudgeable, reported.ImgCount)
+	}
+	if len(reported.Imgs) == 0 && strings.TrimSpace(reported.Text) == "" {
+		return fmt.Errorf("%w: the reported message is pictures and nothing else, "+
+			"and none of them are in the cache any more", ErrUnjudged)
+	}
+	return nil
+}
+
 // usableIndex is the message's own name, or nothing when the platform gave none.
 //
 // The scene's index first because it is the documented one, then the quoted
@@ -215,6 +243,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID string,
 	// loudest in the window: the report is about that message, and what follows
 	// follows the message.
 	subject, quotedID := "", ""
+	reported := CachedMessage{}
 	judged := make([]string, 0, len(chain))
 	for _, message := range chain {
 		if message.ID != "" {
@@ -222,6 +251,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID string,
 		}
 		if message.Idx == anchor {
 			subject, quotedID = message.User, message.ID
+			reported = message
 		}
 	}
 	if subject == "" {
@@ -240,6 +270,19 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID string,
 			JudgedMessageIDs: judged,
 			Reason:           "该群的豁免发送者",
 		}, nil
+	}
+
+	// A picture nobody can look at is not something to judge around. The reported
+	// message is mostly the picture, so a verdict picked out of whatever text
+	// happened to sit next to it would be a verdict about a message nobody
+	// reported -- and the honest answer, "this cannot be judged here", is one the
+	// group can act on.
+	if err := unjudgeablePicture(reported, h.config().Model.Vision); err != nil {
+		return feature.ModerationVerdict{
+			SubjectOpenID:    subject,
+			QuotedMessageID:  quotedID,
+			JudgedMessageIDs: judged,
+		}, err
 	}
 
 	verdict, err := h.Judge(ctx, groupOpenID, chain)
