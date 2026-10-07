@@ -139,6 +139,21 @@ func (h *handler) commandDefs() []command.Def {
 			Run:      h.blacklistCommand,
 		},
 		{
+			// The list that makes every message of a member cost a judgement. It is
+			// offered next to the blacklist because it is written by the same people,
+			// about the same kind of member, and does the opposite thing with them:
+			// the blacklist keeps somebody out of the group, while this watches
+			// somebody who is already in it.
+			Name:    "高风险",
+			Aliases: []string{"highrisk"},
+			Usage: "{prefix}高风险 add <@目标|openid> <时长> [原因] | remove <@目标|openid> | " +
+				"list —— 名单内的人每条消息都送 AI 判定，违规自动撤回并禁言（时长必填，不写永久）",
+			Desc:     "标记高风险用户（每条消息送检）",
+			Audience: command.Admins,
+			Panels:   groupPanel(),
+			Run:      h.highRiskCommand,
+		},
+		{
 			// Reporting is for every member, which is the point of it: the people
 			// who see an advertisement are not only the administrators.
 			//

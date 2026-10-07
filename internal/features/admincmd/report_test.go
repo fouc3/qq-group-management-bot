@@ -22,6 +22,13 @@ type stubJudge struct {
 	judged     int
 	lastGroup  string
 	lastQuoted string
+	// lastQuotedElement and lastQuotedAuthor are the other two things the platform
+	// may name about the quoted message: the element's own index for it, and who it
+	// says sent it. Both are kept because which one the command hands over is the
+	// question -- the scene's index is temporary for a quote of a quote, and the
+	// element's may not be.
+	lastQuotedElement string
+	lastQuotedAuthor  string
 	// release holds the judgement until the test lets it go, so that the line the
 	// group sees first can be asserted without racing the verdict.
 	release chan struct{}
@@ -49,20 +56,72 @@ type stubJudge struct {
 	punishedGroup string
 	// label is what LabelFor answers with, for the receipt tests.
 	label string
+	// watched is the high risk list the stub keeps, and watchErr what it answers
+	// with instead of keeping one. It is a list rather than a map because the
+	// command's own reply is what these are read back through.
+	watched  []store.Watch
+	watchErr error
 }
 
-func (s *stubJudge) JudgeQuoted(ctx context.Context, groupOpenID,
-	quotedIndex, quotedText, reporter string) (feature.ModerationVerdict, error) {
+// Watch keeps one mark, replacing any earlier one for the same member -- the same
+// thing the store does, so that a test asserting on the list sees what the reply
+// claimed.
+func (s *stubJudge) Watch(_ context.Context, entry store.Watch) error {
+	if s.watchErr != nil {
+		return s.watchErr
+	}
+	kept := make([]store.Watch, 0, len(s.watched)+1)
+	for _, existing := range s.watched {
+		if existing.MemberOpenID != entry.MemberOpenID {
+			kept = append(kept, existing)
+		}
+	}
+	s.watched = append(kept, entry)
+	return nil
+}
+
+// Unwatch forgets one mark, and reports whether there was one.
+func (s *stubJudge) Unwatch(_ context.Context, memberOpenID string) (bool, error) {
+	if s.watchErr != nil {
+		return false, s.watchErr
+	}
+	kept := make([]store.Watch, 0, len(s.watched))
+	removed := false
+	for _, existing := range s.watched {
+		if existing.MemberOpenID == memberOpenID {
+			removed = true
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	s.watched = kept
+	return removed, nil
+}
+
+// Watches lists the marks the stub is holding.
+func (s *stubJudge) Watches(context.Context) ([]store.Watch, error) {
+	if s.watchErr != nil {
+		return nil, s.watchErr
+	}
+	return s.watched, nil
+}
+
+func (s *stubJudge) JudgeQuoted(ctx context.Context, groupOpenID string,
+	quoted feature.QuotedMessage, reporter string) (feature.ModerationVerdict, error) {
+	// Written down before the entrace signal rather than after the release below, so
+	// that a test which waits for the signal can read them without racing the
+	// goroutine the command started.
 	s.judgedCtx = ctx
+	s.judged++
+	s.lastGroup, s.lastQuoted = groupOpenID, quoted.Index
+	s.lastQuotedElement, s.lastQuotedAuthor = quoted.ElementIndex, quoted.Author
+	s.quotedText, s.reporter = quoted.Text, reporter
 	if s.entered != nil {
 		s.entered <- struct{}{}
 	}
 	if s.release != nil {
 		<-s.release
 	}
-	s.judged++
-	s.lastGroup, s.lastQuoted = groupOpenID, quotedIndex
-	s.quotedText, s.reporter = quotedText, reporter
 	// The verdict comes back even with the error, which is what the moderation
 	// feature does: a judgement that could not be reached is recorded too, and
 	// that record's id is what a receipt on a failure is made of.

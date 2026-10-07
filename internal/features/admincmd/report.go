@@ -41,40 +41,43 @@ func (h *handler) reportCommand(ctx context.Context,
 		return nil
 	}
 
-	// The quoted message is named by the index the platform put on it, which is
-	// the only handle a quote carries. The id needed to recall it is in the cache,
-	// not in the event.
-	quotedIndex, ok := data.MessageScene.ExtValue("ref_msg_idx")
-	if !ok || strings.TrimSpace(quotedIndex) == "" {
+	// The quoted message is named by the platform in two places, and either may be
+	// the one that works. The scene context carries ref_msg_idx for the message the
+	// quote points at; the element that carries the quoted content carries msg_idx
+	// for the same message. An ordinary quote has the same value in both, so only a
+	// quote of a message that is itself a quote can tell them apart -- and there the
+	// scene falls back to a temporary index the cache can never hold, which is
+	// exactly the case that has to have somewhere else to look.
+	quoted := feature.QuotedMessage{
+		Index: strings.TrimSpace(ext(data, "ref_msg_idx")),
+	}
+	if len(data.MsgElements) > 0 {
+		quoted.ElementIndex = strings.TrimSpace(data.MsgElements[0].MsgIdx)
+		quoted.Text = data.MsgElements[0].Content
+		if data.MsgElements[0].Author != nil {
+			// Named only sometimes, and never in production so far. It is what makes
+			// the text usable at all, so it is carried rather than dropped.
+			quoted.Author = data.MsgElements[0].Author.MemberOpenID
+		}
+	}
+	if quoted.Index == "" && quoted.ElementIndex == "" {
 		h.reply(ctx, data, "请**引用**要举报的那条消息，再发这个命令。")
 		return nil
 	}
 
-	// Some quotes carry an index the cache can never hold -- a quote of a message that
-	// is itself a quote comes with a temporary one -- and the judgement finds the
-	// message by the quoted text instead. That happens behind this call: what is
-	// passed in is a locator, never evidence, and the message it locates is judged as
-	// its author's own words.
-
 	// Written down because the platform's identifiers here are not what they
 	// looked like: a quote names the message it points at, and that name turned out
 	// not to be the one the same message carried when it arrived, so a lookup by it
-	// found nothing even though the message was in the cache. What the quote
-	// actually carries -- the ref_msg_idx, and the quoted author and text that come
-	// with it -- is the only way to see the difference.
-	message := ""
-	author := ""
-	if len(data.MsgElements) > 0 {
-		message = data.MsgElements[0].Content
-		if data.MsgElements[0].Author != nil {
-			author = data.MsgElements[0].Author.MemberOpenID
-		}
-	}
+	// found nothing even though the message was in the cache. Both names, and the
+	// author, are what make that visible afterwards -- and which one the judgement
+	// ends up using is the answer to whether the element's name can rescue the
+	// cases the scene's cannot.
 	h.deps.Logger.Info("a report quoted a message",
 		"group", data.GroupOpenID,
-		"ref_msg_idx", quotedIndex,
-		"quoted_author", author,
-		"quoted_text", message)
+		"ref_msg_idx", quoted.Index,
+		"element_msg_idx", quoted.ElementIndex,
+		"quoted_author", quoted.Author,
+		"quoted_text", quoted.Text)
 
 	h.reply(ctx, data, reportWaiting)
 
@@ -84,23 +87,48 @@ func (h *handler) reportCommand(ctx context.Context,
 	// request's, so that the judgement ends with the feature -- a judgement still
 	// running against an instance that has been replaced is a receipt posted for
 	// a command nobody is holding any more.
-	go h.judgeReport(h.part, data.GroupOpenID, quotedIndex, message, reporter)
+	go h.judgeReport(h.part, data.GroupOpenID, quoted, reporter)
 	return nil
+}
+
+// ext returns one value from the message's scene context, or nothing.
+func ext(data *qqbotsdk.GroupMessageCreateData, key string) string {
+	if data.MessageScene == nil {
+		return ""
+	}
+	value, _ := data.MessageScene.ExtValue(key)
+	return value
 }
 
 // judgeReport runs one judgement and carries out whatever it asks for.
 //
-// quotedText is what the quote showed of the message it points at: a locator, never
-// evidence. It exists because the platform names such a message twice -- the quote
-// carries an index, and for a message that is itself a quote that index is temporary
-// and useless, while the text it showed is what the message actually said.
-func (h *handler) judgeReport(ctx context.Context, groupOpenID, quotedIndex,
-	quotedText, reporter string) {
+// quoted is how the report names the message it is about: two possible indexes and
+// the author, and no assumption about which of them will work. Text travels with
+// them as a locator and never as evidence -- the message it locates is judged as its
+// author's own words.
+func (h *handler) judgeReport(ctx context.Context, groupOpenID string,
+	quoted feature.QuotedMessage, reporter string) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
-	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quotedIndex,
-		quotedText, reporter)
+	verdict, err := h.moderation.JudgeQuoted(ctx, groupOpenID, quoted, reporter)
+	if errors.Is(err, feature.ErrUnidentifiedQuote) {
+		// A report that names no message could not be resolved, which is neither a
+		// failure to judge nor something the reporter can fix by reporting the same
+		// message again. Said in those words, with the receipt so an administrator
+		// can look at what the platform actually sent.
+		h.deps.Logger.Warn("a report quoted a message that cannot be identified",
+			"group", groupOpenID, "reporter", reporter,
+			"ref_msg_idx", quoted.Index, "element_msg_idx", quoted.ElementIndex,
+			"quoted_author", quoted.Author, "error", err,
+			"receipt", verdict.JudgementID)
+		h.sayInGroup(ctx, groupOpenID,
+			"这条引用机器人拿不到可用的消息编号（被举报的多半是转发/合并消息，或"+
+				"引用了一条本身就是引用的消息），无法确定它是哪一条，所以这次不判定。"+
+				"可以改为直接引用对方那条普通消息再举报。"+
+				h.receiptSentence(verdict.JudgementID))
+		return
+	}
 	if errors.Is(err, feature.ErrAlreadyPunished) {
 		// The message is gone from the group, so there is nothing to judge and
 		// nothing to answer about it. Said plainly, because the other wording --
@@ -326,14 +354,19 @@ func (h *handler) recordOutcome(ctx context.Context, judgementID string,
 // muteMember silences one member, which is the call the /禁言 command makes too.
 func (h *handler) muteMember(ctx context.Context, groupOpenID, memberOpenID string,
 	duration time.Duration) error {
-	return h.deps.Client.SetGroupMemberMute(ctx, groupOpenID,
+	until := time.Now().Add(duration)
+	if err := h.deps.Client.SetGroupMemberMute(ctx, groupOpenID,
 		&qqbotsdk.SetGroupMemberMuteRequest{
 			Members: []qqbotsdk.SetMemberMuteState{{
 				Op:           qqbotsdk.MemberMuteAdd,
 				MemberOpenID: memberOpenID,
-				MuteExpireAt: time.Now().Add(duration).Format(time.RFC3339),
+				MuteExpireAt: until.Format(time.RFC3339),
 			}},
-		})
+		}); err != nil {
+		return err
+	}
+	h.deps.Mutes.Record(groupOpenID, memberOpenID, until)
+	return nil
 }
 
 // sayInGroup sends a message that answers nothing, because a judgement finishes
