@@ -13,11 +13,14 @@ import (
 
 // The pending list lives in the data layer. What is left here is the JSON file
 // the earlier build wrote, read exactly once so that changing over does not
-// forget members who are already muted.
+// forget members who are already held.
 //
-// A hold is a real mute on a real person, applied for as long as twenty nine
-// days. Losing the record means they stay muted with nobody knowing why, no
-// deadline acted on, and a button that answers 操作失败 for the rest of the mute.
+// A hold is a real thing applied to a real person, and losing the record means it
+// stays applied with nobody knowing why: a mute, which lasts for as long as twenty
+// nine days, or a pseudo-mute, which lasts until the member verifies and therefore
+// lasts for exactly as long as the record does. Either way there is nobody to
+// release them, no deadline acted on, and a button that answers 操作失败 until it
+// is over.
 
 // A hold that reaches the platform but not the data layer is exactly the record
 // that must not be lost, so every mutation is written as it happens rather than
@@ -26,6 +29,28 @@ import (
 // stateFileVersion marks the layout of the JSON file, so an older or newer file
 // is refused instead of being misread.
 const stateFileVersion = 1
+
+// heldUntilStamp renders the moment a hold runs out for the data layer.
+//
+// The zero moment is how "this hold has no expiry of its own" is written down --
+// a pseudo-mute lasts until the member verifies -- and it is stored as zero
+// rather than as the zero time's own year, because a column read by a filter that
+// asks "is this still in the future" has to be able to tell the two apart.
+func heldUntilStamp(moment time.Time) int64 {
+	if moment.IsZero() {
+		return 0
+	}
+	return moment.Unix()
+}
+
+// heldUntilMoment reads that moment back, and gives the zero moment back for a
+// hold that has no expiry.
+func heldUntilMoment(stamp int64) time.Time {
+	if stamp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(stamp, 0)
+}
 
 // importMarker records that the JSON file has been imported. It is a marker and
 // not "the table is empty" because the table empties again once the last member
@@ -54,7 +79,9 @@ type storedState struct {
 // readState loads the records written by the earlier build.
 //
 // Records whose hold the platform has already released are dropped: their mute
-// is over, so there is nothing to answer and nothing to act on.
+// is over, so there is nothing to answer and nothing to act on. A record with no
+// expiry of its own is kept: that is a hold the earlier build could not have
+// written, but this one can, and it is still somebody's hold.
 func readState(path string, now time.Time) ([]storedEntry, error) {
 	payload, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -78,7 +105,7 @@ func readState(path string, now time.Time) ([]storedEntry, error) {
 		if entry.Token == "" || entry.GroupOpenID == "" || entry.MemberOpenID == "" {
 			return nil, fmt.Errorf("%s has an entry without a token, group or member", path)
 		}
-		if !now.Before(entry.HeldUntil) {
+		if !entry.HeldUntil.IsZero() && !now.Before(entry.HeldUntil) {
 			continue
 		}
 		kept = append(kept, entry)
@@ -119,9 +146,14 @@ func (v *verifier) restore(ctx context.Context, now time.Time) {
 	if v.pending == nil {
 		// No data layer: nothing was ever written down, so there is nothing to
 		// restore. The feature still works, it just forgets on a restart -- which
-		// is worth saying out loud, because the members it forgets stay muted.
+		// is worth saying out loud, because what it forgets is not the same in
+		// both modes: a real mute stays applied with nobody left to release it,
+		// while a pseudo-mute simply stops, and the member talks as if they had
+		// verified.
 		v.deps.Logger.Warn("no data layer is configured, so a restart would forget " +
-			"every member who is still being held and leave them muted")
+			"every member who is still being held: under a real mute they stay " +
+			"muted with nobody to release them, and under a pseudo-mute they are " +
+			"free to talk again")
 		return
 	}
 
@@ -152,7 +184,7 @@ func (v *verifier) restore(ctx context.Context, now time.Time) {
 			memberOpenID: entry.MemberOpenID,
 			joinedAt:     entry.JoinedAt,
 			deadline:     time.Unix(entry.Deadline, 0),
-			heldUntil:    time.Unix(entry.HeldUntil, 0),
+			heldUntil:    heldUntilMoment(entry.HeldUntil),
 			reported:     entry.Reported,
 			settings:     settings,
 		}
@@ -202,7 +234,7 @@ func (v *verifier) importLegacyState(ctx context.Context, now time.Time) {
 			MemberOpenID: entry.MemberOpenID,
 			JoinedAt:     entry.JoinedAt,
 			Deadline:     entry.Deadline.Unix(),
-			HeldUntil:    entry.HeldUntil.Unix(),
+			HeldUntil:    heldUntilStamp(entry.HeldUntil),
 			Reported:     entry.Reported,
 			Settings:     settings,
 		}); err != nil {

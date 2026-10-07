@@ -19,6 +19,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/mutelog"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -65,6 +66,17 @@ type Deps struct {
 	// button's data to say whose it is. Build hands one over, and a feature built
 	// without it -- which is what a test builds -- gets one of its own.
 	Buttons *command.Buttons
+	// Mutes is where a feature writes down the mutes it applied, and where the
+	// feature that lifts somebody else's mute reads them.
+	//
+	// Shared for the same reason Buttons is: several features mute people, and
+	// the platform says nothing about who applied a mute. A record that knew
+	// about only one of them would undo the others' work -- an administrator's
+	// command, or the hold a member is verifying under in the mute mode.
+	//
+	// A verification held under the pseudo-mute writes nothing here: it mutes
+	// nobody, so it has no mute of its own for this record to tell apart.
+	Mutes *mutelog.Log
 }
 
 // InGroup reports whether the feature should act on a group.
@@ -235,11 +247,6 @@ func InjectCommands(features []Feature, logger *slog.Logger) error {
 	return nil
 }
 
-// Verifier is what the administrator commands need from the join verification
-// feature.
-//
-// It keeps the two independent: neither package imports the other, and the app
-// hands one to the other once both are built.
 // Moderation is what the moderation feature provides to whatever reports
 // content: it judges a quoted message against the configured model.
 //
@@ -248,16 +255,20 @@ func InjectCommands(features []Feature, logger *slog.Logger) error {
 type Moderation interface {
 	// JudgeQuoted judges the window of messages around one quoted message.
 	//
-	// quotedText is what the quote showed of the message it points at. It is a
-	// **locator and nothing else**: a quote of a message that is itself a quote comes
-	// with a temporary index the cache can never hold, so the text is how that
-	// message gets found. It is never sent for judging -- what is judged is the
-	// message that was found, and it is judged as its author's own words.
+	// quoted is how a report names the message it is about, and the two names in
+	// it are not equal: Index and ElementIndex are the platform's own names for
+	// that message, and a name is what identifies it. Text is not a name -- it is
+	// what the quote showed of the message, used only when a name is missing and
+	// only together with the author, because two members can say the same thing.
 	//
 	// An error means no judgement was reached: the message is not in the cache,
 	// the cache is down, or the model could not be read. None of those is a
 	// violation, and a caller must never treat one as a violation.
-	JudgeQuoted(ctx context.Context, groupOpenID, quotedIndex, quotedText,
+	//
+	// ErrUnidentifiedQuote is returned when nothing the platform gave is enough to
+	// say which message was meant. That is not the same as "the judgement failed":
+	// the report was fine and trying it again the same way will fail the same way.
+	JudgeQuoted(ctx context.Context, groupOpenID string, quoted QuotedMessage,
 		reporterOpenID string) (ModerationVerdict, error)
 	// DryRun reports whether judgements are only to be recorded and reported.
 	//
@@ -306,6 +317,22 @@ type Moderation interface {
 	// belongs to this feature, so a caller that has recorded a category can say
 	// that word about it without keeping a second copy of the configuration.
 	LabelFor(category string) string
+	// Watch marks one member whose messages are to be judged as they arrive, and
+	// replaces any earlier mark for them.
+	//
+	// The list is this feature's to keep, not the caller's: the judgement that
+	// every message of a marked member costs is made in here, so the answer to
+	// "who is marked" has to be kept where it is read. A caller that stored its
+	// own copy would have a list that disagreed with the one being enforced.
+	Watch(ctx context.Context, entry store.Watch) error
+	// Unwatch takes one member off the list, and reports whether they were on it.
+	//
+	// The answer is returned rather than left to a caller that reads the list
+	// first: removing an entry that was not there and reporting success is what
+	// leaves an operator believing a list changed when it did not.
+	Unwatch(ctx context.Context, memberOpenID string) (bool, error)
+	// Watches lists the members whose messages are being judged as they arrive.
+	Watches(ctx context.Context) ([]store.Watch, error)
 }
 
 // JudgedMessage is one message of the window a judge was shown, named the three
@@ -321,6 +348,38 @@ type JudgedMessage struct {
 	// Text is what the message said.
 	Text string
 }
+
+// QuotedMessage is how a report names the message it is about.
+//
+// The platform names it twice, and either name can be the one that works: the
+// scene context carries ref_msg_idx for the message the quote points at, and the
+// element that carries the quoted content carries msg_idx for the same message.
+// A quote of a message that is itself a quote comes with a temporary index in the
+// scene -- one the cache can never hold -- while the element may still carry the
+// message's real one, which is why both are here rather than one.
+type QuotedMessage struct {
+	// Index is the scene's ref_msg_idx.
+	Index string
+	// ElementIndex is the quoted content element's msg_idx.
+	ElementIndex string
+	// Author is the member openid the platform names as the sender, empty when it
+	// names nobody. An empty one is the ordinary case in production, and it is the
+	// reason Text cannot stand in for a name: without it there is no way to tell
+	// one member's message from another's when they say the same thing.
+	Author string
+	// Text is what the quote showed of the message. It is a locator and never
+	// evidence: the message it locates is judged as its author's own words.
+	Text string
+}
+
+// ErrUnidentifiedQuote reports a report whose quoted message cannot be told apart
+// from every other message.
+//
+// It is a sentinel in this package rather than inside the moderation feature
+// because the caller has to recognise it: "the platform did not say which message
+// this is" is an answer to give the group, and it is not the same answer as "the
+// judgement failed", which is what every other error from the seam means.
+var ErrUnidentifiedQuote = errors.New("the quoted message cannot be identified")
 
 // ErrAlreadyPunished reports a report about a message that has already been
 // withdrawn.
@@ -373,6 +432,12 @@ type ModerationVerdict struct {
 	Model string
 }
 
+// Verifier is what the rest of the bot needs from the join verification
+// feature: the administrator commands drive it, and whoever writes down what a
+// group said asks it what must not be written down.
+//
+// It keeps the two sides independent: neither package imports the other, and the
+// app hands one to the other once both are built.
 type Verifier interface {
 	// Reverify holds a member again and sends a fresh prompt.
 	Reverify(ctx context.Context, groupOpenID, memberOpenID string) error
@@ -385,6 +450,25 @@ type Verifier interface {
 	// verify, and releasing them by hand would defeat the check. The command
 	// gives way to the verification, not the other way round.
 	IsPending(groupOpenID, memberOpenID string) bool
+	// IsPseudoMuted reports whether a member is being held back without a mute:
+	// under the pseudo-mute the member is not silenced by the platform, so their
+	// messages are taken back as they arrive and never stay in the group.
+	//
+	// It is asked before a message is written down, because the two have to
+	// agree: a message that was taken back the moment it appeared is not
+	// something the group ever read, and a record of it would keep it quotable
+	// for as long as the cache remembers -- which is how a report would be filed
+	// about something nobody saw.
+	//
+	// It is also asked before a message is answered. An answer to something the
+	// group cannot read is the only trace left of what they said, and the answer
+	// is not taken back with the message, so nothing of theirs is answered at
+	// all: no command, no help and no refusal.
+	//
+	// It is false in the mute mode: there the member is silenced by the
+	// platform, and a message that still got through before the mute landed is
+	// the ordinary business of the cache and of the commands.
+	IsPseudoMuted(groupOpenID, memberOpenID string) bool
 	// Resend sends the verification prompt again for a member who is already
 	// waiting, using the button they already have.
 	//
@@ -394,7 +478,7 @@ type Verifier interface {
 	Resend(ctx context.Context, groupOpenID, memberOpenID string) error
 }
 
-// VerifierAware is implemented by a feature that drives the join verification.
+// VerifierAware is implemented by a feature that uses the join verification.
 type VerifierAware interface {
 	SetVerifier(Verifier)
 }

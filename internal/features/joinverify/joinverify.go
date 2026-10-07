@@ -113,6 +113,35 @@ const (
 	BackendOfficial = "official"
 )
 
+// How a member who has not verified is held back.
+const (
+	// MuteModeMute silences the member through the platform: a real mute, applied
+	// for the configured mute_minutes and lifted the moment they verify.
+	//
+	// It is the default, and it is the stronger of the two: the platform refuses
+	// the message instead of the bot taking it back, so nothing of what they said
+	// was ever readable by the group.
+	MuteModeMute = "mute"
+	// MuteModePseudo leaves the platform alone and takes the member's messages
+	// back as they arrive, keeping them out of the message cache at the same
+	// time. Nobody is muted.
+	//
+	// It exists because a mute is not always available or not always wanted: the
+	// platform refuses to mute a group administrator with 40103004, a mute is
+	// visible in the group's member list and on the member's own client, and a
+	// group may simply prefer that the bot not silence anybody at all. What it
+	// costs is said out loud at startup, because none of it is visible from the
+	// inside: the message does reach the group for as long as the recall takes, a
+	// recall of somebody else's message needs the bot to administer the group,
+	// and a take-back needs the message to arrive at all -- a group set to
+	// deliver only mentions gives this mode nothing to work with.
+	//
+	// A pseudo-mute has no expiry of its own: it lasts until the member verifies,
+	// which is also why mute_minutes and on_deadline: remute say nothing in this
+	// mode.
+	MuteModePseudo = "pseudo"
+)
+
 // Config is this feature's section in the configuration file.
 type Config struct {
 	// Enabled turns the switch on. A section written without it is on.
@@ -123,10 +152,17 @@ type Config struct {
 	// for after a restart.
 	StateFile string `yaml:"state_file"`
 	// MuteMinutes is how long a new member is held back. The default sits just
-	// inside the platform's thirty day ceiling.
+	// inside the platform's thirty day ceiling. It says nothing in the
+	// pseudo-mute mode, where the hold lasts until the member verifies.
 	MuteMinutes int `yaml:"mute_minutes"`
+	// MuteMode is how a member who has not verified is held back: mute has the
+	// platform silence them, pseudo takes their messages back as they arrive and
+	// keeps them out of the message cache. Empty means mute, which is what every
+	// deployment did before pseudo existed.
+	MuteMode string `yaml:"mute_mode"`
 	// DeadlineHours is how long they have to verify before the administrators
-	// are told. It should be far shorter than MuteMinutes.
+	// are told. Under a real mute it should be far shorter than MuteMinutes,
+	// which is what the validation asks of that mode and not of the pseudo-mute.
 	DeadlineHours int `yaml:"deadline_hours"`
 	// OnDeadline is none, notify or remove.
 	OnDeadline string `yaml:"on_deadline"`
@@ -174,6 +210,7 @@ type Config struct {
 // keep the shared prompt, labels and timings.
 type Override struct {
 	MuteMinutes      *int      `yaml:"mute_minutes"`
+	MuteMode         *string   `yaml:"mute_mode"`
 	DeadlineHours    *int      `yaml:"deadline_hours"`
 	OnDeadline       *string   `yaml:"on_deadline"`
 	RemoveBackend    *string   `yaml:"remove_backend"`
@@ -192,6 +229,7 @@ type Override struct {
 // overrides have been merged.
 type Settings struct {
 	MuteMinutes      int
+	MuteMode         string
 	DeadlineHours    int
 	OnDeadline       string
 	RemoveBackend    string
@@ -210,6 +248,7 @@ type Settings struct {
 func (c *Config) defaults() Settings {
 	return Settings{
 		MuteMinutes:      c.MuteMinutes,
+		MuteMode:         c.MuteMode,
 		DeadlineHours:    c.DeadlineHours,
 		OnDeadline:       c.OnDeadline,
 		RemoveBackend:    c.RemoveBackend,
@@ -234,6 +273,9 @@ func (c *Config) settingsFor(groupOpenID string) Settings {
 	}
 	if override.MuteMinutes != nil {
 		settings.MuteMinutes = *override.MuteMinutes
+	}
+	if override.MuteMode != nil {
+		settings.MuteMode = *override.MuteMode
 	}
 	if override.DeadlineHours != nil {
 		settings.DeadlineHours = *override.DeadlineHours
@@ -279,6 +321,7 @@ func (c *Config) settingsFor(groupOpenID string) Settings {
 func (s Settings) asConfig() *Config {
 	return &Config{
 		MuteMinutes:      s.MuteMinutes,
+		MuteMode:         s.MuteMode,
 		DeadlineHours:    s.DeadlineHours,
 		OnDeadline:       s.OnDeadline,
 		RemoveBackend:    s.RemoveBackend,
@@ -292,6 +335,34 @@ func (s Settings) asConfig() *Config {
 		SkipMessage:      s.SkipMessage,
 		DryRun:           s.DryRun,
 	}
+}
+
+// pseudoHolds reports whether this group holds a member back by taking their
+// messages back rather than by muting them.
+//
+// It is asked wherever the two modes differ, and it is deliberately about the
+// mode alone: a dry run is a separate question, answered where the hold is
+// actually applied and where a message is actually recalled.
+func (s Settings) pseudoHolds() bool {
+	return s.MuteMode == MuteModePseudo
+}
+
+// anyPseudoHolds reports whether any group this configuration covers is held
+// under the pseudo-mute.
+//
+// It is what the declared intents are read from: a take-back is driven by the
+// message events, so a bot whose groups are held this way has to subscribe to
+// them itself instead of relying on another feature happening to want them.
+func (c *Config) anyPseudoHolds() bool {
+	if c.defaults().pseudoHolds() {
+		return true
+	}
+	for groupOpenID := range c.Groups {
+		if c.settingsFor(groupOpenID).pseudoHolds() {
+			return true
+		}
+	}
+	return false
 }
 
 // validateGroups checks every group's merged settings at startup.
@@ -325,6 +396,11 @@ func (c *Config) applyDefaults() error {
 	}
 	if strings.TrimSpace(c.RemoveBackend) == "" {
 		c.RemoveBackend = BackendOneBot
+	}
+	if strings.TrimSpace(c.MuteMode) == "" {
+		// Every file written before this field existed asked for a real mute,
+		// and writing the section out is not a way to ask for something else.
+		c.MuteMode = MuteModeMute
 	}
 	if strings.TrimSpace(c.Prompt) == "" {
 		c.Prompt = DefaultPrompt
@@ -363,10 +439,20 @@ func (c *Config) applyDefaults() error {
 	// included: the deadline is when the member is held again, so it has to come
 	// before the mute runs out, or there would be a stretch in which they are
 	// free to talk before the next hold lands.
-	if c.DeadlineHours*60 >= c.MuteMinutes {
+	//
+	// It is not asked of the pseudo-mute, where the hold has no expiry at all:
+	// nothing runs out for the deadline to beat, and a group may well report
+	// somebody after a week of holding them.
+	if c.MuteMode != MuteModePseudo && c.DeadlineHours*60 >= c.MuteMinutes {
 		return fmt.Errorf("deadline_hours (%d) does not leave room inside mute_minutes (%d), "+
 			"so a reported member would already have been released",
 			c.DeadlineHours, c.MuteMinutes)
+	}
+	switch c.MuteMode {
+	case MuteModeMute, MuteModePseudo:
+	default:
+		return fmt.Errorf("mute_mode %q is not %s or %s",
+			c.MuteMode, MuteModeMute, MuteModePseudo)
 	}
 	switch c.OnDeadline {
 	case OnDeadlineNone, OnDeadlineNotify, OnDeadlineRemove, OnDeadlineRemute:
@@ -513,17 +599,28 @@ func (v *verifier) Name() string { return Name }
 func (v *verifier) Intents() qqbotsdk.Intent {
 	// Group member events announce the join; interaction events report the
 	// button press.
-	return qqbotsdk.IntentGroupMemberEvent | qqbotsdk.IntentInteraction
+	intents := qqbotsdk.IntentGroupMemberEvent | qqbotsdk.IntentInteraction
+	// A pseudo-mute is applied to the messages themselves, so the group's
+	// messages have to reach this feature and not merely the others that want
+	// them: without them there is nothing to take back, and the member talks as
+	// freely as anybody else while still looking held.
+	if v.cfg.anyPseudoHolds() {
+		intents |= qqbotsdk.IntentGroupAndC2CEvent
+	}
+	return intents
 }
 
 // Register implements feature.Feature.
 func (v *verifier) Register(_ context.Context) error {
 	v.registrations = append(v.registrations,
 		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberAdd, v.onMemberAdd),
-		// A held member can still speak for as long as their hold takes to
-		// apply, so their messages are watched as well as their joins. Both
-		// event types are registered because which one carries a group message
-		// depends on the group's receive setting, not on the message.
+		// A held member's messages are watched in both modes, for two different
+		// reasons. Under the pseudo-mute they are how the hold is applied at
+		// all: nothing else stops them talking. Under a real mute they only
+		// close the gap between the join and the mute landing, which the
+		// platform does not make instant. Both event types are registered
+		// because which one carries a group message depends on the group's
+		// receive setting, not on the message.
 		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, v.onHeldMemberMessage),
 		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, v.onHeldMemberMessage),
 	)
@@ -548,11 +645,13 @@ func (v *verifier) Register(_ context.Context) error {
 	}
 	v.buttons.Register(v.deps.Client)
 	v.warnAboutRemoval()
+	v.warnAboutPseudoHold()
 	go v.sweep()
 	// One line per group, because the rules are per group now.
 	v.eachSettings(func(label string, settings Settings) {
 		v.deps.Logger.Info("holding new members for verification",
 			"group", label,
+			"mute_mode", settings.MuteMode,
 			"mute_minutes", settings.MuteMinutes,
 			"deadline_hours", settings.DeadlineHours,
 			"on_deadline", settings.OnDeadline,
@@ -581,6 +680,30 @@ func (v *verifier) warnAboutRemoval() {
 				"backend is the one that works without an extra permission",
 				"group", label)
 		}
+	})
+}
+
+// warnAboutPseudoHold says at startup what holding somebody without muting them
+// rests on, because none of it is visible from the inside.
+//
+// Both conditions are the operator's to fix, and both fail silently: the take-back
+// needs the bot to administer the group -- a recall of somebody else's message is
+// refused otherwise -- and it needs the message to arrive at all, which a group set
+// to deliver only mentions never does. Without either, the member is held in this
+// feature's books and talks freely in the group, which reads as the verification
+// having quietly stopped working.
+func (v *verifier) warnAboutPseudoHold() {
+	v.eachSettings(func(label string, settings Settings) {
+		if !settings.pseudoHolds() {
+			return
+		}
+		v.deps.Logger.Info("holding members without muting them: a message from "+
+			"somebody who has not verified is taken back as it arrives and is left "+
+			"out of the message cache", "group", label)
+		v.deps.Logger.Warn("the pseudo-mute needs the bot to administer the group and "+
+			"the group to deliver all messages; if a member who has not verified is "+
+			"seen talking, one of the two is missing",
+			"group", label, "what_to_check", "the bot's role, and the group's bot settings")
 	})
 }
 
@@ -657,6 +780,37 @@ func (v *verifier) takeDueDeadlines(now time.Time) (due, renew []*pending) {
 	defer v.mu.Unlock()
 
 	for token, entry := range v.byToken {
+		if entry.settings.pseudoHolds() {
+			// A pseudo-mute has no expiry of its own, so nothing here ever
+			// releases anybody: the hold ends when the member verifies, or when
+			// a removal takes them out of the group.
+			//
+			// remute asks for the hold to be applied again and there is nothing
+			// to apply -- the group is already held until they verify -- so it
+			// comes to the same thing as none. notify and remove are the two that
+			// act on a deadline, and they act on it exactly as they do under a
+			// real mute.
+			switch entry.settings.OnDeadline {
+			case OnDeadlineNotify, OnDeadlineRemove:
+			default:
+				continue
+			}
+			if entry.reported || now.Before(entry.deadline) {
+				continue
+			}
+			entry.reported = true
+			// Recorded before the work is attempted, so a restart in the middle
+			// does not report or remove the same member twice.
+			if v.pending != nil {
+				if err := v.pending.MarkReported(context.Background(), token, now); err != nil {
+					v.deps.Logger.Error("could not record a report in the data layer",
+						"token", token, "error", err)
+				}
+			}
+			copied := *entry
+			due = append(due, &copied)
+			continue
+		}
 		if entry.settings.OnDeadline == OnDeadlineRemute {
 			// The same moment a removal would happen, but the member is held
 			// again instead: the deadline is pushed forward and the mute is
@@ -699,6 +853,11 @@ func (v *verifier) takeDueDeadlines(now time.Time) (due, renew []*pending) {
 // It is what makes "no timeout" work: a member who never verifies stays silent
 // until they do, without ever being removed. Their token is left alone, so the
 // button they already have keeps working.
+//
+// The sweep only renews a real mute, because that is the only hold that runs out.
+// A pseudo-mute reaching here -- which is the debug command asking for the
+// deadline by hand -- moves the deadline and nothing else: there is no expiry to
+// push forward, and the hold goes on either way.
 func (v *verifier) renew(ctx context.Context, entry *pending) {
 	log := v.deps.Logger.With("group", entry.groupOpenID, "member", entry.memberOpenID)
 	now := time.Now()
@@ -710,10 +869,13 @@ func (v *verifier) renew(ctx context.Context, entry *pending) {
 	// is a whole deadline_hours away, so the member is checked again then, and
 	// the mute outlives that deadline by construction.
 	deadline := now.Add(time.Duration(entry.settings.DeadlineHours) * time.Hour)
-	heldUntil := now.Add(time.Duration(entry.settings.MuteMinutes) * time.Minute)
+	var heldUntil time.Time
+	if !entry.settings.pseudoHolds() {
+		heldUntil = now.Add(time.Duration(entry.settings.MuteMinutes) * time.Minute)
+	}
 
 	if err := v.mute(ctx, entry.groupOpenID, entry.memberOpenID, heldUntil,
-		entry.settings.DryRun); err != nil {
+		entry.settings); err != nil {
 		// The record is kept even so, because it is also the button's record and
 		// dropping it would leave the member unable to verify at all. Only the
 		// deadline moves, so the next attempt is a short while away rather than
@@ -798,7 +960,30 @@ func (v *verifier) handleDeadline(entry *pending) {
 	if entry.settings.OnDeadline != OnDeadlineRemove || entry.settings.DryRun {
 		return
 	}
-	v.remove(ctx, entry, log)
+	removed := v.remove(ctx, entry, log)
+	if !entry.settings.pseudoHolds() {
+		// A real hold ends at the removal in the group's name either way: the
+		// mute runs out by itself whether or not the removal worked, and that is
+		// what releases the record.
+		return
+	}
+	if !removed {
+		// Nothing was taken out of the group. A mute would have run out of its
+		// own accord by now and released them; a pseudo-mute has no such ending,
+		// so the hold goes on and the member keeps being taken back -- which is
+		// the safer of the two halves, since the group's rule for them was to
+		// leave. Nobody is told again: the deadline has been acted on.
+		log.Warn("the member could not be removed, so they stay held back until "+
+			"they verify or an administrator lets them through",
+			"deadline_hours", entry.settings.DeadlineHours)
+		return
+	}
+	// The pseudo-mute ends here rather than at an expiry of its own: the member
+	// this record was holding is out of the group, and a record that outlived
+	// them would go on taking back messages from somebody who is no longer there
+	// to send them.
+	v.forget(entry.token)
+	log.Info("the pseudo-mute ended with the removal: the member is out of the group")
 }
 
 // report posts the notice that names the administrators and the member.
@@ -812,13 +997,16 @@ func (v *verifier) report(ctx context.Context, entry *pending) error {
 	return err
 }
 
-// remove takes one member out of the group.
-func (v *verifier) remove(ctx context.Context, entry *pending, log *slog.Logger) {
+// remove takes one member out of the group, and reports whether they are gone.
+//
+// The answer matters to the pseudo-mute and to nobody else: a hold that never
+// expires has to end somewhere, and being out of the group is the one ending
+// this can act on.
+func (v *verifier) remove(ctx context.Context, entry *pending, log *slog.Logger) bool {
 	if entry.settings.RemoveBackend == BackendOfficial {
-		v.removeWithOfficial(ctx, entry, log)
-		return
+		return v.removeWithOfficial(ctx, entry, log)
 	}
-	v.removeWithOneBot(ctx, entry, log)
+	return v.removeWithOneBot(ctx, entry, log)
 }
 
 // removeWithOneBot hands the removal to OneBot.
@@ -829,24 +1017,24 @@ func (v *verifier) remove(ctx context.Context, entry *pending, log *slog.Logger)
 // back. The message is accepted only when it came from the bot's own account,
 // because anyone in the group could otherwise copy its marker and mention
 // whoever they liked.
-func (v *verifier) removeWithOneBot(ctx context.Context, entry *pending, log *slog.Logger) {
+func (v *verifier) removeWithOneBot(ctx context.Context, entry *pending, log *slog.Logger) bool {
 	if v.deps.OneBot == nil {
 		log.Error("cannot remove the member: on_deadline asks for a removal but no " +
 			"onebot url is configured, so the member was only reported")
-		return
+		return false
 	}
 	groupQQID, known := v.deps.GroupQQID(entry.groupOpenID)
 	if !known || groupQQID == 0 {
 		log.Error("cannot remove the member: this group has no qq_group_id configured, "+
 			"and onebot acts on QQ group numbers rather than openids",
 			"group", entry.groupOpenID)
-		return
+		return false
 	}
 	if v.deps.BotQQ == 0 {
 		log.Error("cannot remove the member: bot.qq is not configured, so a message " +
 			"read back through onebot could not be proven to be the bot's own, " +
 			"and a forged copy would remove the wrong person")
-		return
+		return false
 	}
 
 	// The notice has to be sent by the official bot, because the platform
@@ -859,7 +1047,7 @@ func (v *verifier) removeWithOneBot(ctx context.Context, entry *pending, log *sl
 	}); err != nil {
 		log.Error("could not post the notice that resolves the member, so nobody "+
 			"was removed", "error", err)
-		return
+		return false
 	}
 
 	qq, err := v.deps.OneBot.WaitForMentionedQQ(ctx, onebot.ResolveRequest{
@@ -870,15 +1058,16 @@ func (v *verifier) removeWithOneBot(ctx context.Context, entry *pending, log *sl
 	if err != nil {
 		log.Error("could not resolve the member into a QQ number, so nobody was removed",
 			"error", err)
-		return
+		return false
 	}
 	log = log.With("qq_user_id", qq)
 
 	if err := v.deps.OneBot.KickGroupMember(ctx, groupQQID, qq, false); err != nil {
 		log.Error("onebot could not remove the member", "error", err)
-		return
+		return false
 	}
 	log.Warn("removed a member who missed the deadline")
+	return true
 }
 
 // targetNotice is the message whose mention resolves a member into a QQ number.
@@ -891,29 +1080,35 @@ func targetNotice(entry *pending) string {
 }
 
 // removeWithOfficial asks the official API to remove the member.
-func (v *verifier) removeWithOfficial(ctx context.Context, entry *pending, log *slog.Logger) {
+func (v *verifier) removeWithOfficial(ctx context.Context, entry *pending, log *slog.Logger) bool {
 	result, err := v.deps.Client.BatchRemoveGroupMembers(ctx, entry.groupOpenID,
 		&qqbotsdk.BatchRemoveMembersRequest{MemberOpenIDs: []string{entry.memberOpenID}})
 	switch {
 	case err == nil:
 		log.Warn("removed a member who missed the deadline", "result", result.Result)
+		return true
 	case qqbotsdk.IsOpenAPIError(err, qqbotsdk.ErrGroupNoAPIPermission):
 		log.Error("cannot remove the member: this application has no permission to "+
 			"remove group members, which is exactly why the onebot backend exists; "+
-			"the member stays muted until the hold expires", "error", err)
+			"the member stays held until they verify", "error", err)
+		return false
 	default:
 		log.Error("could not remove a member who missed the deadline", "error", err)
+		return false
 	}
 }
 
-// onHeldMemberMessage recalls what a member manages to say before their hold
-// takes effect.
+// onHeldMemberMessage takes back what a member who is still verifying says.
 //
-// The hold is applied through an API call, and the platform's mute is not
-// instant even once that call succeeds, so a member who joins and types quickly
-// gets a message out. Recalling it closes that window: as far as the group is
-// concerned they stayed silent, instead of having said something that the
-// verification then asks them to be judged on.
+// Under the pseudo-mute this is the hold itself: nothing was applied to the
+// member, so every message they get out is one the group would have read, and
+// taking it back is all there is between them and the group.
+//
+// Under a real mute it closes the gap before the mute lands instead. The hold is
+// applied through an API call, and the platform's mute is not instant even once
+// that call succeeds, so a member who joins and types quickly gets a message out
+// -- and as far as the group is concerned they then stayed silent, rather than
+// having said something that the verification asks them to be judged on.
 //
 // Only members who are being held are touched, so this is not a general
 // moderation tool, and the bot's own notices are never affected.
@@ -929,22 +1124,49 @@ func (v *verifier) onHeldMemberMessage(ctx context.Context, event *qqbotsdk.Even
 	if !v.deps.InGroup(data.GroupOpenID) {
 		return nil
 	}
-	if _, held := v.findByMember(data.GroupOpenID, data.Author.MemberOpenID); !held {
+	entry, held := v.findByMember(data.GroupOpenID, data.Author.MemberOpenID)
+	if !held {
+		return nil
+	}
+	if entry.settings.pseudoHolds() && entry.settings.DryRun {
+		// The take-back is the whole of what a pseudo-mute does to a member, so
+		// a dry run must not do it: taking a message back is exactly as visible
+		// in the group as silencing somebody. What the dry run leaves behind is
+		// the record of a member who is waiting to verify.
+		//
+		// A real mute keeps what it did before, where this only closes the gap
+		// before a mute that the dry run is not applying either.
 		return nil
 	}
 
 	if err := v.deps.Client.RecallGroupMessage(ctx, data.GroupOpenID, data.ID); err != nil {
 		// Recalling somebody else's message needs the bot to be a group
-		// administrator, so this warns rather than fails: the hold either
-		// applied in time or it did not, and the operator is the one who can
-		// grant that permission.
+		// administrator, so this warns rather than fails: under a real mute the
+		// hold either applied in time or it did not, and under the pseudo-mute
+		// the recall is the hold, so a group where this keeps failing is a group
+		// where the verification does nothing. Either way the operator is the
+		// one who can grant that permission.
 		v.deps.Logger.Warn("could not recall a message from a member who is still verifying",
-			"group", data.GroupOpenID, "member", data.Author.MemberOpenID, "error", err)
+			"group", data.GroupOpenID, "member", data.Author.MemberOpenID,
+			"mute_mode", entry.settings.MuteMode, "error", err)
 		return nil
 	}
 	v.deps.Logger.Info("recalled a message from a member who is still verifying",
-		"group", data.GroupOpenID, "member", data.Author.MemberOpenID)
+		"group", data.GroupOpenID, "member", data.Author.MemberOpenID,
+		"mute_mode", entry.settings.MuteMode)
 	return nil
+}
+
+// IsPseudoMuted implements feature.Verifier: it reports whether this member is
+// held back by a take-back rather than by a mute, which is what decides both
+// whether their message may be written down and whether anything of theirs is
+// answered at all.
+func (v *verifier) IsPseudoMuted(groupOpenID, memberOpenID string) bool {
+	entry, held := v.findByMember(groupOpenID, memberOpenID)
+	// A dry run takes nothing back, so it must not hide anything either: the
+	// message stays in the group, and a record of it is what lets the rest of the
+	// bot see what the group saw.
+	return held && entry.settings.pseudoHolds() && !entry.settings.DryRun
 }
 
 // IsPending implements feature.Verifier.
@@ -1025,7 +1247,14 @@ func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, 
 	// under, and no handler has to work out which group it is dealing with.
 	settings := v.cfg.settingsFor(groupOpenID)
 	now := time.Now()
-	heldUntil := now.Add(time.Duration(settings.MuteMinutes) * time.Minute)
+	// The pseudo-mute has no expiry of its own: it ends when the member verifies
+	// or when the deadline's action takes them out of the group, and not before.
+	// A zero moment is how "no expiry" is written down, in memory and in the data
+	// layer, because the column that holds it in the second is an integer.
+	var heldUntil time.Time
+	if !settings.pseudoHolds() {
+		heldUntil = now.Add(time.Duration(settings.MuteMinutes) * time.Minute)
+	}
 	deadline := now.Add(time.Duration(settings.DeadlineHours) * time.Hour)
 
 	token, err := v.hold(ctx, groupOpenID, memberOpenID, joinedAt, deadline, heldUntil, settings)
@@ -1034,21 +1263,27 @@ func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, 
 	}
 	log := v.deps.Logger.With("group", groupOpenID, "member", memberOpenID)
 
-	// The entry is recorded before the member is silenced, so a press that
-	// arrives immediately can still be answered.
-	if err := v.mute(ctx, groupOpenID, memberOpenID, heldUntil, settings.DryRun); err != nil {
+	// The entry is recorded before anything is applied to the member, so a press
+	// that arrives immediately can still be answered.
+	if err := v.mute(ctx, groupOpenID, memberOpenID, heldUntil, settings); err != nil {
 		v.forget(token)
 		return fmt.Errorf("holding the new member: %w", err)
 	}
-	log.Info("held a new member back for verification",
-		"held_until", heldUntil.Format(time.RFC3339),
-		"deadline", deadline.Format(time.RFC3339))
+	if settings.pseudoHolds() {
+		log.Info("a new member is being held without a mute: their messages are "+
+			"taken back until they verify",
+			"deadline", deadline.Format(time.RFC3339))
+	} else {
+		log.Info("held a new member back for verification",
+			"held_until", heldUntil.Format(time.RFC3339),
+			"deadline", deadline.Format(time.RFC3339))
+	}
 
 	if err := v.ask(ctx, groupOpenID, memberOpenID, token, settings); err != nil {
-		// Leaving someone muted with no way to verify would lock them out,
+		// Leaving someone held with no way to verify would lock them out,
 		// so the hold is lifted again when the prompt cannot be delivered.
 		v.forget(token)
-		if undoErr := v.unmute(ctx, groupOpenID, memberOpenID, settings.DryRun); undoErr != nil {
+		if undoErr := v.unmute(ctx, groupOpenID, memberOpenID, settings); undoErr != nil {
 			log.Error("could not lift the hold after the prompt failed", "error", undoErr)
 		} else {
 			log.Warn("lifted the hold because the prompt could not be sent")
@@ -1084,7 +1319,7 @@ func (v *verifier) onInteractionPress(ctx context.Context, press command.Press) 
 		return v.foreignPress(ctx, data, press.EventID, entry)
 	}
 
-	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings.DryRun); err != nil {
+	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings); err != nil {
 		// The member stays held, so the button must stay usable: answer with
 		// a failure rather than a success.
 		log.Error("could not lift the hold", "error", err)
@@ -1118,7 +1353,7 @@ func (v *verifier) foreignPress(ctx context.Context,
 		return v.answer(data.ID, qqbotsdk.InteractionCodeNoPermission)
 	}
 
-	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings.DryRun); err != nil {
+	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings); err != nil {
 		// The member stays held, so the answer must not claim success.
 		log.Error("an administrator skipped a verification but the hold could not be lifted",
 			"error", err, "presser", data.GroupMemberOpenID)
@@ -1223,30 +1458,50 @@ func (v *verifier) sendMarkdown(ctx context.Context, groupOpenID, content, event
 }
 
 // mute holds one member until the given time.
-func (v *verifier) mute(ctx context.Context, groupOpenID, memberOpenID string, until time.Time, dryRun bool) error {
-	if dryRun {
+//
+// It does nothing at all under the pseudo-mute: there nothing is applied to the
+// member, and their hold is the message handler taking back what they say.
+func (v *verifier) mute(ctx context.Context, groupOpenID, memberOpenID string, until time.Time, settings Settings) error {
+	if settings.pseudoHolds() || settings.DryRun {
 		return nil
 	}
-	return v.deps.Client.SetGroupMemberMute(ctx, groupOpenID, &qqbotsdk.SetGroupMemberMuteRequest{
+	if err := v.deps.Client.SetGroupMemberMute(ctx, groupOpenID, &qqbotsdk.SetGroupMemberMuteRequest{
 		Members: []qqbotsdk.SetMemberMuteState{{
 			Op:           qqbotsdk.MemberMuteAdd,
 			MemberOpenID: memberOpenID,
 			MuteExpireAt: until.Format(time.RFC3339),
 		}},
-	})
+	}); err != nil {
+		return err
+	}
+	// Written down here rather than by the caller, because a hold is applied from
+	// more than one place: a mute this bot applied is the bot's own wherever it
+	// was applied, and a feature that lifts other people's mutes has to be able to
+	// see that this one is not one of them.
+	v.deps.Mutes.Record(groupOpenID, memberOpenID, until)
+	return nil
 }
 
 // unmute lets one member speak again.
-func (v *verifier) unmute(ctx context.Context, groupOpenID, memberOpenID string, dryRun bool) error {
-	if dryRun {
+//
+// Under the pseudo-mute there is nothing to lift, and nothing is asked of the
+// platform: the member was never silenced by it. A mute somebody else applied
+// meanwhile is deliberately left standing here, the same way it is under a real
+// hold that this bot did not apply.
+func (v *verifier) unmute(ctx context.Context, groupOpenID, memberOpenID string, settings Settings) error {
+	if settings.pseudoHolds() || settings.DryRun {
 		return nil
 	}
-	return v.deps.Client.SetGroupMemberMute(ctx, groupOpenID, &qqbotsdk.SetGroupMemberMuteRequest{
+	if err := v.deps.Client.SetGroupMemberMute(ctx, groupOpenID, &qqbotsdk.SetGroupMemberMuteRequest{
 		Members: []qqbotsdk.SetMemberMuteState{{
 			Op:           qqbotsdk.MemberMuteDelete,
 			MemberOpenID: memberOpenID,
 		}},
-	})
+	}); err != nil {
+		return err
+	}
+	v.deps.Mutes.Forget(groupOpenID, memberOpenID)
+	return nil
 }
 
 // newMemberMention renders the at-mention of the member who just joined.
@@ -1287,10 +1542,11 @@ func (v *verifier) hold(ctx context.Context, groupOpenID, memberOpenID string, j
 		settings:     settings,
 	}
 
-	// Written before the member is silenced, and a failure stops the hold: a mute
-	// the data layer never recorded is the one outcome that leaves somebody muted
-	// with nobody able to find out why. The caller already treats an error here as
-	// "do not mute".
+	// Written before anything is applied to the member, and a failure stops the
+	// hold: a mute the data layer never recorded is the one outcome that leaves
+	// somebody muted with nobody able to find out why, and a pseudo-mute the data
+	// layer never recorded is one that does not happen at all. The caller already
+	// treats an error here as "do not hold them".
 	if v.pending != nil {
 		encoded, err := encodeSettings(settings)
 		if err != nil {
@@ -1302,8 +1558,12 @@ func (v *verifier) hold(ctx context.Context, groupOpenID, memberOpenID string, j
 			MemberOpenID: memberOpenID,
 			JoinedAt:     joinedAt,
 			Deadline:     deadline.Unix(),
-			HeldUntil:    heldUntil.Unix(),
-			Settings:     encoded,
+			// Nothing when the hold has no expiry of its own, which is the
+			// pseudo-mute: the data layer reads a zero as "this one does not run
+			// out", and the zero moment stored as its own year would instead
+			// read as a hold that ended before the epoch.
+			HeldUntil: heldUntilStamp(heldUntil),
+			Settings:  encoded,
 		}); err != nil {
 			return "", fmt.Errorf("recording the hold: %w", err)
 		}
