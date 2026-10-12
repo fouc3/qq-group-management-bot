@@ -49,6 +49,12 @@ const (
 	// DefaultDeadlineHours is how long a member has to verify before the
 	// administrators are told about them.
 	DefaultDeadlineHours = 48
+	// DefaultPseudoMuteNotice is what a member is told when a pseudo-mute is turned into
+	// a real one, and it names the phone on purpose: a muted member's desktop client
+	// refuses to run the verification -- it says they are muted and offers nothing --
+	// so the phone app is the one way out that is left to them.
+	DefaultPseudoMuteNotice = "由于处于禁言状态，电脑端无法进行验证（存在 Bug，会提示禁言中），" +
+		"请在手机端进行验证"
 
 	DefaultPrompt = "{at}\n**欢迎新成员！**\n请点击下方按钮完成验证。"
 	// DefaultNotifyMessage mentions the configured administrators and the
@@ -192,6 +198,20 @@ type Config struct {
 	// DryRun sends the prompt and answers the button but never mutes, unmutes
 	// or removes, for trying the flow on a live group without silencing anyone.
 	DryRun bool `yaml:"dry_run"`
+	// PseudoMuteAfter is how many messages a member may send while held under the
+	// pseudo-mute before that hold is turned into a real one. Zero -- which is what a
+	// section that leaves it out gets -- turns this off, and the hold goes on being the
+	// bot taking their messages back until they verify or the deadline acts.
+	//
+	// It exists because the pseudo-mute is soft by construction: nothing stops the member
+	// talking, the bot only takes it back. One who ignores the prompt is one the group has
+	// to silence for real.
+	PseudoMuteAfter int `yaml:"pseudo_mute_after"`
+	// PseudoMuteNotice is the prompt sent when a pseudo-mute is turned into a real one,
+	// in place of the usual one. The button is the same button; what changes is that the
+	// member now has to verify from the phone app, because a muted member's desktop client
+	// refuses to run the verification at all. {at} is the member's mention.
+	PseudoMuteNotice string `yaml:"pseudo_mute_notice"`
 	// Groups overrides the fields above for named groups, keyed by group
 	// openid.
 	//
@@ -221,6 +241,8 @@ type Override struct {
 	PassMessage      *string   `yaml:"pass_message"`
 	SkipMessage      *string   `yaml:"skip_message"`
 	DryRun           *bool     `yaml:"dry_run"`
+	PseudoMuteAfter  *int      `yaml:"pseudo_mute_after"`
+	PseudoMuteNotice *string   `yaml:"pseudo_mute_notice"`
 }
 
 // Settings is one group's settings, after the defaults and that group's
@@ -240,6 +262,8 @@ type Settings struct {
 	PassMessage      string
 	SkipMessage      string
 	DryRun           bool
+	PseudoMuteAfter  int
+	PseudoMuteNotice string
 }
 
 // defaults returns the settings every group starts from.
@@ -259,6 +283,8 @@ func (c *Config) defaults() Settings {
 		PassMessage:      c.PassMessage,
 		SkipMessage:      c.SkipMessage,
 		DryRun:           c.DryRun,
+		PseudoMuteAfter:  c.PseudoMuteAfter,
+		PseudoMuteNotice: c.PseudoMuteNotice,
 	}
 }
 
@@ -310,6 +336,12 @@ func (c *Config) settingsFor(groupOpenID string) Settings {
 	}
 	if override.DryRun != nil {
 		settings.DryRun = *override.DryRun
+	}
+	if override.PseudoMuteAfter != nil {
+		settings.PseudoMuteAfter = *override.PseudoMuteAfter
+	}
+	if override.PseudoMuteNotice != nil {
+		settings.PseudoMuteNotice = *override.PseudoMuteNotice
 	}
 	return settings
 }
@@ -388,6 +420,15 @@ func (c *Config) applyDefaults() error {
 	}
 	if c.DeadlineHours == 0 {
 		c.DeadlineHours = DefaultDeadlineHours
+	}
+	// A negative count is refused rather than read as "off": the two mean different
+	// things, and the one that would be silently chosen is the one that never escalates.
+	if c.PseudoMuteAfter < 0 {
+		return fmt.Errorf("pseudo_mute_after 不能为负（它是发满多少条消息才转真禁言），" +
+			"要给一个数就用 1 或更大；用 0 表示关闭")
+	}
+	if strings.TrimSpace(c.PseudoMuteNotice) == "" {
+		c.PseudoMuteNotice = DefaultPseudoMuteNotice
 	}
 	if strings.TrimSpace(c.OnDeadline) == "" {
 		c.OnDeadline = OnDeadlineNotify
@@ -535,6 +576,10 @@ type pending struct {
 	// reported records that the deadline has already been acted on, so the
 	// administrators are told once rather than every sweep.
 	reported bool
+	// escalatedAt is when this hold was turned into a real mute, as Unix seconds, or zero
+	// when it never was. It is kept because the store keeps it: a restart that forgot it
+	// would leave the member held the soft way again.
+	escalatedAt int64
 	// settings are the group's settings at the moment the member was held.
 	//
 	// They travel with the entry so that the deadline and the button press act
@@ -554,6 +599,11 @@ type verifier struct {
 	// byMember supersedes an older entry for the same member, so a member who
 	// leaves and rejoins does not accumulate buttons.
 	byMember map[string]*pending
+
+	// pseudo counts what a held member sends under the pseudo-mute, and when they were
+	// last told why their message went away. Keyed on the hold's token, so a fresh hold
+	// starts counting from the beginning.
+	pseudo pseudoMessages
 
 	// admins is shared by the app, so an administrator pressing somebody
 	// else's button can be told apart from a stranger pressing it.
@@ -1150,6 +1200,17 @@ func (v *verifier) onHeldMemberMessage(ctx context.Context, event *qqbotsdk.Even
 	v.deps.Logger.Info("recalled a message from a member who is still verifying",
 		"group", data.GroupOpenID, "member", data.Author.MemberOpenID,
 		"mute_mode", entry.settings.MuteMode)
+
+	if !entry.settings.pseudoHolds() {
+		// A real mute is the platform's doing and the member cannot speak at all: there is
+		// nothing to explain, and this path is only the gap before the mute lands.
+		return nil
+	}
+	// Under the pseudo-mute the recall *is* the hold, and a message that simply vanishes
+	// reads as the bot being broken. The member is the only one who can end this, so they
+	// are told why -- and once they have been told as often as the group allows, they are
+	// silenced for real.
+	v.answerPseudoHold(ctx, data.ID, entry)
 	return nil
 }
 
@@ -1183,7 +1244,8 @@ func (v *verifier) Resend(ctx context.Context, groupOpenID, memberOpenID string)
 	if !found {
 		return errors.New("该成员不在验证中，无法重新发送验证通知")
 	}
-	return v.ask(ctx, groupOpenID, memberOpenID, entry.token, entry.settings)
+	return v.ask(ctx, groupOpenID, memberOpenID, entry.token, entry.settings,
+		entry.settings.Prompt, "")
 }
 
 // Reverify implements feature.Verifier: it holds the member again and sends a
@@ -1275,7 +1337,8 @@ func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, 
 			"deadline", deadline.Format(time.RFC3339))
 	}
 
-	if err := v.ask(ctx, groupOpenID, memberOpenID, token, settings); err != nil {
+	if err := v.ask(ctx, groupOpenID, memberOpenID, token, settings,
+		settings.Prompt, ""); err != nil {
 		// Leaving someone held with no way to verify would lock them out,
 		// so the hold is lifted again when the prompt cannot be delivered.
 		v.forget(token)
@@ -1411,13 +1474,20 @@ func (v *verifier) greet(ctx context.Context, eventID string, entry *pending) {
 	v.notify(eventID, entry.groupOpenID, entry.settings.PassMessage)
 }
 
-// ask sends the prompt with the verification button.
+// ask sends one prompt with the verification button: the text is the caller's.
 //
-// GROUP_MEMBER_ADD is not one of the events the send API accepts as event_id,
-// and there is no message to reply to, so the prompt is a proactive message and
-// counts against the active message quota.
-func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token string, settings Settings) error {
-	prompt := renderTemplate(settings.Prompt, map[string]string{
+// It is a parameter rather than always the configured prompt because the same card is what
+// a member is sent when a pseudo-mute is turned into a real mute, with the words that say
+// to use the phone. One sender, two texts -- and the same button, because the way out of
+// the hold is the same either way.
+//
+// eventID is empty for a proactive message. GROUP_MEMBER_ADD is not one of the events the
+// send API accepts as event_id and there is no message to reply to, so the prompt that
+// welcomes a new member costs the active message quota; the one sent to somebody whose
+// message was just taken back is a reply to that message, and does not.
+func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token string,
+	settings Settings, prompt, eventID string) error {
+	prompt = renderTemplate(prompt, map[string]string{
 		"{at}": mentionTag(memberOpenID, settings),
 	})
 	keyboard := &qqbotsdk.Keyboard{Content: &qqbotsdk.KeyboardContent{Rows: []qqbotsdk.Row{{
@@ -1440,6 +1510,7 @@ func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token str
 		MsgType:  qqbotsdk.MsgTypeMarkdown,
 		Markdown: &qqbotsdk.MessageMarkdown{Content: prompt},
 		Keyboard: keyboard,
+		EventID:  eventID,
 	})
 	return err
 }
@@ -1600,6 +1671,7 @@ func (v *verifier) forget(token string) {
 
 // forgetLocked drops an entry by token while the lock is already held.
 func (v *verifier) forgetLocked(token string) {
+	v.pseudo.forget(token)
 	entry, ok := v.byToken[token]
 	if !ok {
 		return

@@ -186,6 +186,7 @@ func (v *verifier) restore(ctx context.Context, now time.Time) {
 			deadline:     time.Unix(entry.Deadline, 0),
 			heldUntil:    heldUntilMoment(entry.HeldUntil),
 			reported:     entry.Reported,
+			escalatedAt:  entry.EscalatedAt,
 			settings:     settings,
 		}
 		v.byToken[held.token] = held
