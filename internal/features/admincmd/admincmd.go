@@ -39,9 +39,17 @@ const Name = "admin_commands"
 // DefaultPrefix is the command prefix when the section leaves it out.
 const DefaultPrefix = "/"
 
-// DefaultMaxMute is the longest mute a command may ask for: the platform's
-// ceiling is thirty days, so this stays just inside it.
+// DefaultMaxMute is what a group's cap comes to when the file names none: the
+// platform's ceiling is thirty days, so this stays just inside it.
 const DefaultMaxMute = 29 * 24 * time.Hour
+
+// PlatformMaxMute is the longest mute the platform takes at all, whatever a group
+// asks for.
+//
+// A group may be configured for less than this, never for more: a command that sent a
+// longer one would be refused by the platform, so the member would get an error instead
+// of a mute, and nothing at startup would have said the number was too big.
+const PlatformMaxMute = 30 * 24 * time.Hour
 
 // blacklistListLimit caps how much of the list one command prints. A list long
 // enough to be worth searching is a list long enough not to be pasted whole into
@@ -101,6 +109,12 @@ func (g GroupConfig) longestMute() (time.Duration, error) {
 	limit, err := parseDuration(g.MaxMute)
 	if err != nil {
 		return 0, fmt.Errorf("max_mute %q: %w", g.MaxMute, err)
+	}
+	if limit > PlatformMaxMute {
+		return 0, fmt.Errorf("max_mute 是 %s，超过平台接受的上限 %s：本群的上限必须"+
+			"在这个以内，否则 /禁言 会把平台拒绝的时长发出去，成员拿到的是错误而不是"+
+			"禁言，而启动时不会有人告诉你这个数字太大了",
+			humanDuration(limit), humanDuration(PlatformMaxMute))
 	}
 	return limit, nil
 }

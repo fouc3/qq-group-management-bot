@@ -1137,6 +1137,13 @@ groups:
     admins: ["ADMIN-OPENID"]
     max_mute: "forever"
 `,
+		"a cap longer than the platform takes": `
+enabled: true
+groups:
+  GROUP-OPENID:
+    admins: ["ADMIN-OPENID"]
+    max_mute: "100d"
+`,
 		"a group with no openid": `
 enabled: true
 groups:

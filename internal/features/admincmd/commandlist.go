@@ -97,7 +97,7 @@ func (h *handler) commandDefs() []command.Def {
 			Aliases: []string{"mute"},
 			Usage: "{prefix}禁言 <时长> [@目标]，顺序随意（30s / 10m / 2h / 1d，或 30秒 / 10分 / 2小时 / 1天）" +
 				"\n（@ 取不到目标时，可改为回复引用目标的消息）",
-			Desc:     "禁言成员，最长 29 天",
+			Desc:     "禁言成员，上限按本群设置",
 			Audience: command.Admins,
 			Panels:   groupPanel(),
 			Run:      h.muteCommand,
