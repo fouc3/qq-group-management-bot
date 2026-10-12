@@ -11,9 +11,12 @@
 // Telling the bot's own work apart from everybody else's is the whole of the
 // difficulty, and it is answered from two records rather than one:
 //
-//   - the mutes written down as they are applied, in internal/mutelog. That is how
-//     an administrator's /禁言 and a judgement's punishment are recognised: both
-//     are asked for by name, and neither should be undone by this feature.
+//   - the mutes written down as they are applied, in internal/mutelog. The join
+//     verification writes there, and only under a real mute: a hold is the one mute
+//     nobody may walk out of. What this bot applies by command or as a punishment is
+//     deliberately not written there, so it is liftable like anybody else's -- that is
+//     the group's own decision about one of its members, not something to be protected
+//     from this feature.
 //   - the members the verification feature is holding, asked of that feature rather
 //     than read out of its table. A hold is a real mute on a real person, and a
 //     member who is verifying must never be let out by this one, or the verification

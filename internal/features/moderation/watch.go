@@ -434,11 +434,11 @@ func (h *handler) finishWatched(ctx context.Context, report feature.ModerationVe
 		"receipt", report.JudgementID, "action", outcome.Action)
 }
 
-// muteWatched silences one member, recording the mute as this bot's own.
+// muteWatched silences one member, for a punishment this feature decided.
 //
-// The record matters as much here as anywhere: the feature that lifts the mutes
-// other people apply has to be able to tell this one apart from a group
-// administrator's.
+// It deliberately does not write the mute down in mutelog. That record is for the holds
+// the verification applies, which muteguard must never lift; a mute applied here as a
+// punishment is not one of those, and writing it down would say that it is.
 func (h *handler) muteWatched(ctx context.Context, groupOpenID, memberOpenID string,
 	duration time.Duration) error {
 	until := time.Now().Add(duration)
@@ -452,7 +452,6 @@ func (h *handler) muteWatched(ctx context.Context, groupOpenID, memberOpenID str
 		}); err != nil {
 		return err
 	}
-	h.deps.Mutes.Record(groupOpenID, memberOpenID, until)
 	return nil
 }
 

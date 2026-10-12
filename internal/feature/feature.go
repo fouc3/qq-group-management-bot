@@ -74,16 +74,18 @@ type Deps struct {
 	// it. A feature built without one -- which is what a test builds -- gets one of its
 	// own, the same way it does for buttons.
 	Events *command.Events
-	// Mutes is where a feature writes down the mutes it applied, and where the
-	// feature that lifts somebody else's mute reads them.
+	// Mutes is where a feature writes down a mute that the feature lifting other
+	// people's mutes must leave alone, and where that feature reads them.
 	//
-	// Shared for the same reason Buttons is: several features mute people, and
-	// the platform says nothing about who applied a mute. A record that knew
-	// about only one of them would undo the others' work -- an administrator's
-	// command, or the hold a member is verifying under in the mute mode.
+	// One feature writes here: the join verification, and only under a real mute. Its
+	// holds are the one mute nobody may walk out of -- being freed by waiting is exactly
+	// what a hold is for -- and this record is how a feature that lifts everything left
+	// over is told to leave them standing.
 	//
-	// A verification held under the pseudo-mute writes nothing here: it mutes
-	// nobody, so it has no mute of its own for this record to tell apart.
+	// Nothing else writes here, deliberately. A verification held under the pseudo-mute
+	// mutes nobody, so it has no mute for this record to tell apart; and a mute this bot
+	// applies by command or as a punishment is this group's own decision about one of its
+	// members, which muteguard lifting is muteguard doing what it was asked.
 	Mutes *mutelog.Log
 }
 

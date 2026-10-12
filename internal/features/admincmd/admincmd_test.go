@@ -19,6 +19,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/mutelog"
 )
 
 const (
@@ -257,6 +258,7 @@ func newHarnessWith(t *testing.T, section string, registering bool) *harness {
 		Client: client,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Groups: config.Groups{{OpenID: testGroupOpenID}},
+		Mutes:  mutelog.New(),
 	})
 	if err != nil {
 		t.Fatalf("building the feature: %v", err)

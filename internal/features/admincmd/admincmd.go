@@ -1051,9 +1051,8 @@ func (h *handler) unmute(ctx context.Context, data *qqbotsdk.GroupMessageCreateD
 		h.reply(ctx, data, "解除禁言失败："+err.Error())
 		return nil
 	}
-	// The bot's own record goes with it: this mute is over, so a feature that
-	// lifts other people's mutes must not read it as one of the bot's own any more.
-	h.deps.Mutes.Forget(data.GroupOpenID, target)
+	// Nothing to forget in mutelog: this command does not write one down (see
+	// muteCommand), and a member who is verifying was refused above.
 	h.deps.Logger.Info("an administrator lifted a mute",
 		"group", data.GroupOpenID, "member", target)
 	h.reply(ctx, data, atTag(target)+" 的禁言已解除。")
@@ -1256,9 +1255,10 @@ func (h *handler) mute(ctx context.Context, data *qqbotsdk.GroupMessageCreateDat
 		h.reply(ctx, data, "禁言失败："+err.Error())
 		return nil
 	}
-	// This mute is the bot's own, so a feature that lifts other people's mutes
-	// leaves it alone -- an administrator asked for it by name.
-	h.deps.Mutes.Record(data.GroupOpenID, target, until)
+	// Deliberately not written down in mutelog. That record is what tells the feature
+	// that lifts other people's mutes to leave the verification's holds alone, and a
+	// command an administrator typed is not one of those: it is this group's own
+	// decision about one of its members.
 	h.deps.Logger.Info("an administrator muted a member",
 		"group", data.GroupOpenID, "member", target, "until", until.Format(time.RFC3339))
 	h.reply(ctx, data, fmt.Sprintf("已禁言 %s。", humanDuration(wanted)))

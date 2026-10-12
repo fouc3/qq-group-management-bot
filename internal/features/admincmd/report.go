@@ -381,6 +381,11 @@ func (h *handler) recordOutcome(ctx context.Context, judgementID string,
 }
 
 // muteMember silences one member, which is the call the /禁言 command makes too.
+//
+// Like /禁言 itself, it does not write the mute down in mutelog: that record is for the
+// holds the verification applies, which muteguard must never lift. A mute applied here is
+// this group's own decision about one of its members, and muteguard lifting one of those is
+// muteguard doing what the group asked of it.
 func (h *handler) muteMember(ctx context.Context, groupOpenID, memberOpenID string,
 	duration time.Duration) error {
 	until := time.Now().Add(duration)
@@ -394,7 +399,6 @@ func (h *handler) muteMember(ctx context.Context, groupOpenID, memberOpenID stri
 		}); err != nil {
 		return err
 	}
-	h.deps.Mutes.Record(groupOpenID, memberOpenID, until)
 	return nil
 }
 
