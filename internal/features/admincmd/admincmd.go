@@ -1257,22 +1257,14 @@ func (h *handler) mute(ctx context.Context, data *qqbotsdk.GroupMessageCreateDat
 	}
 
 	until := time.Now().Add(wanted)
-	if err := h.deps.Client.SetGroupMemberMute(ctx, data.GroupOpenID,
-		&qqbotsdk.SetGroupMemberMuteRequest{
-			Members: []qqbotsdk.SetMemberMuteState{{
-				Op:           qqbotsdk.MemberMuteAdd,
-				MemberOpenID: target,
-				MuteExpireAt: until.Format(time.RFC3339),
-			}},
-		}); err != nil {
+	// muteMember is the call the judgement paths make too: a member is silenced one way
+	// here, whichever path decided that they should be. What it deliberately does not do
+	// -- write the mute down in mutelog -- is documented on it.
+	if err := h.muteMember(ctx, data.GroupOpenID, target, wanted); err != nil {
 		h.deps.Logger.Error("the command mute failed", "error", err)
 		h.reply(ctx, data, "禁言失败："+err.Error())
 		return nil
 	}
-	// Deliberately not written down in mutelog. That record is what tells the feature
-	// that lifts other people's mutes to leave the verification's holds alone, and a
-	// command an administrator typed is not one of those: it is this group's own
-	// decision about one of its members.
 	h.deps.Logger.Info("an administrator muted a member",
 		"group", data.GroupOpenID, "member", target, "until", until.Format(time.RFC3339))
 	h.reply(ctx, data, fmt.Sprintf("已禁言 %s。", humanDuration(wanted)))
