@@ -65,8 +65,6 @@ const (
 
 // Config is the feature's own section.
 type Config struct {
-	// Enabled is the switch every section may carry.
-	Enabled *bool `yaml:"enabled"`
 	// IntervalSeconds is how often each watched group is looked at.
 	IntervalSeconds *int `yaml:"interval_seconds"`
 	// Members is the list of members to keep talking, for every group that does

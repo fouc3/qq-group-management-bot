@@ -92,8 +92,6 @@ func (emptyBlacklist) Barred(context.Context, Applicant) (bool, error) { return 
 
 // Config is this feature's section in the configuration file.
 type Config struct {
-	// Enabled turns the switch on. A section written without it is on.
-	Enabled bool `yaml:"enabled"`
 	// Action is what to do with a request: ignore, approve or decline.
 	//
 	// The default is ignore on purpose. Admitting or refusing people

@@ -144,8 +144,6 @@ const (
 
 // Config is this feature's section in the configuration file.
 type Config struct {
-	// Enabled turns the switch on. A section written without it is on.
-	Enabled bool `yaml:"enabled"`
 	// StateFile is where the members who are still waiting to verify are
 	// recorded, so a restart does not forget them. It should be an absolute
 	// path; empty turns persistence off, which leaves every hold unaccounted

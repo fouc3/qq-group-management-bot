@@ -50,8 +50,6 @@ const blacklistListLimit = 50
 
 // Config is this feature's section in the configuration file.
 type Config struct {
-	// Enabled turns the switch on. A section written without it is on.
-	Enabled bool `yaml:"enabled"`
 	// Debug enables the /debug subcommands. Every other debug command is
 	// refused while it is off.
 	Debug bool `yaml:"debug"`

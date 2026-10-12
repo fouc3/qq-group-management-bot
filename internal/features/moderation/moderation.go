@@ -63,8 +63,6 @@ const (
 
 // Config is this feature's section.
 type Config struct {
-	// Enabled turns the switch on. A section written without it is on.
-	Enabled bool `yaml:"enabled"`
 	// CacheHours is how long a message stays available to be judged. It is also
 	// the latest an advertisement can be reported and still be read.
 	CacheHours int `yaml:"cache_hours"`

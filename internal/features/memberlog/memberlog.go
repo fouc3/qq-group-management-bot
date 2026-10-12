@@ -36,10 +36,13 @@ const Name = "member_log"
 const groupNameTimeout = 5 * time.Second
 
 // Config is the feature's own section.
-type Config struct {
-	// Enabled is the switch every section may carry.
-	Enabled *bool `yaml:"enabled"`
-}
+//
+// It holds nothing: what switches this feature on is the one key every section may
+// carry, and the app reads that for itself before the feature is built
+// (feature.Enabled). The type stays because a section still has to be a mapping -- one
+// written as something else is refused at startup rather than quietly ignored -- and
+// because a test reads every feature's section through its own type.
+type Config struct{}
 
 // handler implements feature.Feature.
 type handler struct {
