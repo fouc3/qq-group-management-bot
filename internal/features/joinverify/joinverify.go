@@ -1481,12 +1481,19 @@ func (v *verifier) greet(ctx context.Context, eventID string, entry *pending) {
 // to use the phone. One sender, two texts -- and the same button, because the way out of
 // the hold is the same either way.
 //
-// eventID is empty for a proactive message. GROUP_MEMBER_ADD is not one of the events the
-// send API accepts as event_id and there is no message to reply to, so the prompt that
-// welcomes a new member costs the active message quota; the one sent to somebody whose
-// message was just taken back is a reply to that message, and does not.
+// replyTo is the id of the message this card answers, or empty for a proactive message.
+// GROUP_MEMBER_ADD is not one of the events the send API accepts and there is no message to
+// reply to, so the prompt that welcomes a new member costs the active message quota; the one
+// sent to somebody whose message was just taken back is a reply to that message, and does
+// not.
+//
+// It goes in msg_id and not event_id: the platform takes event_id only for an *interaction*
+// -- a button press -- and refuses a message id there outright, with 40034025 请求参数event_id
+// 无效. Addressed the wrong way the card is simply never delivered, which is the one outcome
+// this function exists to avoid: from the member's side their message vanishes and nothing
+// explains it.
 func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token string,
-	settings Settings, prompt, eventID string) error {
+	settings Settings, prompt, replyTo string) error {
 	prompt = renderTemplate(prompt, map[string]string{
 		"{at}": mentionTag(memberOpenID, settings),
 	})
@@ -1506,12 +1513,18 @@ func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token str
 			},
 		}},
 	}}}}
-	_, err := v.deps.Client.SendGroupMessage(ctx, groupOpenID, &qqbotsdk.Message{
+	card := &qqbotsdk.Message{
 		MsgType:  qqbotsdk.MsgTypeMarkdown,
 		Markdown: &qqbotsdk.MessageMarkdown{Content: prompt},
 		Keyboard: keyboard,
-		EventID:  eventID,
-	})
+	}
+	if replyTo != "" {
+		card.MsgID = replyTo
+		// Numbered, because the platform deduplicates an answer to the same message that
+		// is not told apart from the first one.
+		card.MsgSeq = 1
+	}
+	_, err := v.deps.Client.SendGroupMessage(ctx, groupOpenID, card)
 	return err
 }
 

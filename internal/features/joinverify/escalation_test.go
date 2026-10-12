@@ -57,6 +57,43 @@ pseudo_mute_after: 3
 	}
 }
 
+// TestTheCardSentBackToAHeldMemberAnswersTheirMessage covers how a reply is addressed.
+//
+// The platform takes msg_id for "this is my answer to that message" and event_id for "this
+// is my answer to that interaction"; they are mutually exclusive, and a *message* id in
+// event_id is refused outright (40034025 请求参数event_id无效). The member's message has just
+// been taken back, so the card has to be addressed to it -- get this wrong and nothing
+// arrives at all: all the member sees is their own words disappearing, which is exactly the
+// silently-broken-bot reading the reply exists to prevent.
+func TestTheCardSentBackToAHeldMemberAnswersTheirMessage(t *testing.T) {
+	h := newHarness(t, `
+enabled: true
+mute_mode: pseudo
+`)
+	h.join()
+	h.dispatch(qqbotsdk.EventGroupMessageCreate, messageFromTheHeldMember("MSG-REPLY-1"))
+
+	var sent []call
+	for _, one := range h.callsOf("/messages") {
+		if one.method == "POST" && strings.HasSuffix(one.path, "/messages") {
+			sent = append(sent, one)
+		}
+	}
+	// One proactive prompt when the member joined, and one card sent back to the message
+	// that was just taken back.
+	if len(sent) != 2 {
+		t.Fatalf("cards sent = %d, want the join prompt and the one answering the message",
+			len(sent))
+	}
+	card := sent[len(sent)-1]
+	if got := card.body["msg_id"]; got != "MSG-REPLY-1" {
+		t.Errorf("the card's msg_id = %v, want the id of the message it answers", got)
+	}
+	if got, present := card.body["event_id"]; present {
+		t.Errorf("the card carries event_id = %v; a message is answered with msg_id", got)
+	}
+}
+
 // TestAPseudoHoldIsNotEscalatedWithoutACount covers the default: a group that says nothing
 // keeps the soft hold, however much the member talks.
 func TestAPseudoHoldIsNotEscalatedWithoutACount(t *testing.T) {

@@ -65,7 +65,7 @@ func (p *pseudoMessages) forget(token string) {
 // happened, and -- once they have gone on talking as often as the group allows -- the
 // notice that sends them to the phone, because from then on a real mute is in force and a
 // muted member's desktop client will not run the verification at all.
-func (v *verifier) answerPseudoHold(ctx context.Context, eventID string, entry *pending) {
+func (v *verifier) answerPseudoHold(ctx context.Context, messageID string, entry *pending) {
 	log := v.deps.Logger.With("group", entry.groupOpenID, "member", entry.memberOpenID)
 	told, escalate := v.pseudo.counted(entry.token, entry.settings.PseudoMuteAfter,
 		time.Now())
@@ -80,7 +80,7 @@ func (v *verifier) answerPseudoHold(ctx context.Context, eventID string, entry *
 	// back: the member already has this button, and being told to use it is the whole of
 	// what can be done for somebody the hold is not stopping.
 	if err := v.ask(ctx, entry.groupOpenID, entry.memberOpenID, entry.token,
-		entry.settings, entry.settings.Prompt, eventID); err != nil {
+		entry.settings, entry.settings.Prompt, messageID); err != nil {
 		log.Warn("could not tell a member under the pseudo-mute why their message "+
 			"was taken back", "error", err)
 	}
