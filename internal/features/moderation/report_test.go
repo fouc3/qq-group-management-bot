@@ -265,15 +265,16 @@ func TestAGroupCanHaveItsOwnDurations(t *testing.T) {
 	}
 }
 
-// TestAnEmptyAllowEntryIsRefusedAtStartup covers the typo that would otherwise
-// silently accept every message in the group.
+// TestAnEmptyAllowEntryIsRefusedAtStartup covers the typo that would otherwise pass
+// unnoticed: this list is quoted into the judge's instructions, and an entry with no
+// text in it is a line the group did not mean to declare.
 func TestAnEmptyAllowEntryIsRefusedAtStartup(t *testing.T) {
 	cfg := Config{
 		Categories: map[string]Category{"ad": {Label: "广告", Mute: "10m"}},
 		Groups:     map[string]GroupOverride{"G-1": {Allow: []string{" "}}},
 	}
 	if err := cfg.applyDefaults(); err == nil {
-		t.Error("an empty allow entry must be refused: it would match every message")
+		t.Error("an empty allow entry must be refused: it names nothing the group owns")
 	}
 }
 

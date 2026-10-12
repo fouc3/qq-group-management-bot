@@ -286,7 +286,7 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID string,
 	// The one exemption the code makes is about identity: a sender this group has
 	// put beyond judging. There is no sentence somebody can write to become that
 	// account, which is exactly why this one is sound and the content version was
-	// not -- see allowedIn for both attempts at that.
+	// not: how both attempts at one were defeated is written down on the Allow field.
 	if h.config().senderExempt(groupOpenID, subject) {
 		return feature.ModerationVerdict{
 			SubjectOpenID:    subject,

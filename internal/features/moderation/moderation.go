@@ -348,12 +348,23 @@ type GroupOverride struct {
 	Topic string `yaml:"topic"`
 	// Allow is what this group calls its own: its site, its announcement page.
 	//
-	// It is not a veto, and it cannot be one. A rule about text is satisfied by
-	// the text, so an exemption keyed on it is handed to whoever writes the
-	// message: both attempts at one were defeated by the obvious trick, and both
-	// are written down in allowedIn. What the list can do is tell the judge what
-	// this group considers its own, so that the judge can weigh a message which
-	// names it next to something else -- which is a judgement, and belongs there.
+	// It is not a veto, and it cannot be one. A rule about text is satisfied by the
+	// text, so an exemption keyed on it is handed to whoever writes the message.
+	// Two versions of one were written, and the obvious trick defeated both:
+	//
+	//   - matching a word anywhere in the message. The advertisement that carries a
+	//     whitelisted word as a shield -- "deepseek0.01x https://q1.1110103.xyz/
+	//     防屏蔽：api.mcapple.top" -- was never sent to the judge at all;
+	//   - matching domains, and exempting only when every domain in the message is
+	//     allowed. Write the advertisement's own domain so the extractor cannot see
+	//     it, by breaking it up the way spammers already do, and the only domain left
+	//     visible is the allowed one: exempt again.
+	//
+	// The lesson is not that the matching needed to be better. It is that an
+	// exemption keyed on what a message says can always be satisfied by what the
+	// message says. So nothing matches this list in code: it goes into the judge's
+	// instructions as the content this group owns, and whether a message which names
+	// it is legitimate is a judgement, which belongs to the judge.
 	Allow []string `yaml:"allow"`
 	// AllowSenders are the openids whose messages are never judged at all.
 	//
@@ -380,32 +391,6 @@ func (c Config) judgingEnabledFor(groupOpenID string) bool {
 		return *enabled
 	}
 	return true
-}
-
-// allowedIn reports whether a message is one this group has declared legitimate.
-//
-// It always says no, and that is deliberate: the content exemption it used to
-// provide has been removed rather than repaired, because every version of it was
-// unsound for the same reason -- it was a rule about text, applied to text the
-// person being judged writes.
-//
-// Two versions, both defeated by the obvious trick:
-//
-//   - matching a word anywhere in the message. The advertisement that carries a
-//     whitelisted word as a shield -- "deepseek0.01x https://q1.1110103.xyz/
-//     防屏蔽：api.mcapple.top" -- was never sent to the judge at all;
-//   - matching domains, and exempting only when every domain in the message is
-//     allowed. Write the advertisement's own domain so the extractor cannot see
-//     it, by breaking it up the way spammers already do, and the only domain left
-//     visible is the allowed one: exempt again.
-//
-// The lesson is not that the matching needed to be better. It is that an
-// exemption keyed on what a message says can always be satisfied by what the
-// message says. What a group means by "legitimate" is a judgement, and judgements
-// belong to the judge: the group's list now goes into the prompt as context, and
-// the only exemption left in code is about who sent the message.
-func (c *Config) allowedIn(groupOpenID, text string) (string, bool) {
-	return "", false
 }
 
 // senderExempt reports whether a group has put one sender beyond judging.
@@ -605,8 +590,8 @@ func (c *Config) applyDefaults() error {
 		}
 		for _, entry := range group.Allow {
 			if strings.TrimSpace(entry) == "" {
-				return fmt.Errorf("group %s has an empty allow entry, which would "+
-					"match every message", openID)
+				return fmt.Errorf("group %s has an empty allow entry: it would be "+
+					"quoted into the judge's instructions as nothing", openID)
 			}
 		}
 		for _, entry := range group.AllowSenders {
