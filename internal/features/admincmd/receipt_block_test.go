@@ -18,13 +18,13 @@ const reasoningWithParagraphs = "Message 1: an image with a quote from Apache do
 	"No link, no ad.\n\nMessage 2: mentions someone and a report command.\n\n" +
 	"No links. Not advertising anything. Verdict ok."
 
-// fencedBody is what a receipt puts inside the fence that follows a label, or it
-// fails the test when there is no fence there.
+// fenceOf reads a receipt's fenced block: the fence it is wrapped in, and what is
+// inside. It fails the test when there is no block there.
 //
-// The fence may start on the label's own line -- "· 已撤回：`" -- or on the line
+// The fence may start on the label's own line -- "· 已撤回：```" -- or on the line
 // after it, which is the difference between a label that introduces a block and one
 // that is a heading for it. Both are read here, because both are written.
-func fencedBody(t *testing.T, receipt, label string) string {
+func fenceOf(t *testing.T, receipt, label string) (fence, body string) {
 	t.Helper()
 	at := strings.Index(receipt, label)
 	if at < 0 {
@@ -38,18 +38,25 @@ func fencedBody(t *testing.T, receipt, label string) string {
 	if open < 0 || strings.TrimSpace(rest[:open]) != "" {
 		t.Fatalf("%q is not followed by a fence: %q", label, firstLine(rest))
 	}
-	fence, body := rest[open:], ""
-	for len(fence) > 0 && fence[0] == '`' {
-		body, fence = body+fence[:1], fence[1:]
+	run := rest[open:]
+	for len(run) > 0 && run[0] == '`' {
+		fence, run = fence+run[:1], run[1:]
 	}
-	if !strings.HasPrefix(fence, "\n") {
+	if !strings.HasPrefix(run, "\n") {
 		t.Fatalf("%q has a fence that does not end: %q", label, firstLine(rest[open:]))
 	}
-	closing := strings.Index(fence[1:], "\n"+body+"\n")
+	closing := strings.Index(run[1:], "\n"+fence+"\n")
 	if closing < 0 {
 		t.Fatalf("%q has no closing fence:\n%s", label, receipt)
 	}
-	return fence[1 : 1+closing]
+	return fence, run[1 : 1+closing]
+}
+
+// fencedBody is what a receipt puts inside the fence that follows a label.
+func fencedBody(t *testing.T, receipt, label string) string {
+	t.Helper()
+	_, body := fenceOf(t, receipt, label)
+	return body
 }
 
 // firstLine is the start of a piece of text, for a failure message that does not
@@ -105,6 +112,36 @@ func TestEveryOtherGapInTheChainIsInsideTheBlock(t *testing.T) {
 	}
 }
 
+// TestASingleBacktickIsStillAFence covers the model writing its own markdown: a
+// chain of thought that opens and closes with one backtick, which is what the model
+// in production does.
+//
+// The fence has to be at least three backticks whatever the text holds. The length
+// rule alone gave one here -- "longest run in the text" was one, so the wrapper was
+// two, and even one -- and a single backtick is an inline code span, not a block, so
+// the whole chain of thought rendered as loose text.
+func TestASingleBacktickIsStillAFence(t *testing.T) {
+	h := newHarness(t, baseSection)
+	entry := aJudgement("J-9")
+	entry.Reasoning = "Let me analyze.群名: DDK-国模中转站-0.06倍率-001群 — an API relay group.\n\n" +
+		"[图1] - anime girl holding a sign \"50元一晚 不爽包退\" — a joke meme.\n\n" +
+		"`\nVerdict: ok, recall empty.\n\nConfidence maybe 0.7.\n`"
+
+	details := h.handler.receiptDetails(entry)
+	fence, body := fenceOf(t, details, "**思考过程**：")
+	if len(fence) < fenceMin {
+		t.Errorf("the block is wrapped in %d backtick(s), want at least %d",
+			len(fence), fenceMin)
+	}
+	if body != entry.Reasoning {
+		t.Errorf("the block holds\n%q\nwant the whole chain\n%q", body, entry.Reasoning)
+	}
+	// The model's own single backticks are still in there, as text.
+	if !strings.Contains(body, "\n`\n") {
+		t.Error("the model's own backticks were stripped rather than shown")
+	}
+}
+
 // TestTheBlockCannotBeClosedByItsOwnText covers the model quoting markdown back at
 // the receipt: a fence has to be longer than any run of backticks in the text, or
 // the text ends the block and the rest of the reasoning renders as prose.
@@ -114,9 +151,13 @@ func TestTheBlockCannotBeClosedByItsOwnText(t *testing.T) {
 	entry.Reasoning = "消息里写着：\n```json\n{\"verdict\":\"ad\"}\n```\n所以判广告。"
 
 	details := h.handler.receiptDetails(entry)
-	body := fencedBody(t, details, "**思考过程**：")
+	fence, body := fenceOf(t, details, "**思考过程**：")
 	if body != entry.Reasoning {
 		t.Errorf("the block holds\n%q\nwant\n%q", body, entry.Reasoning)
+	}
+	if len(fence) <= 3 {
+		t.Errorf("the fence is %d backticks and the text holds three of them, so "+
+			"the text closes its own block", len(fence))
 	}
 }
 

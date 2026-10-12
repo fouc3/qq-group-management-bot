@@ -477,7 +477,17 @@ func textFence(text string, limit int) string {
 	return fence + "\n" + body + "\n" + fence
 }
 
-// fenceFor is a run of backticks no line of the text can close.
+// fenceMin is the shortest run of backticks markdown reads as a fence.
+//
+// It is three, and the length rule below used to be able to produce one: a chain of
+// thought that happens to contain a single backtick -- which a model writing its own
+// markdown does, opening and closing with one -- came out wrapped in one backtick,
+// which is an inline code span and not a block at all. The block has to be at least
+// this long whatever the text holds.
+const fenceMin = 3
+
+// fenceFor is a run of backticks no line of the text can close, and never shorter
+// than a fence.
 func fenceFor(text string) string {
 	longest, run := 0, 0
 	for _, letter := range text {
@@ -489,6 +499,9 @@ func fenceFor(text string) string {
 			continue
 		}
 		run = 0
+	}
+	if longest+1 < fenceMin {
+		return strings.Repeat("`", fenceMin)
 	}
 	return strings.Repeat("`", longest+1)
 }
