@@ -436,7 +436,6 @@ func (h *handler) allowReport(reporter string) bool {
 
 // shortReason is an error message fit to put in a group: the platform's wording
 // is long and often carries an identifier nobody there can use.
-// platformReason turns a platform refusal into something a group can read.
 //
 // The raw error is a request line, an HTTP status, an error code and a trace id:
 // accurate, and useless to the people reading it. What matters is the one fact a
