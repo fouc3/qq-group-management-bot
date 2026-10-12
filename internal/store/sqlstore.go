@@ -477,12 +477,32 @@ ORDER BY deadline`), now.Unix())
 }
 
 // Put implements PendingStore.
+//
+// The member's earlier hold in this group goes in the same transaction, so that a
+// reader never sees them held twice. Replacing a hold has to be one act rather than two:
+// between the insert and the removal the list would be long, and the long version is the
+// one that matters -- it names a token whose button has already been replaced, and a
+// hold with no expiry of its own is released by nothing, so a reader that asked "who is
+// being held" would keep answering with the member for good.
 func (p pendingStore) Put(ctx context.Context, entry Pending) error {
 	reported := 0
 	if entry.Reported {
 		reported = 1
 	}
-	_, err := p.store.db.ExecContext(ctx, p.store.query(`
+	tx, err := p.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("saving a pending verification: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, p.store.query(`
+DELETE FROM pending_verifications
+WHERE group_openid = ? AND member_openid = ?`),
+		entry.GroupOpenID, entry.MemberOpenID); err != nil {
+		return fmt.Errorf("replacing the member's earlier hold: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, p.store.query(`
 INSERT INTO pending_verifications
     (token, group_openid, member_openid, joined_at, deadline, held_until, reported, settings, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -495,8 +515,10 @@ ON CONFLICT (token) DO UPDATE SET
     reported      = excluded.reported,
     settings      = excluded.settings`),
 		entry.Token, entry.GroupOpenID, entry.MemberOpenID, entry.JoinedAt,
-		entry.Deadline, entry.HeldUntil, reported, entry.Settings, time.Now().Unix())
-	if err != nil {
+		entry.Deadline, entry.HeldUntil, reported, entry.Settings, time.Now().Unix()); err != nil {
+		return fmt.Errorf("saving a pending verification: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("saving a pending verification: %w", err)
 	}
 	return nil

@@ -117,7 +117,14 @@ type PendingStore interface {
 	// entry with no expiry of its own is not a released one and is returned:
 	// nothing releases it but the member verifying.
 	Load(ctx context.Context, now time.Time) ([]Pending, error)
-	// Put records an entry, replacing any entry with the same token.
+	// Put records an entry, replacing the hold the same member already had in the
+	// same group.
+	//
+	// A member is held once per group, which is the identity the feature that holds
+	// them keeps its own entries by, and a row left behind by a replaced hold is not
+	// harmless: an entry with no expiry of its own is released by nothing, so Load
+	// hands it back for as long as the database keeps it, and every reader of that
+	// list goes on treating the member as held.
 	Put(ctx context.Context, entry Pending) error
 	// Delete forgets an entry.
 	Delete(ctx context.Context, token string) error
