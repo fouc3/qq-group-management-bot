@@ -33,6 +33,7 @@ mute_mode: pseudo
 on_deadline: notify
 notify_members: ["ADMIN-OPENID"]
 pseudo_mute_after: 3
+pseudo_mute_notice: "[at] 由于处于禁言状态，请在手机端验证"
 `)
 	h.join()
 
@@ -51,6 +52,11 @@ pseudo_mute_after: 3
 	}
 	if !strings.Contains(h.promptText(), "手机端") {
 		t.Errorf("the member was not told to verify from the phone:\n%s", h.promptText())
+	}
+	// And [at] became the member's mention -- the spelling the operator wrote, in the text
+	// they configured, with the switch that allows mentions following the text.
+	if want := `<qqbot-at-user id="` + testMemberOpenID + `" />`; !strings.Contains(h.promptText(), want) {
+		t.Errorf("the notice does not mention the member:\n%s", h.promptText())
 	}
 	if h.verifier.IsPseudoMuted(testGroupOpenID, testMemberOpenID) {
 		t.Error("the hold is still the soft one after it was turned into a real mute")

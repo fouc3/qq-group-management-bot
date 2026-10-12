@@ -210,7 +210,8 @@ type Config struct {
 	// PseudoMuteNotice is the prompt sent when a pseudo-mute is turned into a real one,
 	// in place of the usual one. The button is the same button; what changes is that the
 	// member now has to verify from the phone app, because a muted member's desktop client
-	// refuses to run the verification at all. {at} is the member's mention.
+	// refuses to run the verification at all. {at} -- or [at], both are accepted -- is the
+	// member's mention.
 	PseudoMuteNotice string `yaml:"pseudo_mute_notice"`
 	// Groups overrides the fields above for named groups, keyed by group
 	// openid.
@@ -459,9 +460,10 @@ func (c *Config) applyDefaults() error {
 	if c.SkipMessage == "" {
 		c.SkipMessage = DefaultSkipMessage
 	}
-	// A prompt that starts with the mention is what an operator writes when
-	// they want the member addressed, so the switch follows the text.
-	if strings.Contains(c.Prompt, "{at}") {
+	// A text that addresses the member is what an operator writes when they want the member
+	// mentioned, so the switch follows the text -- wherever it was written, and in either
+	// spelling.
+	if wantsMention(c.Prompt) || wantsMention(c.PseudoMuteNotice) {
 		c.MentionNewMember = true
 	}
 
@@ -1499,9 +1501,10 @@ func (v *verifier) greet(ctx context.Context, eventID string, entry *pending) {
 // explains it.
 func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token string,
 	settings Settings, prompt, replyTo string) error {
-	prompt = renderTemplate(prompt, map[string]string{
-		"{at}": mentionTag(memberOpenID, settings),
-	})
+	// Two spellings for the same thing, because both are in use: the texts this feature has
+	// always shipped write {at}, and [at] is what an operator reaches for.
+	tag := mentionTag(memberOpenID, settings)
+	prompt = renderTemplate(prompt, map[string]string{"{at}": tag, "[at]": tag})
 	keyboard := &qqbotsdk.Keyboard{Content: &qqbotsdk.KeyboardContent{Rows: []qqbotsdk.Row{{
 		Buttons: []qqbotsdk.Button{{
 			ID: "verify_" + token,
@@ -1741,4 +1744,13 @@ func renderTemplate(text string, values map[string]string) string {
 		rendered = strings.ReplaceAll(rendered, placeholder, value)
 	}
 	return strings.TrimSpace(rendered)
+}
+
+// wantsMention reports whether a text asks for the member to be mentioned.
+//
+// Two spellings because both are in use: the texts this feature ships write {at}, and [at] is
+// what an operator reaches for. Nothing else here is a template language -- the only other
+// placeholder is {target} in the notification -- so this stays a pair of literal strings.
+func wantsMention(text string) bool {
+	return strings.Contains(text, "{at}") || strings.Contains(text, "[at]")
 }
