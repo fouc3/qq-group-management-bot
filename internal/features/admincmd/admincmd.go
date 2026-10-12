@@ -983,16 +983,21 @@ func (h *handler) debug(ctx context.Context, data *qqbotsdk.GroupMessageCreateDa
 	}
 }
 
-// durationIn returns the duration among a command's arguments.
+// durationAt finds the duration among a command's arguments, and where it is.
 //
-// It reports what it could not read, so an operator sees their own text back
-// rather than a usage line that repeats what they already typed correctly.
-func durationIn(args []string) (time.Duration, error) {
-	if len(args) == 0 {
-		return 0, errors.New("没找到时长。用法：/禁言 <时长> [@目标]，例如 /禁言 30m 或 /禁言 @某人 5d")
-	}
+// One scan serves both commands that take a duration, rather than each writing its own:
+// they agree on what to skip (an argument that names a member) and on what counts (the
+// first argument that reads as a duration). /高风险 needs the position as well, because
+// what follows the duration is the reason the rule was broken -- and a reason can contain
+// words that look like a duration.
+//
+// What it could not read is reported rather than a usage line, so that an operator sees
+// their own text back: the words that did not parse are the useful half of the message.
+// Nothing at all to read is left for the caller to word, since the two callers say it
+// differently.
+func durationAt(args []string) (time.Duration, int, error) {
 	var lastErr error
-	for _, arg := range args {
+	for index, arg := range args {
 		if _, mentioned := command.FirstMention(arg); mentioned {
 			continue
 		}
@@ -1001,10 +1006,19 @@ func durationIn(args []string) (time.Duration, error) {
 			lastErr = err
 			continue
 		}
-		return parsed, nil
+		return parsed, index, nil
 	}
-	if lastErr != nil {
-		return 0, lastErr
+	return 0, -1, lastErr
+}
+
+// durationIn is the duration /禁言 was given, in this command's own words.
+func durationIn(args []string) (time.Duration, error) {
+	duration, at, err := durationAt(args)
+	if at >= 0 {
+		return duration, nil
+	}
+	if err != nil {
+		return 0, err
 	}
 	return 0, errors.New("没找到时长。用法：/禁言 <时长> [@目标]，例如 /禁言 30m 或 /禁言 @某人 5d")
 }

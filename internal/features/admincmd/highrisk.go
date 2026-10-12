@@ -175,17 +175,12 @@ func (h *handler) highRiskAdd(data *qqbotsdk.GroupMessageCreateData,
 		}
 	}
 
-	durationAt := -1
-	for index, word := range words {
-		if _, mentioned := command.FirstMention(word); mentioned {
-			continue
-		}
-		if parsed, parseErr := parseDuration(word); parseErr == nil {
-			duration, durationAt = parsed, index
-			break
-		}
-	}
-	if durationAt < 0 {
+	// The same scan /禁言 uses, which is what keeps the two commands agreeing on what
+	// reads as a duration. The position matters here in a way it does not there: what
+	// follows the duration is the reason, and the reason may itself contain a word that
+	// parses.
+	duration, at, _ := durationAt(words)
+	if at < 0 {
 		return "", 0, "", errors.New("标记高风险必须给时长（30s / 10m / 2h / 7d…），" +
 			"例如 /高风险 add @某人 7d 广告")
 	}
@@ -198,7 +193,7 @@ func (h *handler) highRiskAdd(data *qqbotsdk.GroupMessageCreateData,
 		// mention and what to do instead.
 		fallback := ""
 		for index, word := range words {
-			if index == durationAt {
+			if index == at {
 				continue
 			}
 			if _, mentioned := command.FirstMention(word); mentioned {
@@ -215,7 +210,7 @@ func (h *handler) highRiskAdd(data *qqbotsdk.GroupMessageCreateData,
 
 	var kept []string
 	for index, word := range words {
-		if index == durationAt || word == member {
+		if index == at || word == member {
 			continue
 		}
 		if _, mentioned := command.FirstMention(word); mentioned {
