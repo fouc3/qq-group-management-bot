@@ -72,7 +72,7 @@ func (h *handler) commandDefs() []command.Def {
 			Private: h.privateMenu,
 		},
 		{
-			Name: "whois",
+			Name: whoisCommand,
 			Usage: "{prefix}whois —— 查看本群与成员的 openid（用于填配置）；" +
 				"私聊里用则显示你自己的 openid",
 			Desc: "查看本群与成员 openid",

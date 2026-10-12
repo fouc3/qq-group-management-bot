@@ -39,6 +39,14 @@ const Name = "admin_commands"
 // DefaultPrefix is the command prefix when the section leaves it out.
 const DefaultPrefix = "/"
 
+// whoisCommand is the /whois command's name.
+//
+// It is the one command answered in a group the bot's own list does not name yet, so
+// both the refusal log and that answer name it -- and neither may spell it out: a name
+// written in three places is a name that disagrees with itself the first time the
+// command is renamed or given an alias.
+const whoisCommand = "whois"
+
 // DefaultMaxMute is what a group's cap comes to when the file names none: the
 // platform's ceiling is thirty days, so this stays just inside it.
 const DefaultMaxMute = 29 * 24 * time.Hour
@@ -570,7 +578,8 @@ func (h *handler) unconfiguredGroup(ctx context.Context, event *qqbotsdk.Event,
 	if !h.router.Seen.First(data.ID) {
 		return nil
 	}
-	h.deps.Logger.Info("answering /whois in a group that is not configured yet",
+	h.deps.Logger.Info("answering a command in a group that is not configured yet",
+		"command", def.Name,
 		"group", data.GroupOpenID, "member", data.Author.MemberOpenID)
 	return def.Run(ctx, data, cmd)
 }
@@ -616,6 +625,17 @@ func (h *handler) allows(def command.Def, who viewer) bool {
 	}
 }
 
+// writtenIsWhois reports whether a command, as typed, is the /whois command.
+//
+// It is asked of the table rather than compared with the name, so that another name for
+// the command -- an alias -- is treated the same way. What it decides is only which line
+// a refusal is logged on, so a name that stopped matching would fail nothing: no
+// command, no test, just a log line that quietly stopped saying it was whois.
+func writtenIsWhois(catalog *command.Catalog, written string) bool {
+	def, listed := catalog.Lookup(written)
+	return listed && def.Name == whoisCommand
+}
+
 // deny refuses a command to a member who may not run it.
 //
 // reported is the word as it was typed, which is what the log line carries: a
@@ -623,7 +643,7 @@ func (h *handler) allows(def command.Def, who viewer) bool {
 // always a name of ours to log.
 func (h *handler) deny(ctx context.Context, data *qqbotsdk.GroupMessageCreateData,
 	reported, sender string) {
-	if reported == "whois" {
+	if writtenIsWhois(h.commands(), reported) {
 		h.deps.Logger.Warn("refused /whois for a member who is not an administrator",
 			"group", data.GroupOpenID, "member", sender)
 	} else {
