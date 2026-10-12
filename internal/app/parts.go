@@ -82,14 +82,29 @@ func newParts(registry *feature.Registry, deps feature.Deps, ctx context.Context
 // it -- and so that the startup log says what was connected rather than repeating
 // itself once per feature.
 func (p *parts) startFromConfig(cfg *config.Config) error {
+	built, err := p.buildFromConfig(cfg)
+	if err != nil {
+		return err
+	}
+	return p.adopt(built...)
+}
+
+// buildFromConfig builds every feature the configuration turns on, without putting
+// any of them to work.
+//
+// What comes back is handed to adopt, or thrown away whole when the change that asked
+// for it cannot be completed. That is the point of separating it: a caller rebuilding
+// everything has to be able to fail without having taken anything away first, or one
+// section that cannot be built costs the features that were serving.
+func (p *parts) buildFromConfig(cfg *config.Config) ([]*part, error) {
 	for _, name := range cfg.FeatureNames() {
 		if _, known := p.registry.Factory(name); !known {
-			return fmt.Errorf("unknown feature %q; registered features are: %s",
+			return nil, fmt.Errorf("unknown feature %q; registered features are: %s",
 				name, strings.Join(p.registry.Names(), ", "))
 		}
 	}
 
-	var pending []*part
+	var built []*part
 	for _, name := range p.registry.Names() {
 		section, configured := cfg.Feature(name)
 		if !configured {
@@ -97,21 +112,21 @@ func (p *parts) startFromConfig(cfg *config.Config) error {
 		}
 		on, err := feature.Enabled(name, section)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !on {
 			continue
 		}
-		built, err := p.build(name, section)
+		instance, err := p.build(name, section)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		pending = append(pending, built)
+		built = append(built, instance)
 	}
-	if len(pending) == 0 {
-		return errors.New("app: no feature is enabled; turn one on under features:")
+	if len(built) == 0 {
+		return nil, errors.New("app: no feature is enabled; turn one on under features:")
 	}
-	return p.adopt(pending...)
+	return built, nil
 }
 
 // start puts one feature to work, which is what a section that appeared in the
@@ -190,11 +205,20 @@ func (p *parts) restart(name string, section yaml.Node) error {
 // Rebuilding all of them rather than keeping a list of which feature reads which
 // setting is deliberate -- that list would be a second place to be wrong, and the
 // cost here is one rebuild of a handful of features.
+//
+// Every replacement is built before anything is stopped. A wide change is
+// all-or-nothing, and stopping first would make a section that cannot be built cost
+// the features that were serving: the bot stays connected, answers nothing, and only
+// a second edit to the file would bring them back.
 func (p *parts) restartEverything(cfg *config.Config) error {
+	built, err := p.buildFromConfig(cfg)
+	if err != nil {
+		return err
+	}
 	if err := p.stopAll(); err != nil {
 		return err
 	}
-	return p.startFromConfig(cfg)
+	return p.adopt(built...)
 }
 
 // build makes one feature, without putting it to work yet.

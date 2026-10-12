@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
@@ -38,6 +40,10 @@ type reloader struct {
 	// lastError is the last load failure, so a file somebody is halfway through
 	// editing is reported once instead of every three seconds.
 	lastError string
+	// lastApplyError is the same for a change that could not be adopted, and for the
+	// same reason: what is in force does not move on a failure, so the same failure is
+	// found again on every look at the file until it is edited.
+	lastApplyError string
 }
 
 // watchReloads reloads until the context ends.
@@ -81,18 +87,36 @@ func (r *reloader) once(why string) {
 		r.logger.Debug("no configuration change to apply", "why", why)
 		return
 	}
-	r.apply(fresh, why)
+	// What is in force moves only once the change has been adopted. A failure measured
+	// as applied would never be looked at again: the next look at the same file would
+	// see nothing that changed, so the operator's edit would be dropped until they
+	// happened to touch the file a second time.
+	if err := r.apply(fresh, why); err != nil {
+		if message := err.Error(); message != r.lastApplyError {
+			r.lastApplyError = message
+			r.logger.Error("the change could not be adopted, so the configuration "+
+				"in force is the one before it, and the file will be tried again",
+				"path", r.path, "error", err)
+		}
+		return
+	}
+	r.lastApplyError = ""
 	r.current = fresh
 }
 
-// apply adopts what the file changed into what is running.
+// apply adopts what the file changed into what is running, and reports whether the
+// whole of it was adopted.
 //
 // Every section is judged on its own. What can change while the bot runs changes
 // here, and what cannot is said out loud and left alone -- the rest of the file is
 // still adopted. Refusing the whole file because one section cannot move would make
 // a reload useless in exactly the case it is for: an operator editing a feature
 // while the credentials above it stay as they were.
-func (r *reloader) apply(fresh *config.Config, why string) {
+//
+// What is not judged section by section is a change that reaches every feature: it
+// either happened or it did not, and the caller measures the file against what is
+// really in force, so a half-done one must not be reported as done.
+func (r *reloader) apply(fresh *config.Config, why string) error {
 	for _, what := range r.immovable(fresh) {
 		r.logger.Warn("a change cannot be adopted while the bot runs, so it was "+
 			"not applied; the rest of the file was", "what", what, "path", r.path)
@@ -104,10 +128,10 @@ func (r *reloader) apply(fresh *config.Config, why string) {
 	}
 
 	if wideChange(r.current, fresh) {
-		r.adoptWide(fresh, why)
-		return
+		return r.adoptWide(fresh, why)
 	}
 	r.adoptPerFeature(fresh, why)
+	return nil
 }
 
 // immovable lists what changed and cannot change while the bot runs, with the
@@ -131,23 +155,34 @@ func (r *reloader) immovable(fresh *config.Config) []string {
 }
 
 // adoptWide rebuilds every feature, for a change that reaches all of them.
-func (r *reloader) adoptWide(fresh *config.Config, why string) {
+//
+// What the features are built from moves with them, and moves back when the rebuild
+// cannot be done: handing over a new fallback client or a new cache address to a
+// rebuild that then fails would leave the next single-feature rebuild working from
+// something the running features have never seen.
+func (r *reloader) adoptWide(fresh *config.Config, why string) error {
+	var oneBot *onebot.Client
 	if !reflect.DeepEqual(r.current.OneBot, fresh.OneBot) {
 		client, err := buildOneBot(fresh.OneBot, r.logger)
 		if err != nil {
-			r.logger.Error("the fallback client could not be built, so the onebot "+
-				"change was not adopted", "error", err)
-			return
+			return fmt.Errorf("building the fallback client: %w", err)
 		}
-		r.parts.setOneBot(client)
+		oneBot = client
+	}
+
+	was := r.parts.deps
+	if oneBot != nil {
+		r.parts.setOneBot(oneBot)
 	}
 	r.parts.setRedis(fresh)
+
 	if err := r.parts.restartEverything(fresh); err != nil {
-		r.logger.Error("the features could not all be built again", "error", err)
-		return
+		r.parts.deps = was
+		return fmt.Errorf("building every feature again: %w", err)
 	}
 	r.logger.Info("every feature was built again, because the change reaches all "+
 		"of them", "why", why)
+	return nil
 }
 
 // adoptPerFeature adopts the changes that reach one feature each.
