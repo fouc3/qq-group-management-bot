@@ -850,7 +850,13 @@ func (h *handler) muteCommand(ctx context.Context, data *qqbotsdk.GroupMessageCr
 	// that list is where the check read them from.
 	limit, err := h.cfg.Groups[data.GroupOpenID].longestMute()
 	if err != nil {
-		return err
+		// Said to the group, and logged, rather than returned: an error returned to the
+		// dispatcher is a log line, and the administrator who typed the command cannot
+		// see it. No mute is applied on top of a cap that could not be read.
+		h.deps.Logger.Error("this group's mute cap could not be read",
+			"group", data.GroupOpenID, "error", err)
+		h.reply(ctx, data, "本群的禁言上限读不出来，所以这次没有禁言："+err.Error())
+		return nil
 	}
 	return h.mute(ctx, data, cmd, target, limit)
 }
