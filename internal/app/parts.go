@@ -192,7 +192,12 @@ func (p *parts) restart(name string, section yaml.Node) error {
 	if err != nil {
 		return err
 	}
-	if err := p.stop(name); err != nil {
+	// The wiring is left until the replacement is in place, deliberately: wiring in
+	// between would hand every consumer nothing for the length of that gap, and a
+	// consumer whose question is answered by a feature -- whether a member is still
+	// verifying, say -- would read "there is nobody" out of a nil and act on it. The
+	// instance being replaced answers correctly until it is replaced.
+	if err := p.halt(name); err != nil {
 		return err
 	}
 	return p.adopt(built)

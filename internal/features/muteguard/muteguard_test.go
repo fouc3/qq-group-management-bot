@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +18,6 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/mutelog"
-	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
 const (
@@ -176,23 +174,27 @@ func (c *counting) said(text string) int {
 	return count
 }
 
-// harness is one built feature over a real database and a stub platform.
+// harness is one built feature over a stub platform.
 //
-// The database is real because half of what this feature decides is read from it:
-// the holds a member is verifying under are rows, and a stub that answered from a
-// map would agree with whatever the code happened to look for.
+// The platform is what this feature acts on, so it is the one thing that has to be real
+// enough to lie: the mute state it reports and the lifts it is asked for are the whole
+// of what happens here. What the verification answers is a stub, because that answer is
+// asked of the feature now -- a hold is not read out of its records any more.
 type harness struct {
-	t        *testing.T
-	guard    *handler
-	platform *platform
-	logs     *counting
-	store    store.Store
-	mutes    *mutelog.Log
+	t            *testing.T
+	guard        *handler
+	platform     *platform
+	logs         *counting
+	mutes        *mutelog.Log
+	verification *verification
 }
 
 func newHarness(t *testing.T, section string) *harness {
 	t.Helper()
-	h := &harness{t: t, platform: newPlatform(), logs: &counting{}, mutes: mutelog.New()}
+	h := &harness{
+		t: t, platform: newPlatform(), logs: &counting{},
+		mutes: mutelog.New(), verification: newVerification(),
+	}
 
 	server := h.platform.server(t)
 	client, err := qqbotsdk.NewClientFromConfig(qqbotsdk.Config{
@@ -203,21 +205,10 @@ func newHarness(t *testing.T, section string) *harness {
 		t.Fatalf("building the client: %v", err)
 	}
 
-	opened, err := store.Open(context.Background(), store.Config{
-		Driver: "sqlite",
-		DSN:    filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatalf("opening the database: %v", err)
-	}
-	t.Cleanup(func() { _ = opened.Close() })
-	h.store = opened
-
 	deps := feature.Deps{
 		Client: client,
 		Logger: slog.New(h.logs),
 		Groups: config.Groups{{OpenID: testGroup}, {OpenID: testOther}},
-		Store:  opened,
 		Mutes:  h.mutes,
 	}
 	built, err := New(sectionNode(t, section), deps)
@@ -225,8 +216,40 @@ func newHarness(t *testing.T, section string) *harness {
 		t.Fatalf("building the feature: %v", err)
 	}
 	h.guard = built.(*handler)
+	h.guard.SetVerifier(h.verification)
 	return h
 }
+
+// verification is the join verification as this feature sees it: the members being kept
+// back until they verify.
+type verification struct {
+	mu    sync.Mutex
+	until map[string]bool
+}
+
+func newVerification() *verification {
+	return &verification{until: map[string]bool{}}
+}
+
+// holds makes one member one the verification is keeping back.
+func (v *verification) holds(groupOpenID, memberOpenID string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.until[groupOpenID+"/"+memberOpenID] = true
+}
+
+// IsPending answers the one question this feature asks of the verification.
+func (v *verification) IsPending(groupOpenID, memberOpenID string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.until[groupOpenID+"/"+memberOpenID]
+}
+
+// The rest of feature.Verifier, none of which lifting a mute asks about.
+func (v *verification) Reverify(context.Context, string, string) error         { return nil }
+func (v *verification) SimulateDeadline(context.Context, string, string) error { return nil }
+func (v *verification) IsPseudoMuted(string, string) bool                      { return false }
+func (v *verification) Resend(context.Context, string, string) error           { return nil }
 
 // sectionNode turns a section written as YAML into the node a feature is built
 // from, which is what the application hands over.
@@ -248,17 +271,10 @@ func (h *harness) sweep() {
 	h.guard.sweep(context.Background())
 }
 
-// hold writes a verification hold the way the verification feature would.
+// hold puts a member under the verification's hold, the way that feature would.
 func (h *harness) hold(memberOpenID string) {
 	h.t.Helper()
-	if err := h.store.Pending().Put(context.Background(), store.Pending{
-		Token:        "TOKEN-" + memberOpenID,
-		GroupOpenID:  testGroup,
-		MemberOpenID: memberOpenID,
-		HeldUntil:    time.Now().Add(24 * time.Hour).Unix(),
-	}); err != nil {
-		h.t.Fatalf("writing a hold: %v", err)
-	}
+	h.verification.holds(testGroup, memberOpenID)
 }
 
 // oneMember is a section naming one member in the group under test.
@@ -454,23 +470,23 @@ groups:
 	}
 }
 
-// TestNothingIsLiftedWhenTheHoldsCannotBeRead covers the failure that has to leave
-// the mutes alone: without the holds there is no telling a member who is verifying
-// from one who is not, and letting the first out is worse than a delay.
-func TestNothingIsLiftedWhenTheHoldsCannotBeRead(t *testing.T) {
+// TestAMuteIsLiftedWhenNothingIsVerifying covers the deployment where nothing holds
+// anybody.
+//
+// There is no "could not be read" left for this feature to be careful about: who is
+// verifying is asked of the feature that holds them, and that answer comes from what it
+// restored when it was built. A deployment without that feature is therefore not an
+// unknown -- nobody is holding anybody, so there is nothing to walk out of, and the mute
+// in front of us is lifted like any other that is not the bot's own.
+func TestAMuteIsLiftedWhenNothingIsVerifying(t *testing.T) {
 	h := newHarness(t, oneMember)
+	h.guard.SetVerifier(nil)
 	h.platform.setMuted(testGroup, testMember)
-	if err := h.store.Close(); err != nil {
-		t.Fatalf("closing the database: %v", err)
-	}
 
 	h.sweep()
 
-	if _, lifted, _ := h.platform.snapshot(); len(lifted) != 0 {
-		t.Errorf("lifted %v without knowing who is verifying", lifted)
-	}
-	if h.logs.said("could not be read, so nobody was lifted") == 0 {
-		t.Error("the pass that could not read the holds said nothing about it")
+	if _, lifted, _ := h.platform.snapshot(); len(lifted) != 1 {
+		t.Errorf("lifted %v, want the one mute no verification claims", lifted)
 	}
 }
 

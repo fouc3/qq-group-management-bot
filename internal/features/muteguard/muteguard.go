@@ -14,12 +14,12 @@
 //   - the mutes written down as they are applied, in internal/mutelog. That is how
 //     an administrator's /禁言 and a judgement's punishment are recognised: both
 //     are asked for by name, and neither should be undone by this feature.
-//   - the holds the verification feature keeps in the data layer, read here as
-//     records rather than asked of that feature. A hold is a real mute on a real
-//     person whether or not the feature that wrote it is running, and it outlives
-//     a restart, which a feature built again does not. A member who is verifying
-//     must never be let out by this one, or the verification would be something
-//     they can walk out of by waiting.
+//   - the members the verification feature is holding, asked of that feature rather
+//     than read out of its table. A hold is a real mute on a real person, and a
+//     member who is verifying must never be let out by this one, or the verification
+//     would be something they can walk out of by waiting. The answer comes from what
+//     that feature restored when it was built, so it survives a restart the same way
+//     its own records do.
 //
 // Whatever is left after both is somebody else's, and is lifted.
 //
@@ -33,7 +33,6 @@ package muteguard
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -177,15 +176,17 @@ func (c Config) groupNames() []string {
 
 // member is one person in one group: a mute is per group, because the same person
 // is a different member of every group they are in.
-type member struct {
-	groupOpenID  string
-	memberOpenID string
-}
-
 // handler implements feature.Feature.
 type handler struct {
 	deps feature.Deps
 	cfg  Config
+
+	// verifier is the join verification, when one is running.
+	//
+	// Nil when no feature provides verification, which is a deployment rather than a
+	// mistake: with nobody holding anybody there is nothing to walk out of, and the
+	// mute in front of us is somebody else's to lift.
+	verifier feature.Verifier
 
 	// stopping ends the sweep; stopped is closed once it has ended.
 	//
@@ -219,6 +220,12 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		said:     map[string]string{},
 	}, nil
 }
+
+// SetVerifier implements feature.VerifierAware.
+//
+// Who is still verifying is the one thing this feature has to know about the
+// verification, and it is asked rather than looked up in that feature's records.
+func (h *handler) SetVerifier(verifier feature.Verifier) { h.verifier = verifier }
 
 // Name implements feature.Feature.
 func (h *handler) Name() string { return Name }
@@ -282,24 +289,13 @@ func (h *handler) look() {
 // sweep is one pass over every watched group.
 func (h *handler) sweep(ctx context.Context) {
 	now := time.Now()
-	held, err := h.heldByTheVerification(ctx, now)
-	if err != nil {
-		// Nothing is lifted when the holds cannot be read. Leaving somebody
-		// else's mute standing for one interval is a delay; lifting a member who
-		// is verifying is a hole in the verification, and this feature is not
-		// allowed to make one.
-		h.deps.Logger.Error("the members still verifying could not be read, so "+
-			"nobody was lifted this time", "error", err)
-		return
-	}
 	for _, groupOpenID := range h.watched() {
-		h.sweepGroup(ctx, groupOpenID, held, now)
+		h.sweepGroup(ctx, groupOpenID, now)
 	}
 }
 
 // sweepGroup looks at one group and lifts what is left of its mutes.
-func (h *handler) sweepGroup(ctx context.Context, groupOpenID string, held map[member]bool,
-	now time.Time) {
+func (h *handler) sweepGroup(ctx context.Context, groupOpenID string, now time.Time) {
 	setting, err := h.deps.Client.GetGroupRestrictChatSetting(ctx, groupOpenID)
 	if err != nil {
 		// Said once per state rather than once per look: a group the bot may not
@@ -338,7 +334,7 @@ func (h *handler) sweepGroup(ctx context.Context, groupOpenID string, held map[m
 		if muted.MemberOpenID == "" || !contains(settings.Members, muted.MemberOpenID) {
 			continue
 		}
-		if held[member{groupOpenID: groupOpenID, memberOpenID: muted.MemberOpenID}] {
+		if h.holding(groupOpenID, muted.MemberOpenID) {
 			continue
 		}
 		if h.deps.Mutes.Applied(groupOpenID, muted.MemberOpenID, now) {
@@ -379,27 +375,13 @@ func (h *handler) sweepGroup(ctx context.Context, groupOpenID string, held map[m
 	}
 }
 
-// heldByTheVerification is the members this bot is holding for verification.
+// holding reports whether this member is being kept back until they verify.
 //
-// The records are read here rather than asked of the feature that writes them: a
-// hold is a mute that is really in force whether or not that feature is running,
-// and reading the layer costs one query for the whole pass instead of one call per
-// group. The error matters as much as the answer -- not knowing is not the same as
-// knowing there is nobody, and the difference is somebody being let out of a
-// verification.
-func (h *handler) heldByTheVerification(ctx context.Context, now time.Time) (map[member]bool, error) {
-	if h.deps.Store == nil {
-		return nil, errNoStore
-	}
-	entries, err := h.deps.Store.Pending().Load(ctx, now)
-	if err != nil {
-		return nil, err
-	}
-	held := make(map[member]bool, len(entries))
-	for _, entry := range entries {
-		held[member{groupOpenID: entry.GroupOpenID, memberOpenID: entry.MemberOpenID}] = true
-	}
-	return held, nil
+// Nil means no feature is verifying in this deployment, which is not the same as "the
+// answer could not be had": with nobody holding anybody there is nothing to walk out
+// of, and the mute in front of us is somebody else's.
+func (h *handler) holding(groupOpenID, memberOpenID string) bool {
+	return h.verifier != nil && h.verifier.IsPending(groupOpenID, memberOpenID)
 }
 
 // watched is the groups this feature looks at, in a settled order.
@@ -470,7 +452,3 @@ func contains(members []string, memberOpenID string) bool {
 	}
 	return false
 }
-
-// errNoStore is returned when the feature is built without the data layer, which
-// the application never does and a test might.
-var errNoStore = errors.New("muteguard: the data layer is needed to tell the bot's own holds apart")
