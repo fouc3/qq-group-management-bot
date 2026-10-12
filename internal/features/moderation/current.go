@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -52,6 +53,14 @@ func (h *handler) Reload(section yaml.Node) error {
 		// number here would be a setting that reads as applied and is not.
 		return errors.New("high_risk max_in_flight 改了：可同时进行的自动判定数在启动时" +
 			"决定，需要重启")
+	}
+	if !reflect.DeepEqual(fresh.Images, inForce.Images) {
+		// The picture cache is built with the section and keeps its own copy of it, so
+		// a new directory or a new size limit would be a setting that reads as applied
+		// and is not: pictures would go on being written where the old section said,
+		// and the directory the operator changed would stay empty.
+		return errors.New("images 段改了：图片缓存按启动时的设置建立，" +
+			"改目录、体积阈值、边长上限或张数上限都需要重启")
 	}
 
 	h.mu.Lock()
