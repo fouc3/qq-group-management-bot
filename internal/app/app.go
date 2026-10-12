@@ -124,6 +124,11 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 	}
 	logger.Info("gateway reached", "url", gateway.URL, "intents", intents)
 
+	// What the connection is subscribed to, told to the reloader: it is the one thing a
+	// change cannot adopt, and a feature enabled by an edit is one whose events never
+	// arrive.
+	reload.subscribed = intents
+
 	client.UseTransport(qqbotsdk.NewWebSocketTransport(gateway.URL,
 		qqbotsdk.WithIntents(intents)))
 

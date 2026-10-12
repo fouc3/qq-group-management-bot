@@ -30,8 +30,11 @@ type groupFeature struct {
 	answered int
 }
 
-func (f *groupFeature) Name() string             { return f.name }
-func (f *groupFeature) Intents() qqbotsdk.Intent { return 0 }
+func (f *groupFeature) Name() string { return f.name }
+
+// Intents is what this stub asks the connection to subscribe to. Nonzero on purpose: what
+// a feature asks for is what makes the reload's one blind spot observable.
+func (f *groupFeature) Intents() qqbotsdk.Intent { return qqbotsdk.IntentGroupAndC2CEvent }
 
 func (f *groupFeature) Register(context.Context) error {
 	f.router = command.NewRouter(f.name, f.deps.Buttons,

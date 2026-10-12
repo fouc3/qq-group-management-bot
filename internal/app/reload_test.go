@@ -15,13 +15,17 @@ import (
 
 // reloadFor is a reloader over a running set of features, with the configuration
 // in force given.
+//
+// The subscription is taken to be what the running set needs, which is what the app does
+// when it builds the connection: a test that wants the two to differ sets the field itself.
 func reloadFor(t *testing.T, live *parts, before *config.Config, logged *bytes.Buffer) *reloader {
 	t.Helper()
 	return &reloader{
-		parts:   live,
-		logger:  slog.New(slog.NewTextHandler(logged, nil)),
-		level:   new(slog.LevelVar),
-		current: before,
+		parts:      live,
+		logger:     slog.New(slog.NewTextHandler(logged, nil)),
+		level:      new(slog.LevelVar),
+		current:    before,
+		subscribed: live.intents(),
 	}
 }
 

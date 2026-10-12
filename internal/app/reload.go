@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
 
 	"github.com/fouc3/onebot-ext/onebot"
@@ -44,6 +45,14 @@ type reloader struct {
 	// same reason: what is in force does not move on a failure, so the same failure is
 	// found again on every look at the file until it is edited.
 	lastApplyError string
+	// subscribed is what the connection is actually subscribed to.
+	//
+	// The app sets it once, when it builds the transport, and it does not move: the
+	// intents are an option of the transport, and the transport owns the connection from
+	// then on. A feature enabled by an edit is therefore a feature whose events never
+	// arrive -- it does nothing at all, and says nothing about it -- which is why this is
+	// kept here and compared against.
+	subscribed qqbotsdk.Intent
 }
 
 // watchReloads reloads until the context ends.
@@ -128,10 +137,38 @@ func (r *reloader) apply(fresh *config.Config, why string) error {
 	}
 
 	if wideChange(r.current, fresh) {
-		return r.adoptWide(fresh, why)
+		if err := r.adoptWide(fresh, why); err != nil {
+			return err
+		}
+		r.reportIntents()
+		return nil
 	}
 	r.adoptPerFeature(fresh, why)
+	r.reportIntents()
 	return nil
+}
+
+// reportIntents says what the change needs that the connection cannot hear.
+//
+// The subscription is fixed when the connection is built, which makes this the one part of
+// a change a reload cannot adopt: a feature enabled by an edit is one whose events never
+// arrive, so it does nothing at all and nothing says why. It is reported here instead, and
+// reported again on every change, because the answer to it stays the same until the bot is
+// restarted -- which is exactly what a log line is for.
+//
+// The other direction is not reported. A subscription left wider than the running features
+// need is harmless: the events arrive, and nothing answers them.
+func (r *reloader) reportIntents() {
+	needed := r.parts.intents()
+	missing := needed &^ r.subscribed
+	if missing == 0 {
+		return
+	}
+	r.logger.Error("the features in force need events the connection is not subscribed "+
+		"to, so nothing they do can be seen until the bot is restarted",
+		"missing", fmt.Sprintf("%#x", uint64(missing)),
+		"needed", fmt.Sprintf("%#x", uint64(needed)),
+		"subscribed", fmt.Sprintf("%#x", uint64(r.subscribed)))
 }
 
 // immovable lists what changed and cannot change while the bot runs, with the
