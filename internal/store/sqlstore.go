@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -244,6 +244,19 @@ CREATE TABLE IF NOT EXISTS high_risk_watches (
 CREATE UNIQUE INDEX IF NOT EXISTS high_risk_by_member ON high_risk_watches (member_openid);
 CREATE INDEX IF NOT EXISTS high_risk_by_expiry ON high_risk_watches (expires_at);
 `,
+	// 9: a pseudo-mute can be turned into a real one.
+	//
+	// A member who goes on talking under a pseudo-mute -- their hold is this bot
+	// taking their messages back -- is one the group has to silence for real. When
+	// that happened is recorded here: it outlives the process that decided it, and
+	// "this one was escalated" is the kind of thing an operator asking about a
+	// member wants to see.
+	//
+	// A moment rather than a flag, so that the record says when as well as whether,
+	// and added with a default rather than by rebuilding the table: the rows already
+	// there were never escalated, and ADD COLUMN with a default is the one shape of
+	// change both dialects make without moving the data.
+	`ALTER TABLE pending_verifications ADD COLUMN escalated_at BIGINT NOT NULL DEFAULT 0`,
 }
 
 // sqlStore is the database/sql implementation, shared by both dialects.
@@ -449,7 +462,7 @@ type pendingStore struct{ store *sqlStore }
 // asking whether it is still in the future would drop every one of them.
 func (p pendingStore) Load(ctx context.Context, now time.Time) ([]Pending, error) {
 	rows, err := p.store.db.QueryContext(ctx, p.store.query(`
-SELECT token, group_openid, member_openid, joined_at, deadline, held_until, reported, settings
+SELECT token, group_openid, member_openid, joined_at, deadline, held_until, escalated_at, reported, settings
 FROM pending_verifications
 WHERE held_until = 0 OR held_until > ?
 ORDER BY deadline`), now.Unix())
@@ -463,8 +476,8 @@ ORDER BY deadline`), now.Unix())
 		var entry Pending
 		var reported int
 		if err := rows.Scan(&entry.Token, &entry.GroupOpenID, &entry.MemberOpenID,
-			&entry.JoinedAt, &entry.Deadline, &entry.HeldUntil, &reported,
-			&entry.Settings); err != nil {
+			&entry.JoinedAt, &entry.Deadline, &entry.HeldUntil, &entry.EscalatedAt,
+			&reported, &entry.Settings); err != nil {
 			return nil, fmt.Errorf("reading a pending verification: %w", err)
 		}
 		// Scanned as an integer and converted here: SQLite has no boolean type,
@@ -504,18 +517,20 @@ WHERE group_openid = ? AND member_openid = ?`),
 
 	if _, err := tx.ExecContext(ctx, p.store.query(`
 INSERT INTO pending_verifications
-    (token, group_openid, member_openid, joined_at, deadline, held_until, reported, settings, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (token, group_openid, member_openid, joined_at, deadline, held_until, escalated_at, reported, settings, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (token) DO UPDATE SET
     group_openid  = excluded.group_openid,
     member_openid = excluded.member_openid,
     joined_at     = excluded.joined_at,
     deadline      = excluded.deadline,
     held_until    = excluded.held_until,
+    escalated_at  = excluded.escalated_at,
     reported      = excluded.reported,
     settings      = excluded.settings`),
 		entry.Token, entry.GroupOpenID, entry.MemberOpenID, entry.JoinedAt,
-		entry.Deadline, entry.HeldUntil, reported, entry.Settings, time.Now().Unix()); err != nil {
+		entry.Deadline, entry.HeldUntil, entry.EscalatedAt, reported, entry.Settings,
+		time.Now().Unix()); err != nil {
 		return fmt.Errorf("saving a pending verification: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

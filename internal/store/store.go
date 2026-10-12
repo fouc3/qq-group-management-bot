@@ -38,6 +38,15 @@ type Pending struct {
 	JoinedAt  int64
 	Deadline  int64
 	HeldUntil int64
+	// EscalatedAt is when this hold was turned into a real mute, as Unix seconds,
+	// or zero for a hold that never was.
+	//
+	// What makes a hold a pseudo-mute is that the bot takes the member's messages
+	// back rather than the platform silencing them, and a member who goes on talking
+	// through that is one the group has to silence for real. When that happened is
+	// written down for the same reason the hold is: it outlives the process that
+	// decided it.
+	EscalatedAt int64
 	// Reported records that the deadline has already been acted on.
 	Reported bool
 	// Settings is the feature's own configuration, frozen when the member was
