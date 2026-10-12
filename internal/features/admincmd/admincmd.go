@@ -167,7 +167,8 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(Name, deps.Buttons)}
+	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(Name, deps.Buttons,
+		command.EventsOrOwn(deps.Events, deps.Client))}
 	h.part, h.stopPart = context.WithCancel(context.Background())
 	// The table is validated here, so that a word invoking two commands stops the
 	// bot at startup rather than leaving one of them answering nothing at all.
@@ -508,11 +509,6 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 		return h.unconfiguredGroup(ctx, event, data)
 	}
 
-	if !h.router.Seen.First(data.ID) {
-		// The same message arrived as a second event type.
-		return nil
-	}
-
 	cmd, ok := command.Parse(data.Content, h.cfg.Prefix)
 	if !ok {
 		return nil
@@ -520,6 +516,18 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 	// With require_mention on, a command counts only when the message reached
 	// the bot because it was mentioned.
 	if h.mentionsRequired() && !h.botWasMentioned(event, cmd) {
+		return nil
+	}
+	// The decide-once check comes after both, because what it records is that a command
+	// was answered. A delivery dropped before it was looked at must not be recorded as
+	// handled, or the delivery that would have been answered is dropped as a duplicate of
+	// the one that was not -- and the same message does arrive twice, as the two event
+	// types, in a group set to receive everything. Which of them arrives first is not
+	// something the bot is told, so recording the first sighting made a command answer
+	// nothing at all about half the time, silently. The group that is not configured yet
+	// has always asked it here, for the same reason.
+	if !h.router.Seen.First(data.ID) {
+		// The same message arrived as a second event type.
 		return nil
 	}
 	sender := data.Author.MemberOpenID

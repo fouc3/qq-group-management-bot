@@ -34,7 +34,8 @@ func (f *groupFeature) Name() string             { return f.name }
 func (f *groupFeature) Intents() qqbotsdk.Intent { return 0 }
 
 func (f *groupFeature) Register(context.Context) error {
-	f.router = command.NewRouter(f.name, f.deps.Buttons)
+	f.router = command.NewRouter(f.name, f.deps.Buttons,
+		command.EventsOrOwn(f.deps.Events, f.deps.Client))
 	return f.router.Register(f.deps.Client, command.Handlers{
 		Group: func(context.Context, *qqbotsdk.Event) error {
 			f.answered++

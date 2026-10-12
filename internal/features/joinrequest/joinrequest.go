@@ -14,6 +14,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 )
 
@@ -203,7 +204,12 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	return &handler{cfg: cfg, deps: deps, blacklist: emptyBlacklist{}}, nil
+	return &handler{
+		cfg:       cfg,
+		deps:      deps,
+		blacklist: emptyBlacklist{},
+		events:    command.EventsOrOwn(deps.Events, deps.Client),
+	}, nil
 }
 
 // SetBlacklist hands over the list the feature checks.
@@ -233,7 +239,7 @@ type handler struct {
 	// now been superseded for. Approving twice is refused by the platform, but the
 	// two answers come from two different files, and which one arrives first is not
 	// something this bot is told.
-	registrations []*qqbotsdk.Registration
+	events *command.Events
 }
 
 // Name implements feature.Feature.
@@ -246,8 +252,7 @@ func (h *handler) Intents() qqbotsdk.Intent {
 
 // Register implements feature.Feature.
 func (h *handler) Register(_ context.Context) error {
-	h.registrations = append(h.registrations,
-		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupJoinRequest, h.onJoinRequest))
+	h.events.On(qqbotsdk.EventGroupJoinRequest, h.onJoinRequest)
 	return nil
 }
 
@@ -257,10 +262,7 @@ func (h *handler) Register(_ context.Context) error {
 // it is the only one answering. It may run after a Register that failed or never
 // happened, so it tolerates having nothing to give back.
 func (h *handler) Close(context.Context) error {
-	for _, registration := range h.registrations {
-		registration.Cancel()
-	}
-	h.registrations = nil
+	h.events.Stop()
 	return nil
 }
 

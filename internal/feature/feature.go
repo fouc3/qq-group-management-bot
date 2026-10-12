@@ -66,6 +66,14 @@ type Deps struct {
 	// button's data to say whose it is. Build hands one over, and a feature built
 	// without it -- which is what a test builds -- gets one of its own.
 	Buttons *command.Buttons
+	// Events is where the feature declares the handlers it answers.
+	//
+	// One per instance, which is why the app makes a new one for every build: what a
+	// stopped instance declared has to be given back when it stops, and a shared record
+	// would give one feature's Stop the power to take another feature's handlers with
+	// it. A feature built without one -- which is what a test builds -- gets one of its
+	// own, the same way it does for buttons.
+	Events *command.Events
 	// Mutes is where a feature writes down the mutes it applied, and where the
 	// feature that lifts somebody else's mute reads them.
 	//

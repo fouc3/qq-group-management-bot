@@ -239,6 +239,10 @@ func (p *parts) build(name string, section yaml.Node) (*part, error) {
 	}
 	deps := p.deps
 	deps.Logger = p.deps.Logger.With("feature", name)
+	// A record of the handlers this instance declares, made per build rather than shared
+	// the way the button registry is: it is given back when the instance stops, and a
+	// shared one would let this feature's Stop take another feature's handlers with it.
+	deps.Events = command.NewEvents(deps.Client)
 	instance, err := factory(section, deps)
 	if err != nil {
 		return nil, fmt.Errorf("feature %s: %w", name, err)

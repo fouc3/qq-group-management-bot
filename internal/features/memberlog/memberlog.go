@@ -20,6 +20,7 @@ import (
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -64,7 +65,7 @@ type handler struct {
 	// exactly that -- and an instance that kept its handlers would go on answering
 	// every event its replacement already answers, with the configuration it was
 	// built from and has now been superseded for.
-	registrations []*qqbotsdk.Registration
+	events *command.Events
 }
 
 // New builds the feature from its configuration section.
@@ -73,7 +74,11 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	if err := section.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("reading the %s section: %w", Name, err)
 	}
-	return &handler{deps: deps, names: map[string]string{}}, nil
+	return &handler{
+		deps:   deps,
+		names:  map[string]string{},
+		events: command.EventsOrOwn(deps.Events, deps.Client),
+	}, nil
 }
 
 // Name implements feature.Feature.
@@ -101,9 +106,8 @@ func (h *handler) Register(_ context.Context) error {
 		}
 	}
 
-	h.registrations = append(h.registrations,
-		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberAdd, h.onJoin),
-		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberRemove, h.onLeave))
+	h.events.On(qqbotsdk.EventGroupMemberAdd, h.onJoin)
+	h.events.On(qqbotsdk.EventGroupMemberRemove, h.onLeave)
 	h.deps.Logger.Info("members coming and going are being recorded",
 		"groups", len(h.deps.Groups))
 	return nil
@@ -115,10 +119,7 @@ func (h *handler) Register(_ context.Context) error {
 // it is the only one answering. It may run after a Register that failed or never
 // happened, so it tolerates having nothing to give back.
 func (h *handler) Close(context.Context) error {
-	for _, registration := range h.registrations {
-		registration.Cancel()
-	}
-	h.registrations = nil
+	h.events.Stop()
 	return nil
 }
 

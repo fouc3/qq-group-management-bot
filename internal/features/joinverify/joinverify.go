@@ -492,6 +492,7 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		cfg:       cfg,
 		deps:      deps,
 		buttons:   command.ButtonsOrOwn(deps.Buttons),
+		events:    command.EventsOrOwn(deps.Events, deps.Client),
 		byToken:   map[string]*pending{},
 		byMember:  map[string]*pending{},
 		stateFile: cfg.StateFile,
@@ -586,10 +587,12 @@ type verifier struct {
 	// again while the bot runs.
 	buttons *command.Buttons
 
-	registrations []*qqbotsdk.Registration
-	stopping      chan struct{}
-	stopped       chan struct{}
-	closeOnce     sync.Once
+	// events is where this instance declares the handlers it answers, and what gives
+	// them back in Close.
+	events    *command.Events
+	stopping  chan struct{}
+	stopped   chan struct{}
+	closeOnce sync.Once
 }
 
 // SetAdminDirectory implements feature.AdminAware.
@@ -617,24 +620,20 @@ func (v *verifier) Intents() qqbotsdk.Intent {
 
 // Register implements feature.Feature.
 func (v *verifier) Register(_ context.Context) error {
-	v.registrations = append(v.registrations,
-		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberAdd, v.onMemberAdd),
-		// A held member's messages are watched in both modes, for two different
-		// reasons. Under the pseudo-mute they are how the hold is applied at
-		// all: nothing else stops them talking. Under a real mute they only
-		// close the gap between the join and the mute landing, which the
-		// platform does not make instant. Both event types are registered
-		// because which one carries a group message depends on the group's
-		// receive setting, not on the message.
-		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, v.onHeldMemberMessage),
-		v.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, v.onHeldMemberMessage),
-	)
+	v.events.On(qqbotsdk.EventGroupMemberAdd, v.onMemberAdd)
+	// A held member's messages are watched in both modes, for two different
+	// reasons. Under the pseudo-mute they are how the hold is applied at
+	// all: nothing else stops them talking. Under a real mute they only
+	// close the gap between the join and the mute landing, which the
+	// platform does not make instant. Both event types, because which one
+	// carries a group message is the group's receive setting's business.
+	v.events.OnGroup(v.onHeldMemberMessage)
 	// The verification button is claimed by the namespace its data carries rather
 	// than looked for in every press. A press arrives with nothing but its
 	// button's data to say whose it is, so the registry is what settles that once
 	// instead of every feature deciding for itself.
 	//
-	// The dispatcher it declares is deliberately not in v.registrations: it is
+	// The dispatcher it declares is deliberately not in v.events: it is
 	// shared with the other features that claim buttons, so cancelling it here
 	// would take their presses with it. What Close gives back instead is the
 	// claim itself, which is what lets this feature be built again while the bot
@@ -734,10 +733,7 @@ func (v *verifier) eachSettings(report func(label string, settings Settings)) {
 // was still sweeping would have two of them acting on the same holds. The waiting
 // is what makes this feature rebuildable rather than merely stoppable.
 func (v *verifier) Close(_ context.Context) error {
-	for _, registration := range v.registrations {
-		registration.Cancel()
-	}
-	v.registrations = nil
+	v.events.Stop()
 	v.buttons.Release(Name)
 	v.stopPart()
 	v.closeOnce.Do(func() { close(v.stopping) })

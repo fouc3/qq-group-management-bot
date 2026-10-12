@@ -54,7 +54,7 @@ func dispatch(t *testing.T, client *qqbotsdk.Client, body string) {
 func TestAMemberBeingHeldBackIsAnsweredNothing(t *testing.T) {
 	client := testClient(t)
 	var answered int
-	router := NewRouter("commands", nil)
+	router := NewRouter("commands", nil, nil)
 	router.SetHeldBack(func(_ string, memberOpenID string) bool {
 		return memberOpenID == "MEMBER-HELD"
 	})
@@ -82,7 +82,7 @@ func TestAMemberBeingHeldBackIsAnsweredNothing(t *testing.T) {
 func TestNothingHeldBackAnswersAsBefore(t *testing.T) {
 	client := testClient(t)
 	var answered int
-	router := NewRouter("commands", nil)
+	router := NewRouter("commands", nil, nil)
 	if err := router.Register(client, Handlers{Group: counting(&answered)}); err != nil {
 		t.Fatalf("registering: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestNothingHeldBackAnswersAsBefore(t *testing.T) {
 func TestAMessageWithNoSenderStillReachesTheHandler(t *testing.T) {
 	client := testClient(t)
 	var answered int
-	router := NewRouter("commands", nil)
+	router := NewRouter("commands", nil, nil)
 	router.SetHeldBack(func(string, string) bool { return true })
 	if err := router.Register(client, Handlers{Group: counting(&answered)}); err != nil {
 		t.Fatalf("registering: %v", err)
@@ -121,8 +121,8 @@ func TestAMessageWithNoSenderStillReachesTheHandler(t *testing.T) {
 func TestStopStopsThisFeatureAnswering(t *testing.T) {
 	client := testClient(t)
 	var first, second int
-	firstRouter := NewRouter("first", nil)
-	secondRouter := NewRouter("second", nil)
+	firstRouter := NewRouter("first", nil, nil)
+	secondRouter := NewRouter("second", nil, nil)
 	for _, router := range []*Router{firstRouter, secondRouter} {
 		var counter *int
 		if router == firstRouter {
@@ -156,7 +156,7 @@ func TestStopStopsThisFeatureAnswering(t *testing.T) {
 func TestStopTwiceIsSafe(t *testing.T) {
 	client := testClient(t)
 	var seen int
-	router := NewRouter("one", nil)
+	router := NewRouter("one", nil, nil)
 	if err := router.Register(client, Handlers{Group: counting(&seen)}); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestStopTwiceIsSafe(t *testing.T) {
 func TestStopGivesUpTheButtonsWhenNothingTakesOver(t *testing.T) {
 	client := testClient(t)
 	var seen []Press
-	router := NewRouter("admin_commands", NewButtons())
+	router := NewRouter("admin_commands", NewButtons(), nil)
 	claims := []ButtonClaim{{Namespace: "qgb-receipt-detail:", Scenes: InGroup,
 		Handle: recorder(&seen)}}
 	if err := router.Register(client, Handlers{Buttons: claims}); err != nil {
@@ -202,7 +202,7 @@ func TestStopGivesTheButtonsBack(t *testing.T) {
 	buttons := NewButtons()
 	var first, second []Press
 
-	firstRouter := NewRouter("admin_commands", buttons)
+	firstRouter := NewRouter("admin_commands", buttons, nil)
 	claims := []ButtonClaim{{Namespace: "qgb-receipt-detail:", Scenes: InGroup,
 		Handle: recorder(&first)}}
 	if err := firstRouter.Register(client, Handlers{Buttons: claims}); err != nil {
@@ -217,7 +217,7 @@ func TestStopGivesTheButtonsBack(t *testing.T) {
 
 	// The same feature, built again, on the same connection: the namespace is
 	// free, and the dispatcher is not declared a second time.
-	secondRouter := NewRouter("admin_commands", buttons)
+	secondRouter := NewRouter("admin_commands", buttons, nil)
 	claims = []ButtonClaim{{Namespace: "qgb-receipt-detail:", Scenes: InGroup,
 		Handle: recorder(&second)}}
 	if err := secondRouter.Register(client, Handlers{Buttons: claims}); err != nil {

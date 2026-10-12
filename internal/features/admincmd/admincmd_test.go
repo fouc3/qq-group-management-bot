@@ -310,8 +310,22 @@ groups:
 	}
 }
 
-// deliver hands one group message event to the dispatcher.
+// deliver hands one group message event to the dispatcher, under an id of its own.
 func (h *harness) deliver(eventType, content, sender, groupOpenID string, mentions ...string) {
+	h.t.Helper()
+	h.mu.Lock()
+	h.sent++
+	messageID := "MSG-" + strconv.Itoa(h.sent)
+	h.mu.Unlock()
+	h.deliverAs(messageID, eventType, content, sender, groupOpenID, mentions...)
+}
+
+// deliverAs hands over one event carrying the message id given, so that a test can send
+// the same message twice -- which is what a group set to receive everything does, as one
+// event of each type and in an order the bot is not told.
+func (h *harness) deliverAs(messageID, eventType, content, sender, groupOpenID string,
+	mentions ...string) {
+	h.t.Helper()
 	mentionJSON := "[]"
 	if len(mentions) > 0 {
 		parts := make([]string, 0, len(mentions))
@@ -320,10 +334,6 @@ func (h *harness) deliver(eventType, content, sender, groupOpenID string, mentio
 		}
 		mentionJSON = "[" + strings.Join(parts, ",") + "]"
 	}
-	h.mu.Lock()
-	h.sent++
-	messageID := "MSG-" + strconv.Itoa(h.sent)
-	h.mu.Unlock()
 	body := `{
 		"id": "` + messageID + `",
 		"author": {"member_openid": "` + sender + `"},

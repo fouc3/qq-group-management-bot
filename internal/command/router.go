@@ -57,11 +57,13 @@ type Router struct {
 	// them.
 	buttons *Buttons
 
-	// mu guards registrations, which is what makes Stop possible.
+	// events is where the handlers below are declared, and the record that lets them be
+	// given back. One per instance of one feature, which is why it is handed over
+	// rather than shared the way the button registry is.
+	events *Events
+
+	// mu guards heldBack, which the wiring replaces while the bot is already answering.
 	mu sync.Mutex
-	// registrations are the handlers this router declared, kept so that a feature
-	// that stops stops answering.
-	registrations []*qqbotsdk.Registration
 	// heldBack is asked before a group message reaches the handlers above, and a
 	// member it names for is one whose message is not answered at all. Nil when
 	// nothing holds anybody back, which is every bot without the verification.
@@ -73,12 +75,15 @@ type Router struct {
 }
 
 // NewRouter returns a router for one feature, claiming its buttons in the
-// registry given.
+// registry given and declaring its handlers in the event record given.
 //
 // A nil registry -- which is what a feature built without a bot is handed -- gets
-// one of its own, for the reason ButtonsOrOwn gives.
-func NewRouter(owner string, buttons *Buttons) *Router {
-	return &Router{Seen: NewSeen(), owner: owner, buttons: ButtonsOrOwn(buttons)}
+// one of its own, for the reason ButtonsOrOwn gives. A nil record is made from the
+// connection when Register is called, for the same reason.
+func NewRouter(owner string, buttons *Buttons, events *Events) *Router {
+	return &Router{
+		Seen: NewSeen(), owner: owner, buttons: ButtonsOrOwn(buttons), events: events,
+	}
 }
 
 // SetHeldBack hands over the question asked before a group message is answered.
@@ -113,24 +118,20 @@ func (r *Router) Register(client *qqbotsdk.Client, handlers Handlers) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.events == nil {
+		// A router built without a record -- which is what a test builds -- makes one
+		// from the connection it is registering on, the same way the button registry
+		// falls back to one of its own.
+		r.events = NewEvents(client)
+	}
 	if handlers.Group != nil {
-		// Both group event types are always read, and whether a command had to
-		// mention the bot is enforced on the message itself instead.
-		//
-		// Which event carries a mention depends on the group's receive setting,
-		// not on the command: a group set to receive everything delivers a
-		// message that mentions the bot as GROUP_MESSAGE_CREATE, as production
-		// showed, while a mention-only group delivers the same message as
-		// GROUP_AT_MESSAGE_CREATE. Registering only one of them made the bot
-		// unable to see commands at all in one of the two modes.
-		group := r.unlessHeldBack(handlers.Group)
-		r.registrations = append(r.registrations,
-			client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, group),
-			client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, group))
+		// Both group event types are always read, and the reason is on
+		// Events.OnGroup: which of the two carries a mention is the group's receive
+		// setting's business, not the command's.
+		r.events.OnGroup(r.unlessHeldBack(handlers.Group))
 	}
 	if handlers.Private != nil {
-		r.registrations = append(r.registrations,
-			client.RegisterFunc(qqbotsdk.EventC2CMessageCreate, handlers.Private))
+		r.events.OnPrivate(handlers.Private)
 	}
 	if len(handlers.Buttons) > 0 {
 		// One dispatcher for the bot, however many features claim a part of it.
@@ -207,12 +208,11 @@ func senderOf(event *qqbotsdk.Event) (groupOpenID, memberOpenID string, readable
 // failed or never happened.
 func (r *Router) Stop() {
 	r.mu.Lock()
-	registrations := r.registrations
-	r.registrations = nil
+	events := r.events
 	r.mu.Unlock()
 
-	for _, registration := range registrations {
-		registration.Cancel()
+	if events != nil {
+		events.Stop()
 	}
 	r.buttons.Release(r.owner)
 }

@@ -13,6 +13,7 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 	"gopkg.in/yaml.v3"
 
+	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/imagecache"
 )
@@ -712,14 +713,14 @@ type handler struct {
 	// ones in flight so that Close can wait for them to notice the cancellation.
 	judging    chan struct{}
 	judgingOut sync.WaitGroup
-	// registrations are what this instance declared on the connection, kept so that
-	// Close can take them back.
+	// events is where this instance declares the handlers it answers, and what gives
+	// them back in Close.
 	//
 	// A feature is built again while the bot serves -- a configuration change does
 	// exactly that -- and an instance that kept its handlers would write down every
 	// message its replacement already wrote, against a cache that Close has already
 	// closed.
-	registrations []*qqbotsdk.Registration
+	events *command.Events
 }
 
 // New builds the feature from its configuration section.
@@ -732,8 +733,9 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		return nil, err
 	}
 	instance := &handler{
-		cfg:  cfg,
-		deps: deps,
+		cfg:    cfg,
+		deps:   deps,
+		events: command.EventsOrOwn(deps.Events, deps.Client),
 		cache: NewCache(deps.Redis, time.Duration(cfg.CacheHours)*time.Hour,
 			deps.Logger),
 		pictures: newPictureCache(cfg, deps.Logger),
@@ -930,9 +932,7 @@ func (h *handler) Register(ctx context.Context) error {
 	// Both events, so a message is cached whichever way the group delivers it.
 	// A message that arrives as both is written twice with the same payload,
 	// which the cache treats as one message.
-	h.registrations = append(h.registrations,
-		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, h.onMessage),
-		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, h.onMessage))
+	h.events.OnGroup(h.onMessage)
 
 	// Once at startup, so that a bot which was down for longer than the retention
 	// does not keep its pictures until the next one arrives in a group that may
@@ -986,10 +986,7 @@ func imageValue64(value *int64) any {
 // configuration it was made under is gone. Cancelling ends the model call, which
 // is where the seconds are, so the wait is short rather than the model's timeout.
 func (h *handler) Close(context.Context) error {
-	for _, registration := range h.registrations {
-		registration.Cancel()
-	}
-	h.registrations = nil
+	h.events.Stop()
 	h.stopPart()
 	h.judgingOut.Wait()
 	return h.cache.Close()

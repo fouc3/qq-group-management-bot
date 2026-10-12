@@ -80,11 +80,12 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		return nil, fmt.Errorf("reading the %s section: %w", Name, err)
 	}
 	h := &handler{
-		cfg:    cfg,
-		deps:   deps,
-		open:   map[string]*session{},
-		pages:  map[string]*pager{},
-		router: command.NewRouter(Name, command.ButtonsOrOwn(deps.Buttons)),
+		cfg:   cfg,
+		deps:  deps,
+		open:  map[string]*session{},
+		pages: map[string]*pager{},
+		router: command.NewRouter(Name, command.ButtonsOrOwn(deps.Buttons),
+			command.EventsOrOwn(deps.Events, deps.Client)),
 	}
 	// Work that outlives the event that asked for it runs under this: a card sent
 	// from a press, a broadcast posted after the card is gone. Without it, an
