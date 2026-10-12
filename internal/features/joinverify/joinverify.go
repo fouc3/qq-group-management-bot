@@ -489,15 +489,14 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		return nil, err
 	}
 	instance := &verifier{
-		cfg:       cfg,
-		deps:      deps,
-		buttons:   command.ButtonsOrOwn(deps.Buttons),
-		events:    command.EventsOrOwn(deps.Events, deps.Client),
-		byToken:   map[string]*pending{},
-		byMember:  map[string]*pending{},
-		stateFile: cfg.StateFile,
-		stopping:  make(chan struct{}),
-		stopped:   make(chan struct{}),
+		cfg:      cfg,
+		deps:     deps,
+		buttons:  command.ButtonsOrOwn(deps.Buttons),
+		events:   command.EventsOrOwn(deps.Events, deps.Client),
+		byToken:  map[string]*pending{},
+		byMember: map[string]*pending{},
+		stopping: make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
 	if deps.Store != nil {
 		instance.pending = deps.Store.Pending()
@@ -559,10 +558,6 @@ type verifier struct {
 	// admins is shared by the app, so an administrator pressing somebody
 	// else's button can be told apart from a stranger pressing it.
 	admins feature.AdminDirectory
-
-	// stateFile is where the pending list is written, empty when persistence is
-	// off.
-	stateFile string
 
 	// pending and meta are the data layer. They are narrow slices of it rather
 	// than the whole store: this feature keeps the members it is holding, and
@@ -1505,7 +1500,6 @@ func (v *verifier) unmute(ctx context.Context, groupOpenID, memberOpenID string,
 	return nil
 }
 
-// newMemberMention renders the at-mention of the member who just joined.
 // mentionTag renders the at-mention of a member who just joined, or nothing
 // when the group asks for no mention.
 func mentionTag(memberOpenID string, settings Settings) string {
