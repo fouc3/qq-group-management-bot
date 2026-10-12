@@ -400,43 +400,109 @@ const (
 	receiptReasoningLimit = 3000
 )
 
-// oneBlock lays a piece of free text out under a heading.
+// oneBlock lays a piece of free text out as a block of its own.
 //
 // A message that is one line goes into the line that introduces it -- "· 已撤回：
 // 试试" -- because indenting it four spaces onto a line of its own reads like a
-// stray fragment. One that has newlines of its own is laid out as a block: a price
-// list is unreadable without them.
+// stray fragment. It is only a line because it has no newlines of its own: nothing
+// else about it is safe to put on a receipt's own line, which is why the
+// sanitising is oneLine's and not this function's.
 //
-// Either way the text is inert. It was written by a member, so nothing in it may
-// look like part of this receipt's own layout, and a line pretending to be another
-// field must not read as one.
+// Anything longer goes into a fence, and the whole of it: see textFence for what
+// the indented version it replaced got wrong.
 func oneBlock(text string, limit int) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return "（空）"
 	}
-	lines := strings.Split(trimmed, "\n")
-	if len(lines) == 1 {
-		return cutRunes(strings.TrimRight(lines[0], "\r"), limit)
+	if !strings.Contains(trimmed, "\n") {
+		return cutRunes(oneLineText(trimmed), limit)
 	}
-	// The first line stays on the line that introduces it and only the rest is
-	// indented, so that a block reads as one entry rather than as a fragment
-	// floating under a colon.
-	var out strings.Builder
-	out.WriteString(strings.TrimRight(lines[0], "\r"))
-	for _, line := range lines[1:] {
-		out.WriteString("\n    " + strings.TrimRight(line, "\r"))
+	return textFence(trimmed, limit)
+}
+
+// oneLineText is a message's own line of text, with nothing in it that this
+// receipt's layout would read as its own.
+//
+// A member wrote it, so anything markdown-shaped in it has to read as words
+// rather than as part of the receipt: a "**" would bold the rest of the line, a
+// "<qqbot-at-user .../>" would mention somebody, and a "</messages>" would look
+// like the end of a data block. The angle brackets go for the same reason the
+// judge's own block takes them out of a message, and the markdown characters are
+// escaped -- once each would not be enough, because "**" is two.
+func oneLineText(text string) string {
+	replaced := strings.NewReplacer("<", "‹", ">", "›")
+	return escapeReceiptMarkdown(replaced.Replace(strings.ReplaceAll(text, "\r", " ")))
+}
+
+// escapeReceiptMarkdown escapes every character the platform's markdown reads.
+//
+// The set is the broadcast card's, which is the other place this bot writes text
+// a member gave it under its own name.
+func escapeReceiptMarkdown(text string) string {
+	const special = "\\`*_{}[]()#+-.!>~|"
+	var escaped strings.Builder
+	for _, letter := range text {
+		if strings.ContainsRune(special, letter) {
+			escaped.WriteRune('\\')
+		}
+		escaped.WriteRune(letter)
 	}
-	return cutRunes(out.String(), limit)
+	return escaped.String()
+}
+
+// textFence puts free text inside a fenced block, all of it, with its own line
+// endings and its own blank lines.
+//
+// The block used to be four spaces of indentation on every line after the first,
+// and that is wrong in three ways that all show up in a real chain of thought:
+//
+//   - the first line stayed with the label above it, "**思考过程**：" and all, so
+//     the model's own opening sentence was rendered as the receipt's prose
+//     rather than as the model's text -- the block visibly started on the second
+//     line;
+//   - an indented code block cannot hold a blank line. A chain of thought is
+//     prose with paragraphs in it, and the first blank line ended the block and
+//     started a new paragraph, so the rest of the text was not in a block at all;
+//   - four spaces of indentation is one markdown-version's idea of a code block,
+//     and this platform's markdown is a subset -- the fence is the one form that
+//     survives being read by anything.
+//
+// The fence has to be longer than any run of backticks already in the text, or
+// the text would end the block itself. A model that has quoted markdown back at
+// us is exactly the case that does this.
+func textFence(text string, limit int) string {
+	body := cutRunes(text, limit)
+	fence := fenceFor(body)
+	return fence + "\n" + body + "\n" + fence
+}
+
+// fenceFor is a run of backticks no line of the text can close.
+func fenceFor(text string) string {
+	longest, run := 0, 0
+	for _, letter := range text {
+		if letter == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	return strings.Repeat("`", longest+1)
 }
 
 // cutRunes truncates on a rune boundary and says that it did.
+//
+// The mark is a line of its own, with no indentation of its own: it goes inside a
+// fence as often as not now, and four leading spaces in there are just four spaces.
 func cutRunes(text string, limit int) string {
 	runes := []rune(text)
 	if limit <= 0 || len(runes) <= limit {
 		return text
 	}
-	return string(runes[:limit]) + "\n    ……（已截断）"
+	return string(runes[:limit]) + "\n……（已截断）"
 }
 
 // groupNumber names a group by the number its members know it by.
