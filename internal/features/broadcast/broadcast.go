@@ -45,9 +45,11 @@ type Beta struct {
 	Enabled bool `yaml:"enabled"`
 	// Whitelist are the members who may use it while the gate is on, by openid.
 	//
-	// Somebody is named twice when they are wanted in both places, because a member's
-	// openid in a group is not the openid they have in a single chat: what a group
-	// carries and what the private panel carries are different values.
+	// One entry serves both scenes. It was believed that a member's openid in a group is
+	// not the openid they have in a single chat, so that somebody wanted in both places
+	// had to be named twice; measured on this application, one person carries one value in
+	// both, and a single chat finds the groups they administer from the id it carries --
+	// which is what the audit leans on, and says so itself.
 	Whitelist []string `yaml:"whitelist"`
 }
 
