@@ -263,15 +263,20 @@ func TestTheReportCommandIsOnlyOfferedWhenItWorks(t *testing.T) {
 		return false
 	}
 
-	// A cache with no judge: the command exists and would answer "not configured",
-	// which is exactly what the menu should not advertise.
-	without := &handler{cfg: Config{Prefix: "/"}}
-	if offered(without) {
+	// Built through New rather than assembled by hand: the menu is read out of the table
+	// New builds, and a handler that skipped New has no table to read.
+	//
+	// A built feature with no judge: the command exists and would answer "not
+	// configured", which is exactly what the menu should not advertise.
+	without := newHarness(t, baseSection)
+	without.handler.moderation = nil
+	if offered(without.handler) {
 		t.Error("the menu offers the report command with no judge behind it")
 	}
 
-	with := &handler{cfg: Config{Prefix: "/"}, moderation: &stubJudge{}}
-	if !offered(with) {
+	with := newHarness(t, baseSection)
+	with.handler.moderation = &stubJudge{}
+	if !offered(with.handler) {
 		t.Error("the menu does not offer the report command although a judge is present")
 	}
 }

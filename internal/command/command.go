@@ -35,6 +35,12 @@ const prefixPlaceholder = "{prefix}"
 // It is the command's own property rather than a check somewhere along the path
 // that dispatches it. The check that runs is derived from the table, so what a
 // command is restricted to and what the table says about it cannot come apart.
+//
+// It governs commands, and a button is not a command: a button outlives the message it
+// came from, and what it is allowed to show need not be what the command that posted it
+// was open to. That is the case for the receipt's details, which any member may ask for
+// and only an administrator may read -- so the claim that posts that button says so
+// beside itself, and the press is checked again when it arrives.
 type Audience uint8
 
 const (

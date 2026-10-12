@@ -170,31 +170,32 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 	h := &handler{cfg: cfg, deps: deps, router: command.NewRouter(Name, deps.Buttons,
 		command.EventsOrOwn(deps.Events, deps.Client))}
 	h.part, h.stopPart = context.WithCancel(context.Background())
-	// The table is validated here, so that a word invoking two commands stops the
-	// bot at startup rather than leaving one of them answering nothing at all.
-	if _, err := command.NewCatalog(h.commandDefs()); err != nil {
+	// The table is built here and kept, so that a word invoking two commands stops
+	// the bot at startup rather than leaving one of them answering nothing at all --
+	// and so that the table has one origin. The commands other features offer are not
+	// known yet: SetCommandSources builds the table again with them, through the same
+	// call this one makes.
+	table, err := command.NewCatalog(h.commandDefs())
+	if err != nil {
 		return nil, err
 	}
+	h.table = table
 	return h, nil
 }
 
 // commands is the table this feature answers.
 //
-// Built on first use rather than in New, because the sources that contribute to it
-// are wired after the feature exists -- and rebuilt rather than kept when they
-// change, since a source that was built again hands over new runners.
+// Built in New and built again by SetCommandSources, which is the only other place it
+// can come from: the commands other features offer are wired after this feature exists,
+// and a source built again hands over new runners.
+//
+// Built here on first use it used to be, with a panic for the case New had not already
+// refused. That case cannot arise -- New builds and validates the local commands, and
+// the only way to add to them is SetCommandSources, which reports the same mistake as an
+// error -- so what the panic did was turn a mistake that has an error path into a crash.
 func (h *handler) commands() *command.Catalog {
 	h.tableMu.Lock()
 	defer h.tableMu.Unlock()
-	if h.table == nil {
-		table, err := command.NewCatalog(append(h.commandDefs(), h.tableFrom...))
-		if err != nil {
-			// New refuses this before the table is ever reached this way, so
-			// there is nobody left to report the mistake to.
-			panic("admincmd: " + err.Error())
-		}
-		h.table = table
-	}
 	return h.table
 }
 
@@ -602,10 +603,15 @@ type viewer struct {
 }
 
 // viewerOf reports who a member is to a group.
+//
+// Whether they are an administrator is asked of IsAdmin rather than worked out again
+// here. The button path in receipt.go asks that same question directly, and one rule
+// written twice is two answers waiting to differ -- the audiences below are read off the
+// table precisely so that the command path has no second copy of them.
 func (h *handler) viewerOf(groupOpenID, memberOpenID string) viewer {
 	group, known := h.cfg.Groups[groupOpenID]
 	return viewer{
-		isAdmin:   known && contains(group.Admins, memberOpenID),
+		isAdmin:   h.IsAdmin(groupOpenID, memberOpenID),
 		settingUp: !known || len(group.Admins) == 0,
 	}
 }
