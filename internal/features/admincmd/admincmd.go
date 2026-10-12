@@ -394,7 +394,6 @@ func (h *handler) SetVerifier(verifier feature.Verifier) {
 	h.router.SetHeldBack(verifier.IsPseudoMuted)
 }
 
-// IsAdmin implements feature.AdminDirectory.
 // LooksLikeACommand implements feature.Commands.
 //
 // It answers for the table as a whole, which is what a feature waiting for free
@@ -405,6 +404,13 @@ func (h *handler) LooksLikeACommand(content string) bool {
 	return ok
 }
 
+// IsAdmin implements feature.AdminDirectory.
+//
+// It reports whether a member is on this group's configured administrator list, which is
+// this bot's own rather than QQ's: being an administrator in QQ grants nothing here. The
+// two are not the same list, which is why the button path in receipt.go asks this again
+// when a press arrives -- the platform greys a button out by its own list, and that list
+// is not one this application can read (40012010, measured).
 func (h *handler) IsAdmin(groupOpenID, memberOpenID string) bool {
 	group, known := h.cfg.Groups[groupOpenID]
 	return known && contains(group.Admins, memberOpenID)
