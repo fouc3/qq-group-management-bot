@@ -228,6 +228,22 @@ type Config struct {
 // "written as the zero value": a group that only turns the removal on has to
 // keep the shared prompt, labels and timings.
 type Override struct {
+	// Enabled is this group's own switch: it turns the verification off for one
+	// group while it goes on holding people elsewhere.
+	//
+	// It is a switch rather than a rule -- the fields below say how somebody is
+	// held, this says whether they are at all -- and the section's own enabled
+	// stays the master: a group cannot verify in a deployment that does not.
+	//
+	// It is deliberately not retroactive. A hold already written down carries
+	// the settings it was taken under, because those settings are what its mute
+	// and its button were given, so switching a group off stops the next join
+	// rather than releasing the members already held. What it also does not do
+	// is take the administrator's /重新验证 away: this decides what the group
+	// does by itself, and that command is one member an administrator asked
+	// about by name.
+	Enabled *bool `yaml:"enabled"`
+
 	MuteMinutes      *int      `yaml:"mute_minutes"`
 	MuteMode         *string   `yaml:"mute_mode"`
 	DeadlineHours    *int      `yaml:"deadline_hours"`
@@ -249,6 +265,14 @@ type Override struct {
 // Settings is one group's settings, after the defaults and that group's
 // overrides have been merged.
 type Settings struct {
+	// Enabled reports whether this group holds new members at all. It is the
+	// resolved form of the switch: on unless the group turns it off.
+	//
+	// A hold that is already written down keeps the settings it was taken
+	// under, so this field says nothing about a member who is already waiting:
+	// it decides what happens to the next join, not to the last one.
+	Enabled bool
+
 	MuteMinutes      int
 	MuteMode         string
 	DeadlineHours    int
@@ -270,6 +294,9 @@ type Settings struct {
 // defaults returns the settings every group starts from.
 func (c *Config) defaults() Settings {
 	return Settings{
+		// A group the file does not name verifies, which is what every
+		// deployment did before a group could say otherwise.
+		Enabled:          true,
 		MuteMinutes:      c.MuteMinutes,
 		MuteMode:         c.MuteMode,
 		DeadlineHours:    c.DeadlineHours,
@@ -295,6 +322,9 @@ func (c *Config) settingsFor(groupOpenID string) Settings {
 	override, known := c.Groups[groupOpenID]
 	if !known {
 		return settings
+	}
+	if override.Enabled != nil {
+		settings.Enabled = *override.Enabled
 	}
 	if override.MuteMinutes != nil {
 		settings.MuteMinutes = *override.MuteMinutes
@@ -384,6 +414,14 @@ func (s Settings) pseudoHolds() bool {
 // It is what the declared intents are read from: a take-back is driven by the
 // message events, so a bot whose groups are held this way has to subscribe to
 // them itself instead of relying on another feature happening to want them.
+//
+// A group whose own switch is off is counted all the same, which is the one
+// place the switch is not asked about. A hold that is already written down
+// keeps the settings it was taken under, so a group that stopped verifying a
+// minute ago may still be holding somebody under a take-back -- and a
+// subscription that was dropped because nobody new would be held there would
+// leave that member talking freely with the bot believing they are held. The
+// cost of the other mistake is a subscription nobody uses, which is nothing.
 func (c *Config) anyPseudoHolds() bool {
 	if c.defaults().pseudoHolds() {
 		return true
@@ -700,6 +738,16 @@ func (v *verifier) Register(_ context.Context) error {
 	go v.sweep()
 	// One line per group, because the rules are per group now.
 	v.eachSettings(func(label string, settings Settings) {
+		if !settings.Enabled {
+			// Said out loud rather than left out: a group missing from this log
+			// reads as a group nobody wrote down, and the whole point of the
+			// switch is that somebody did write one down and asked for the
+			// opposite. What that leaves running here -- members held before
+			// the switch went off -- is named by the restore line instead.
+			v.deps.Logger.Info("verification is switched off for this group, so "+
+				"nothing new is held here", "group", label)
+			return
+		}
 		v.deps.Logger.Info("holding new members for verification",
 			"group", label,
 			"mute_mode", settings.MuteMode,
@@ -721,6 +769,11 @@ func (v *verifier) Register(_ context.Context) error {
 func (v *verifier) warnAboutRemoval() {
 	v.eachSettings(func(label string, settings Settings) {
 		switch {
+		case !settings.Enabled:
+			// A group that holds nobody is not on its way to removing anybody,
+			// so the warning would describe an action that cannot happen here
+			// -- which is how a real warning gets read as noise and skipped.
+			return
 		case settings.OnDeadline != OnDeadlineRemove:
 			return
 		case settings.DryRun:
@@ -751,6 +804,12 @@ func (v *verifier) warnAboutRemoval() {
 func (v *verifier) warnAboutPseudoHold() {
 	v.eachSettings(func(label string, settings Settings) {
 		if !settings.pseudoHolds() {
+			return
+		}
+		if !settings.Enabled {
+			// Nobody new is being held here, so there is no take-back to
+			// explain. A hold that group already had keeps the settings it was
+			// taken under and is reported by the restore path instead.
 			return
 		}
 		v.deps.Logger.Info("holding members without muting them: a message from "+
@@ -1260,6 +1319,13 @@ func (v *verifier) Resend(ctx context.Context, groupOpenID, memberOpenID string)
 //
 // An earlier entry for the same member is dropped first, so a button from the
 // previous round cannot still release them.
+//
+// The group's own switch is deliberately not consulted here. That switch says
+// what the group does by itself when somebody joins, and this is an
+// administrator naming one member and asking anyway: the command is the more
+// explicit statement of the two, and refusing it would take away the only way
+// to verify somebody in a group that does not verify on its own -- which is
+// exactly what an administrator running it there is asking for.
 func (v *verifier) Reverify(ctx context.Context, groupOpenID, memberOpenID string) error {
 	if existing, found := v.findByMember(groupOpenID, memberOpenID); found {
 		v.forget(existing.token)
@@ -1297,6 +1363,16 @@ func (v *verifier) onMemberAdd(ctx context.Context, event *qqbotsdk.Event) error
 			"group", data.GroupOpenID)
 		return nil
 	}
+	if !v.cfg.settingsFor(data.GroupOpenID).Enabled {
+		// A group whose own switch is off is a configuration and not a
+		// failure, so this is said at debug and not reported: a join there is
+		// the ordinary state of that group, and the member is left alone on
+		// purpose.
+		v.deps.Logger.Debug("a member joined a group whose verification is "+
+			"switched off, so nothing was held",
+			"group", data.GroupOpenID, "member", data.MemberOpenID)
+		return nil
+	}
 	if data.MemberOpenID == "" {
 		// The openid is what both the mute and the button check need, so
 		// without it the feature cannot act at all.
@@ -1306,6 +1382,10 @@ func (v *verifier) onMemberAdd(ctx context.Context, event *qqbotsdk.Event) error
 }
 
 // begin holds one new member and asks them to verify.
+//
+// The group's own switch is asked of the automatic path -- onMemberAdd -- and
+// not here, because this is also where an administrator's /重新验证 ends up:
+// see Reverify for why that one is not held back by the switch.
 func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, joinedAt int64) error {
 	// The settings are resolved once here and carried by the entry, so the
 	// deadline and the button press act on the rules this member was held
