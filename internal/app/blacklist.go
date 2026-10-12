@@ -42,5 +42,6 @@ type barredFromJoining struct {
 // remove somebody, and nothing here says anything about a member who is already
 // in one.
 func (b barredFromJoining) Barred(ctx context.Context, applicant joinrequest.Applicant) (bool, error) {
-	return b.blacklist.Barred(ctx, applicant.MemberOpenID, applicant.UnionOpenID, time.Now())
+	return b.blacklist.Barred(ctx, applicant.GroupOpenID, applicant.MemberOpenID,
+		applicant.UnionOpenID, time.Now())
 }

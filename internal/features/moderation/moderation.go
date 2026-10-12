@@ -684,8 +684,10 @@ type handler struct {
 	// reads it: the list itself is in the data layer, and a query per group message
 	// would make this feature's busiest question its slowest one.
 	watchMu sync.Mutex
-	// watched is the member openids that are marked, each with the moment their
-	// mark ends. A mark that has run out is removed as it is found.
+	// watched is the members that are marked, per group, each with the moment their mark
+	// ends. Both parts make the key because a mark is one group's decision about its own
+	// conversation: the same person can be marked in one group and in good standing in the
+	// next. A mark that has run out is removed as it is found.
 	watched map[string]int64
 
 	// part is cancelled when this feature stops, and the judgements that outlive
@@ -1060,7 +1062,7 @@ func (h *handler) onMessage(ctx context.Context, event *qqbotsdk.Event) error {
 	// of what being on it does. The index is what the window is built around, so a
 	// message the platform gave no index for is one this cannot judge -- which is
 	// the same reason a report about it would have to go by its text.
-	if index == "" || !h.isWatched(data.Author.MemberOpenID) {
+	if index == "" || !h.isWatched(data.GroupOpenID, data.Author.MemberOpenID) {
 		return nil
 	}
 	h.judgeWatcher(data.GroupOpenID, message)

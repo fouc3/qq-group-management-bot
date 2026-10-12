@@ -33,7 +33,7 @@ func TestBarredFindsEitherIdentity(t *testing.T) {
 	}
 	for name, identity := range cases {
 		t.Run(name, func(t *testing.T) {
-			barred, err := opened.Blacklist().Barred(ctx, identity[0], identity[1], now)
+			barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", identity[0], identity[1], now)
 			if err != nil {
 				t.Fatalf("Barred: %v", err)
 			}
@@ -44,7 +44,7 @@ func TestBarredFindsEitherIdentity(t *testing.T) {
 	}
 
 	t.Run("somebody else is not barred", func(t *testing.T) {
-		barred, err := opened.Blacklist().Barred(ctx, "OTHER", "OTHER-UNION", now)
+		barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", "OTHER", "OTHER-UNION", now)
 		if err != nil {
 			t.Fatalf("Barred: %v", err)
 		}
@@ -54,7 +54,7 @@ func TestBarredFindsEitherIdentity(t *testing.T) {
 	})
 
 	t.Run("no identity at all is not barred", func(t *testing.T) {
-		barred, err := opened.Blacklist().Barred(ctx, "", "", now)
+		barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", "", "", now)
 		if err != nil {
 			t.Fatalf("Barred: %v", err)
 		}
@@ -69,7 +69,7 @@ func TestBarredFindsEitherIdentity(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
-		barred, err := opened.Blacklist().Barred(ctx, "", "UNION-2", now)
+		barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", "", "UNION-2", now)
 		if err != nil {
 			t.Fatalf("Barred: %v", err)
 		}
@@ -98,7 +98,7 @@ func TestSeveralEntriesMayNameOnlyAUnionOpenid(t *testing.T) {
 		}
 	}
 
-	entries, err := opened.Blacklist().List(ctx, 10)
+	entries, err := opened.Blacklist().List(ctx, "GROUP-1", 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestAnExpiredEntryStopsBarring(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	barred, err := opened.Blacklist().Barred(ctx, "MEMBER-1", "", now)
+	barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", "MEMBER-1", "", now)
 	if err != nil {
 		t.Fatalf("Barred: %v", err)
 	}
@@ -151,10 +151,10 @@ func TestRemoveTakesTheIdentityAnOperatorHas(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := opened.Blacklist().Remove(ctx, "MEMBER-1"); err != nil {
+	if err := opened.Blacklist().Remove(ctx, "GROUP-1", "MEMBER-1"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	barred, err := opened.Blacklist().Barred(ctx, "MEMBER-1", "", now)
+	barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", "MEMBER-1", "", now)
 	if err != nil {
 		t.Fatalf("Barred: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRemoveTakesTheIdentityAnOperatorHas(t *testing.T) {
 	}
 
 	// An empty key would be a delete by an identity nobody has.
-	if err := opened.Blacklist().Remove(ctx, "  "); err == nil {
+	if err := opened.Blacklist().Remove(ctx, "GROUP-1", "  "); err == nil {
 		t.Error("an empty key must be refused")
 	}
 }
@@ -203,7 +203,7 @@ func TestAVersionOneDatabaseUpgrades(t *testing.T) {
 
 	// The row that was there survives, with its identity intact.
 	now := time.Unix(1000, 0)
-	barred, err := opened.Blacklist().Barred(ctx, "", "UNION-1", now)
+	barred, err := opened.Blacklist().Barred(ctx, "GROUP-1", "", "UNION-1", now)
 	if err != nil {
 		t.Fatalf("Barred: %v", err)
 	}

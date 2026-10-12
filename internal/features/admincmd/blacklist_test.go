@@ -32,7 +32,7 @@ func (s *stubBlacklist) Add(_ context.Context, entry store.Barred) error {
 	return nil
 }
 
-func (s *stubBlacklist) Remove(_ context.Context, key string) error {
+func (s *stubBlacklist) Remove(_ context.Context, _ string, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fail {
@@ -42,7 +42,7 @@ func (s *stubBlacklist) Remove(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *stubBlacklist) List(_ context.Context, _ int) ([]store.Barred, error) {
+func (s *stubBlacklist) List(_ context.Context, _ string, _ int) ([]store.Barred, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fail {

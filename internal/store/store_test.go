@@ -60,12 +60,12 @@ func reset(t *testing.T, opened Store) {
 			t.Fatalf("clearing pending: %v", err)
 		}
 	}
-	barred, err := opened.Blacklist().List(ctx, 1000)
+	barred, err := opened.Blacklist().List(ctx, "GROUP-RESET", 1000)
 	if err != nil {
 		t.Fatalf("listing the blacklist: %v", err)
 	}
 	for _, entry := range barred {
-		if err := opened.Blacklist().Remove(ctx, entry.ID); err != nil {
+		if err := opened.Blacklist().Remove(ctx, entry.GroupOpenID, entry.ID); err != nil {
 			t.Fatalf("clearing the blacklist: %v", err)
 		}
 	}
@@ -239,6 +239,7 @@ func TestAWatchRoundTrip(t *testing.T) {
 
 	if err := opened.Watches().Add(ctx, Watch{
 		ID:           "WATCH-1",
+		GroupOpenID:  "GROUP-1",
 		MemberOpenID: "MEMBER-1",
 		Reason:       "广告",
 		AddedAt:      now.Unix(),
@@ -266,6 +267,7 @@ func TestAWatchRoundTrip(t *testing.T) {
 	later := now.Add(30 * 24 * time.Hour)
 	if err := opened.Watches().Add(ctx, Watch{
 		ID:           "WATCH-2",
+		GroupOpenID:  "GROUP-1",
 		MemberOpenID: "MEMBER-1",
 		Reason:       "again",
 		AddedAt:      now.Unix(),
@@ -273,6 +275,7 @@ func TestAWatchRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Add over an existing mark: %v", err)
 	}
+
 	entries, err = opened.Watches().List(ctx, now)
 	if err != nil {
 		t.Fatalf("List after re-marking: %v", err)
@@ -291,7 +294,7 @@ func TestAWatchRoundTrip(t *testing.T) {
 		t.Errorf("List returned %d marks that had run out, want none", len(expired))
 	}
 
-	removed, err := opened.Watches().Remove(ctx, "MEMBER-1")
+	removed, err := opened.Watches().Remove(ctx, "GROUP-1", "MEMBER-1")
 	if err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -300,7 +303,7 @@ func TestAWatchRoundTrip(t *testing.T) {
 	}
 	// Removing what is not there is a fact, not a failure: it is what keeps a
 	// command from reporting a change that did not happen.
-	removed, err = opened.Watches().Remove(ctx, "MEMBER-1")
+	removed, err = opened.Watches().Remove(ctx, "GROUP-1", "MEMBER-1")
 	if err != nil {
 		t.Fatalf("Remove again: %v", err)
 	}

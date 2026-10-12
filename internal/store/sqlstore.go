@@ -11,7 +11,7 @@ import (
 
 // schemaVersion is the layout this build writes. A database above it was written
 // by a newer build and is refused rather than guessed at.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // migrations are applied in order, so a database created by an older build
 // reaches the current layout without anybody running anything by hand.
@@ -257,6 +257,55 @@ CREATE INDEX IF NOT EXISTS high_risk_by_expiry ON high_risk_watches (expires_at)
 	// there were never escalated, and ADD COLUMN with a default is the one shape of
 	// change both dialects make without moving the data.
 	`ALTER TABLE pending_verifications ADD COLUMN escalated_at BIGINT NOT NULL DEFAULT 0`,
+	// 10: the blacklist and the high risk list are each group's own.
+	//
+	// Both were keyed on the member alone, which made a decision one group's
+	// administrators took binding on every group the bot is in -- and the commands that
+	// write them are authorised per group, so the two did not even agree with each
+	// other. Rebuilt rather than added to, because the unique indexes are part of what
+	// changes: one member may now be barred in two groups, which the old
+	// unique-on-the-member indexes refuse.
+	//
+	// The rows that were there become entries with no group of their own, and behave as
+	// every group's, because that is what they were. Writing them as nobody's would
+	// quietly let those applicants back in.
+	`
+CREATE TABLE join_blacklist_grouped (
+    id            TEXT   PRIMARY KEY,
+    group_openid  TEXT   NOT NULL DEFAULT '',
+    member_openid TEXT,
+    union_openid  TEXT,
+    reason        TEXT   NOT NULL DEFAULT '',
+    added_at      BIGINT NOT NULL,
+    added_by      TEXT   NOT NULL DEFAULT '',
+    expires_at    BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO join_blacklist_grouped
+    (id, group_openid, member_openid, union_openid, reason, added_at, added_by, expires_at)
+SELECT id, '', member_openid, union_openid, reason, added_at, added_by, expires_at
+FROM join_blacklist;
+DROP TABLE join_blacklist;
+ALTER TABLE join_blacklist_grouped RENAME TO join_blacklist;
+CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_member ON join_blacklist (group_openid, member_openid);
+CREATE UNIQUE INDEX IF NOT EXISTS blacklist_by_union ON join_blacklist (group_openid, union_openid);
+CREATE TABLE high_risk_watches_grouped (
+    id            TEXT   PRIMARY KEY,
+    group_openid  TEXT   NOT NULL DEFAULT '',
+    member_openid TEXT   NOT NULL,
+    reason        TEXT   NOT NULL DEFAULT '',
+    added_at      BIGINT NOT NULL,
+    added_by      TEXT   NOT NULL DEFAULT '',
+    expires_at    BIGINT NOT NULL
+);
+INSERT INTO high_risk_watches_grouped
+    (id, group_openid, member_openid, reason, added_at, added_by, expires_at)
+SELECT id, '', member_openid, reason, added_at, added_by, expires_at
+FROM high_risk_watches;
+DROP TABLE high_risk_watches;
+ALTER TABLE high_risk_watches_grouped RENAME TO high_risk_watches;
+CREATE UNIQUE INDEX IF NOT EXISTS high_risk_by_member ON high_risk_watches (group_openid, member_openid);
+CREATE INDEX IF NOT EXISTS high_risk_by_expiry ON high_risk_watches (expires_at);
+`,
 }
 
 // sqlStore is the database/sql implementation, shared by both dialects.
@@ -289,7 +338,7 @@ type watchStore struct{ store *sqlStore }
 // member watched -- is answered by a row being here at all.
 func (w watchStore) List(ctx context.Context, now time.Time) ([]Watch, error) {
 	rows, err := w.store.db.QueryContext(ctx, w.store.query(`
-SELECT id, member_openid, reason, added_at, added_by, expires_at
+SELECT id, group_openid, member_openid, reason, added_at, added_by, expires_at
 FROM high_risk_watches
 WHERE expires_at > ?
 ORDER BY added_at DESC`), now.Unix())
@@ -301,8 +350,8 @@ ORDER BY added_at DESC`), now.Unix())
 	var entries []Watch
 	for rows.Next() {
 		var entry Watch
-		if err := rows.Scan(&entry.ID, &entry.MemberOpenID, &entry.Reason,
-			&entry.AddedAt, &entry.AddedBy, &entry.ExpiresAt); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.GroupOpenID, &entry.MemberOpenID,
+			&entry.Reason, &entry.AddedAt, &entry.AddedBy, &entry.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("reading a high risk entry: %w", err)
 		}
 		entries = append(entries, entry)
@@ -329,14 +378,14 @@ func (w watchStore) Add(ctx context.Context, entry Watch) error {
 	}
 	_, err := w.store.db.ExecContext(ctx, w.store.query(`
 INSERT INTO high_risk_watches
-    (id, member_openid, reason, added_at, added_by, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT (member_openid) DO UPDATE SET
+    (id, group_openid, member_openid, reason, added_at, added_by, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (group_openid, member_openid) DO UPDATE SET
     reason     = excluded.reason,
     added_by   = excluded.added_by,
     expires_at = excluded.expires_at`),
-		entry.ID, entry.MemberOpenID, entry.Reason, entry.AddedAt, entry.AddedBy,
-		entry.ExpiresAt)
+		entry.ID, entry.GroupOpenID, entry.MemberOpenID, entry.Reason, entry.AddedAt,
+		entry.AddedBy, entry.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("recording a watch: %w", err)
 	}
@@ -344,13 +393,13 @@ ON CONFLICT (member_openid) DO UPDATE SET
 }
 
 // Remove implements WatchStore.
-func (w watchStore) Remove(ctx context.Context, memberOpenID string) (bool, error) {
+func (w watchStore) Remove(ctx context.Context, groupOpenID, memberOpenID string) (bool, error) {
 	if strings.TrimSpace(memberOpenID) == "" {
 		return false, errors.New("store: removing a watch needs the member it is about")
 	}
 	result, err := w.store.db.ExecContext(ctx,
-		w.store.query(`DELETE FROM high_risk_watches WHERE member_openid = ?`),
-		memberOpenID)
+		w.store.query(`DELETE FROM high_risk_watches WHERE group_openid = ? AND member_openid = ?`),
+		groupOpenID, memberOpenID)
 	if err != nil {
 		return false, fmt.Errorf("forgetting a watch: %w", err)
 	}
@@ -590,9 +639,9 @@ type blacklistStore struct{ store *sqlStore }
 // an empty member openid would otherwise match the rows that only name a union
 // openid -- and every applicant whose member openid this application never saw
 // would be refused.
-func (b blacklistStore) Barred(ctx context.Context, memberOpenID, unionOpenID string, now time.Time) (bool, error) {
+func (b blacklistStore) Barred(ctx context.Context, groupOpenID, memberOpenID, unionOpenID string, now time.Time) (bool, error) {
 	var identities []string
-	var args []any
+	args := []any{groupOpenID}
 	if strings.TrimSpace(memberOpenID) != "" {
 		identities = append(identities, "member_openid = ?")
 		args = append(args, memberOpenID)
@@ -609,7 +658,8 @@ func (b blacklistStore) Barred(ctx context.Context, memberOpenID, unionOpenID st
 	var found int
 	err := b.store.db.QueryRowContext(ctx, b.store.query(`
 SELECT 1 FROM join_blacklist
-WHERE (`+strings.Join(identities, " OR ")+`)
+WHERE group_openid IN (?, '')
+  AND (`+strings.Join(identities, " OR ")+`)
   AND (expires_at = 0 OR expires_at > ?)
 LIMIT 1`), args...).Scan(&found)
 	switch {
@@ -639,8 +689,8 @@ func (b blacklistStore) Add(ctx context.Context, entry Barred) error {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, b.store.query(
-			`DELETE FROM join_blacklist WHERE `+identity.column+` = ?`),
-			identity.value); err != nil {
+			`DELETE FROM join_blacklist WHERE group_openid = ? AND `+identity.column+` = ?`),
+			entry.GroupOpenID, identity.value); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("replacing a blacklist entry: %w", err)
 		}
@@ -661,9 +711,9 @@ func (b blacklistStore) Add(ctx context.Context, entry Barred) error {
 
 	if _, err := tx.ExecContext(ctx, b.store.query(`
 INSERT INTO join_blacklist
-    (id, member_openid, union_openid, reason, added_at, added_by, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		entry.ID, member, union, entry.Reason,
+    (id, group_openid, member_openid, union_openid, reason, added_at, added_by, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		entry.ID, entry.GroupOpenID, member, union, entry.Reason,
 		entry.AddedAt, entry.AddedBy, entry.ExpiresAt); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("adding a blacklist entry: %w", err)
@@ -675,30 +725,32 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`),
 }
 
 // Remove implements BlacklistStore.
-func (b blacklistStore) Remove(ctx context.Context, key string) error {
+func (b blacklistStore) Remove(ctx context.Context, groupOpenID, key string) error {
 	if strings.TrimSpace(key) == "" {
 		// An empty key would be a request to delete by an identity nobody has,
 		// and it is refused rather than left to match nothing quietly.
 		return errors.New("store: removing a blacklist entry needs an id or an openid")
 	}
 	if _, err := b.store.db.ExecContext(ctx, b.store.query(`
-DELETE FROM join_blacklist WHERE id = ? OR member_openid = ? OR union_openid = ?`),
-		key, key, key); err != nil {
+DELETE FROM join_blacklist WHERE group_openid IN (?, '')
+  AND (id = ? OR member_openid = ? OR union_openid = ?)`),
+		groupOpenID, key, key, key); err != nil {
 		return fmt.Errorf("removing a blacklist entry: %w", err)
 	}
 	return nil
 }
 
 // List implements BlacklistStore.
-func (b blacklistStore) List(ctx context.Context, limit int) ([]Barred, error) {
+func (b blacklistStore) List(ctx context.Context, groupOpenID string, limit int) ([]Barred, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := b.store.db.QueryContext(ctx, b.store.query(`
-SELECT id, member_openid, union_openid, reason, added_at, added_by, expires_at
+SELECT id, group_openid, member_openid, union_openid, reason, added_at, added_by, expires_at
 FROM join_blacklist
+WHERE group_openid IN (?, '')
 ORDER BY added_at DESC
-LIMIT ?`), limit)
+LIMIT ?`), groupOpenID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("listing the blacklist: %w", err)
 	}
@@ -710,7 +762,7 @@ LIMIT ?`), limit)
 		// Scanned as nullable, because an entry may name only one of the two
 		// identities, and the other is NULL rather than an empty string.
 		var member, union sql.NullString
-		if err := rows.Scan(&entry.ID, &member, &union, &entry.Reason,
+		if err := rows.Scan(&entry.ID, &entry.GroupOpenID, &member, &union, &entry.Reason,
 			&entry.AddedAt, &entry.AddedBy, &entry.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("reading a blacklist entry: %w", err)
 		}

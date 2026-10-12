@@ -40,31 +40,31 @@ const (
 func TestAMarkIsEnforcedWhileItLasts(t *testing.T) {
 	h := judgeHarness(t, &modelStub{answer: `{"verdict":"ok"}`}, "")
 
-	if h.isWatched(watchMember) {
+	if h.isWatched(watchGroup, watchMember) {
 		t.Error("somebody was watched before anybody marked them")
 	}
-	h.remember(watchMember, time.Now().Add(time.Hour).Unix())
-	if !h.isWatched(watchMember) {
+	h.remember(watchGroup, watchMember, time.Now().Add(time.Hour).Unix())
+	if !h.isWatched(watchGroup, watchMember) {
 		t.Error("a mark in force was not enforced")
 	}
-	if h.isWatched(watchOther) {
+	if h.isWatched(watchGroup, watchOther) {
 		t.Error("a mark was enforced against somebody else")
 	}
 
 	// A mark that has run out is not enforced, and remembering it is what the
 	// message path finds -- the row is still in the table until somebody reads it.
-	h.remember(watchMember, time.Now().Add(-time.Minute).Unix())
-	if h.isWatched(watchMember) {
+	h.remember(watchGroup, watchMember, time.Now().Add(-time.Minute).Unix())
+	if h.isWatched(watchGroup, watchMember) {
 		t.Error("a mark that had run out was still enforced")
 	}
 
 	// And the switch is the whole list, not only the marking of it.
-	h.remember(watchMember, time.Now().Add(time.Hour).Unix())
+	h.remember(watchGroup, watchMember, time.Now().Add(time.Hour).Unix())
 	off := false
 	fresh := h.config()
 	fresh.HighRisk.Enabled = &off
 	h.cfg = fresh
-	if h.isWatched(watchMember) {
+	if h.isWatched(watchGroup, watchMember) {
 		t.Error("a mark was enforced with the list turned off")
 	}
 }
@@ -78,6 +78,7 @@ func TestTheListRoundTripsThroughTheDataLayer(t *testing.T) {
 
 	until := time.Now().Add(7 * 24 * time.Hour).Truncate(time.Second)
 	if err := h.Watch(context.Background(), store.Watch{
+		GroupOpenID:  watchGroup,
 		MemberOpenID: watchMember,
 		Reason:       "广告",
 		AddedBy:      "ADMIN-OPENID",
@@ -85,7 +86,7 @@ func TestTheListRoundTripsThroughTheDataLayer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
-	if !h.isWatched(watchMember) {
+	if !h.isWatched(watchGroup, watchMember) {
 		t.Error("a mark that was written down is not being enforced")
 	}
 
@@ -98,17 +99,17 @@ func TestTheListRoundTripsThroughTheDataLayer(t *testing.T) {
 		t.Errorf("Watches returned %+v, want the mark that was made", entries)
 	}
 
-	removed, err := h.Unwatch(context.Background(), watchMember)
+	removed, err := h.Unwatch(context.Background(), watchGroup, watchMember)
 	if err != nil {
 		t.Fatalf("Unwatch: %v", err)
 	}
 	if !removed {
 		t.Error("Unwatch reported nothing removed although the mark was there")
 	}
-	if h.isWatched(watchMember) {
+	if h.isWatched(watchGroup, watchMember) {
 		t.Error("a mark that was removed is still being enforced from memory")
 	}
-	removed, err = h.Unwatch(context.Background(), watchMember)
+	removed, err = h.Unwatch(context.Background(), watchGroup, watchMember)
 	if err != nil {
 		t.Fatalf("Unwatch again: %v", err)
 	}
@@ -124,11 +125,12 @@ func TestAMarkMustEnd(t *testing.T) {
 	h.deps.Store = openWatchStore(t)
 
 	if err := h.Watch(context.Background(), store.Watch{
+		GroupOpenID:  watchGroup,
 		MemberOpenID: watchMember,
 	}); err == nil {
 		t.Fatal("a mark with no moment it ends was accepted")
 	}
-	if h.isWatched(watchMember) {
+	if h.isWatched(watchGroup, watchMember) {
 		t.Error("a mark that was refused is being enforced")
 	}
 }
@@ -317,6 +319,7 @@ func TestAWatchedMessageIsJudgedAndPunished(t *testing.T) {
 		}
 	}
 	if err := h.Watch(ctx, store.Watch{
+		GroupOpenID:  watchGroup,
 		MemberOpenID: watchMember,
 		Reason:       "广告",
 		AddedBy:      "ADMIN-OPENID",
@@ -443,14 +446,14 @@ high_risk:
 	// Once is not twice: the threshold is the file's, and a member is not marked
 	// for the first thing they are caught doing.
 	catch("J-1")
-	h.markIfCaughtEnough(ctx, watchMember)
-	if h.isWatched(watchMember) {
+	h.markIfCaughtEnough(ctx, watchGroup, watchMember)
+	if h.isWatched(watchGroup, watchMember) {
 		t.Fatal("marked after one violation, want the threshold the file asked for")
 	}
 
 	catch("J-2")
-	h.markIfCaughtEnough(ctx, watchMember)
-	if !h.isWatched(watchMember) {
+	h.markIfCaughtEnough(ctx, watchGroup, watchMember)
+	if !h.isWatched(watchGroup, watchMember) {
 		t.Fatal("not marked after the second violation")
 	}
 	entries, err := h.Watches(ctx)
@@ -473,7 +476,7 @@ high_risk:
 	// the moment the first one ends.
 	before := entries[0].ID
 	catch("J-3")
-	h.markIfCaughtEnough(ctx, watchMember)
+	h.markIfCaughtEnough(ctx, watchGroup, watchMember)
 	entries, err = h.Watches(ctx)
 	if err != nil {
 		t.Fatalf("Watches after the third violation: %v", err)

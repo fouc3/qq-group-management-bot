@@ -74,7 +74,7 @@ func (h *handler) loadWatches(ctx context.Context) {
 	h.watchMu.Lock()
 	h.watched = make(map[string]int64, len(entries))
 	for _, entry := range entries {
-		h.watched[entry.MemberOpenID] = entry.ExpiresAt
+		h.watched[watchKey(entry.GroupOpenID, entry.MemberOpenID)] = entry.ExpiresAt
 	}
 	h.watchMu.Unlock()
 	if len(entries) > 0 {
@@ -90,14 +90,15 @@ func (h *handler) loadWatches(ctx context.Context) {
 // The list is consulted from memory, because it is asked about every message a
 // group receives, and answered under the lock rather than with a query: what a
 // query per message would cost is the busiest thing this feature does.
-func (h *handler) isWatched(memberOpenID string) bool {
+func (h *handler) isWatched(groupOpenID, memberOpenID string) bool {
 	if memberOpenID == "" || !h.config().HighRisk.on() {
 		return false
 	}
 	now := time.Now().Unix()
 	h.watchMu.Lock()
 	defer h.watchMu.Unlock()
-	until, found := h.watched[memberOpenID]
+	key := watchKey(groupOpenID, memberOpenID)
+	until, found := h.watched[key]
 	if !found {
 		return false
 	}
@@ -105,14 +106,23 @@ func (h *handler) isWatched(memberOpenID string) bool {
 		// Run out, and dropped as it is found: the row is still in the data layer
 		// until somebody reads the list, and a mark that has ended must not go on
 		// being enforced from memory in the meantime.
-		delete(h.watched, memberOpenID)
+		delete(h.watched, key)
 		return false
 	}
 	return true
 }
 
+// watchKey is how a mark is found in the in-memory list: one member of one group.
+//
+// The group is part of the key because a mark is one group's decision about its own
+// conversation. It used to be the member alone, which made one administrator's judgement
+// about a person binding on every group the bot is in.
+func watchKey(groupOpenID, memberOpenID string) string {
+	return groupOpenID + "\x00" + memberOpenID
+}
+
 // remember puts one mark into the in-memory list, replacing any earlier one.
-func (h *handler) remember(memberOpenID string, expiresAt int64) {
+func (h *handler) remember(groupOpenID, memberOpenID string, expiresAt int64) {
 	if memberOpenID == "" {
 		return
 	}
@@ -121,18 +131,19 @@ func (h *handler) remember(memberOpenID string, expiresAt int64) {
 	if h.watched == nil {
 		h.watched = map[string]int64{}
 	}
+	key := watchKey(groupOpenID, memberOpenID)
 	if expiresAt <= time.Now().Unix() {
-		delete(h.watched, memberOpenID)
+		delete(h.watched, key)
 		return
 	}
-	h.watched[memberOpenID] = expiresAt
+	h.watched[key] = expiresAt
 }
 
 // forget drops one mark from the in-memory list.
-func (h *handler) forget(memberOpenID string) {
+func (h *handler) forget(groupOpenID, memberOpenID string) {
 	h.watchMu.Lock()
 	defer h.watchMu.Unlock()
-	delete(h.watched, memberOpenID)
+	delete(h.watched, watchKey(groupOpenID, memberOpenID))
 }
 
 // Watch implements feature.Moderation: it marks one member, replacing any earlier
@@ -159,7 +170,7 @@ func (h *handler) Watch(ctx context.Context, entry store.Watch) error {
 	if err := watches.Add(ctx, entry); err != nil {
 		return err
 	}
-	h.remember(entry.MemberOpenID, entry.ExpiresAt)
+	h.remember(entry.GroupOpenID, entry.MemberOpenID, entry.ExpiresAt)
 	return nil
 }
 
@@ -168,17 +179,17 @@ func (h *handler) Watch(ctx context.Context, entry store.Watch) error {
 // It works whether or not the list is turned on: a member marked before the switch
 // went off is one somebody may well want to take off, and refusing to remove an
 // entry is not how a list is emptied.
-func (h *handler) Unwatch(ctx context.Context, memberOpenID string) (bool, error) {
+func (h *handler) Unwatch(ctx context.Context, groupOpenID, memberOpenID string) (bool, error) {
 	watches := h.watchStore()
 	if watches == nil {
 		return false, errors.New("no data layer is configured, so the high risk " +
 			"list cannot be read")
 	}
-	removed, err := watches.Remove(ctx, memberOpenID)
+	removed, err := watches.Remove(ctx, groupOpenID, memberOpenID)
 	if err != nil {
 		return false, err
 	}
-	h.forget(memberOpenID)
+	h.forget(groupOpenID, memberOpenID)
 	return removed, nil
 }
 
@@ -545,12 +556,12 @@ func humanDuration(duration time.Duration) string {
 // report and an automatic judgement both count: what it is counting is judgements,
 // and the question "has this happened before" must not depend on how the last one
 // was noticed.
-func (h *handler) markIfCaughtEnough(ctx context.Context, memberOpenID string) {
+func (h *handler) markIfCaughtEnough(ctx context.Context, groupOpenID, memberOpenID string) {
 	rule := h.config().HighRisk
 	if rule.AutoMarkAfter <= 0 || !rule.on() || memberOpenID == "" {
 		return
 	}
-	if h.isWatched(memberOpenID) {
+	if h.isWatched(groupOpenID, memberOpenID) {
 		// Already marked, by hand or by this rule: a second mark would only move
 		// the moment the first one ends.
 		return
@@ -570,6 +581,7 @@ func (h *handler) markIfCaughtEnough(ctx context.Context, memberOpenID string) {
 	}
 	until := time.Now().Add(rule.autoMarkFor())
 	entry := store.Watch{
+		GroupOpenID:  groupOpenID,
 		MemberOpenID: memberOpenID,
 		Reason:       fmt.Sprintf("自动标记：累计 %d 次违规判定", count),
 		AddedBy:      "",

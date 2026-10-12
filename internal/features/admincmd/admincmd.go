@@ -327,12 +327,13 @@ type handler struct {
 // lists entries and has no business reading a pending hold. The store's own
 // blacklist satisfies it without an adapter, because the shapes already match.
 type Blacklist interface {
-	// Add records an entry, replacing one with the same key.
+	// Add records an entry, replacing one with the same key in the same group.
 	Add(ctx context.Context, entry store.Barred) error
-	// Remove forgets an entry by ID, member openid or union openid.
-	Remove(ctx context.Context, key string) error
-	// List returns entries, newest first.
-	List(ctx context.Context, limit int) ([]store.Barred, error)
+	// Remove forgets an entry of this group's by ID, member openid or union openid.
+	Remove(ctx context.Context, groupOpenID, key string) error
+	// List returns this group's entries, with the ones that belong to every group,
+	// newest first.
+	List(ctx context.Context, groupOpenID string, limit int) ([]store.Barred, error)
 }
 
 // SetBlacklist hands over the list the command manages.
@@ -1142,6 +1143,7 @@ func (h *handler) blacklistCommand(ctx context.Context,
 		}
 		if err := h.blacklist.Add(ctx, store.Barred{
 			ID:           id,
+			GroupOpenID:  data.GroupOpenID,
 			MemberOpenID: key,
 			Reason:       reason,
 			AddedAt:      time.Now().Unix(),
@@ -1169,7 +1171,7 @@ func (h *handler) blacklistCommand(ctx context.Context,
 		// Checked first, because removing something that was not there and
 		// reporting success would leave an administrator believing a list had
 		// been changed when it had not.
-		entries, err := h.blacklist.List(ctx, blacklistListLimit)
+		entries, err := h.blacklist.List(ctx, data.GroupOpenID, blacklistListLimit)
 		if err != nil {
 			h.reply(ctx, data, "读取黑名单失败："+err.Error())
 			return nil
@@ -1178,7 +1180,7 @@ func (h *handler) blacklistCommand(ctx context.Context,
 			h.reply(ctx, data, "黑名单里没有 `"+key+"`")
 			return nil
 		}
-		if err := h.blacklist.Remove(ctx, key); err != nil {
+		if err := h.blacklist.Remove(ctx, data.GroupOpenID, key); err != nil {
 			h.deps.Logger.Error("could not remove a blacklist entry", "error", err)
 			h.reply(ctx, data, "移除失败："+err.Error())
 			return nil
@@ -1189,7 +1191,7 @@ func (h *handler) blacklistCommand(ctx context.Context,
 		return nil
 
 	case "list", "列表", "列出":
-		entries, err := h.blacklist.List(ctx, blacklistListLimit)
+		entries, err := h.blacklist.List(ctx, data.GroupOpenID, blacklistListLimit)
 		if err != nil {
 			h.reply(ctx, data, "读取黑名单失败："+err.Error())
 			return nil

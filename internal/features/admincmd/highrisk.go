@@ -63,6 +63,7 @@ func (h *handler) highRiskCommand(ctx context.Context,
 		}
 		if err := h.moderation.Watch(ctx, store.Watch{
 			ID:           id,
+			GroupOpenID:  data.GroupOpenID,
 			MemberOpenID: member,
 			Reason:       reason,
 			AddedAt:      time.Now().Unix(),
@@ -91,7 +92,7 @@ func (h *handler) highRiskCommand(ctx context.Context,
 			h.reply(ctx, data, err.Error()+"\n"+usage)
 			return nil
 		}
-		removed, err := h.moderation.Unwatch(ctx, member)
+		removed, err := h.moderation.Unwatch(ctx, data.GroupOpenID, member)
 		if err != nil {
 			h.deps.Logger.Error("could not remove a high risk mark", "error", err)
 			h.reply(ctx, data, "解除失败："+err.Error())

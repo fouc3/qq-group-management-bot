@@ -63,7 +63,11 @@ type Barred struct {
 	// ID is a random key rather than the applicant's openid, so an entry can name
 	// a union openid for somebody who has never applied here and therefore has no
 	// member openid to be keyed on.
-	ID           string
+	ID string
+	// GroupOpenID is the group that made this decision, or empty for an entry written
+	// before the list was kept per group -- which behaves as every group's, because
+	// that is what it was.
+	GroupOpenID  string
 	MemberOpenID string
 	UnionOpenID  string
 	Reason       string
@@ -143,30 +147,49 @@ type PendingStore interface {
 	MoveDeadline(ctx context.Context, token string, deadline, heldUntil time.Time) error
 }
 
-// BlacklistStore holds the applicants barred from joining.
+// BlacklistStore holds the applicants barred from joining a group.
 type BlacklistStore interface {
-	// Barred reports whether either identity is barred as of now.
+	// Barred reports whether either identity is barred as of now, in this group.
 	//
 	// Both identities are looked up in one call, because a caller that checked
 	// them itself would be doing the store's job and would have to be changed
 	// whenever the list gains a way to be keyed.
-	Barred(ctx context.Context, memberOpenID, unionOpenID string, now time.Time) (bool, error)
-	// Add records an entry, replacing one with the same key.
+	//
+	// An entry with no group of its own is matched from every group: a bar is one
+	// group's decision about who may join it, and the entries already there were made
+	// when the list was everybody's.
+	Barred(ctx context.Context, groupOpenID, memberOpenID, unionOpenID string, now time.Time) (bool, error)
+	// Add records an entry, replacing one with the same key in the same group.
+	//
+	// An entry with no group replaces nothing: it adds one that every group is barred
+	// by, which is what an operator writing into the table by hand gets.
 	Add(ctx context.Context, entry Barred) error
-	// Remove forgets an entry by ID, member openid or union openid.
-	Remove(ctx context.Context, key string) error
-	// List returns entries, newest first.
-	List(ctx context.Context, limit int) ([]Barred, error)
+	// Remove forgets an entry of this group's by ID, member openid or union openid.
+	//
+	// An entry with no group of its own goes too: it is one of the entries this group's
+	// list shows, and a list with rows an administrator cannot take back is worse than
+	// one that reaches further than it says.
+	Remove(ctx context.Context, groupOpenID, key string) error
+	// List returns this group's entries, with the ones that belong to every group,
+	// newest first.
+	List(ctx context.Context, groupOpenID string, limit int) ([]Barred, error)
 }
 
-// Watch is one member whose messages are judged as they arrive.
+// Watch is one member whose messages are judged as they arrive in one group.
 //
-// It is keyed on the member alone and not on a group, because what it describes
-// is a member rather than a membership: a spammer marked in one group is the same
-// person in the next one, and the punishment for what a judgement finds is still
-// decided by the group it was found in.
+// It is keyed on the group as well as the member, because marking somebody is a group's
+// decision about its own conversation: the same person can be a spammer in one group and a
+// member in good standing in the next, and a mark that followed them into every group
+// would be one group's judgement visited on another's.
+//
+// The rows written before this was kept per group have no group of their own. They behave
+// as every group's, because that is what they were: they were made by an operator who had
+// no way to say which group they meant.
 type Watch struct {
-	ID           string
+	ID string
+	// GroupOpenID is the group that marked them, or empty for a row from before marks
+	// were kept per group.
+	GroupOpenID  string
 	MemberOpenID string
 	Reason       string
 	AddedAt      int64
@@ -191,13 +214,17 @@ type WatchStore interface {
 	// second entry: two rows for one member would be two answers to "until
 	// when", and the caller has just given the answer it means.
 	Add(ctx context.Context, entry Watch) error
-	// Remove forgets the watch for one member, and reports whether there was one.
+	// Remove forgets one group's watch for one member, and reports whether there was
+	// one.
 	//
 	// The answer is returned rather than left to a caller that reads the list
 	// first: the two would race with the other administrators, and removing
 	// something that was not there and reporting success is the one outcome that
 	// leaves an operator believing a list changed when it did not.
-	Remove(ctx context.Context, memberOpenID string) (bool, error)
+	//
+	// A watch with no group of its own is not removed by this: it is not this group's to
+	// take back, since every group is being judged by it.
+	Remove(ctx context.Context, groupOpenID, memberOpenID string) (bool, error)
 }
 
 // Config says which database to open and how.

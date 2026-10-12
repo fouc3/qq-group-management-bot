@@ -345,7 +345,7 @@ type Moderation interface {
 	// The answer is returned rather than left to a caller that reads the list
 	// first: removing an entry that was not there and reporting success is what
 	// leaves an operator believing a list changed when it did not.
-	Unwatch(ctx context.Context, memberOpenID string) (bool, error)
+	Unwatch(ctx context.Context, groupOpenID, memberOpenID string) (bool, error)
 	// Watches lists the members whose messages are being judged as they arrive.
 	Watches(ctx context.Context) ([]store.Watch, error)
 }

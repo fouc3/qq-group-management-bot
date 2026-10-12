@@ -81,7 +81,7 @@ func (s *stubJudge) Watch(_ context.Context, entry store.Watch) error {
 }
 
 // Unwatch forgets one mark, and reports whether there was one.
-func (s *stubJudge) Unwatch(_ context.Context, memberOpenID string) (bool, error) {
+func (s *stubJudge) Unwatch(_ context.Context, _ string, memberOpenID string) (bool, error) {
 	if s.watchErr != nil {
 		return false, s.watchErr
 	}
