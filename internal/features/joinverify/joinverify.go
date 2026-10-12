@@ -702,6 +702,11 @@ func (v *verifier) Register(_ context.Context) error {
 			"group", label,
 			"mute_mode", settings.MuteMode,
 			"mute_minutes", settings.MuteMinutes,
+			// Printed because it is the one setting whose effect is invisible until a
+			// member has ignored the card often enough: without it here, "why is this
+			// member only being taken back and never silenced" is answered by reading
+			// the configuration file instead of the log.
+			"pseudo_mute_after", settings.PseudoMuteAfter,
 			"deadline_hours", settings.DeadlineHours,
 			"on_deadline", settings.OnDeadline,
 			"notify_members", len(settings.NotifyMembers))

@@ -61,16 +61,36 @@ func (p *pseudoMessages) forget(token string) {
 	delete(p.told, token)
 }
 
+// pseudoPolicy returns the settings that govern what happens to a held member's message.
+//
+// A hold carries the settings it was made under, which is how its deadline and its mute
+// length survive a restart -- but the escalation count and the text are policy about *now*.
+// Read from the hold alone, a group that sets the count, or lowers it, would keep holding the
+// members already waiting on the old terms: the count would be whatever it was the day each
+// of them joined, and those who joined earlier would never be silenced however much they
+// talked.
+func (v *verifier) pseudoPolicy(entry *pending) Settings {
+	settings := entry.settings
+	live := v.cfg.settingsFor(entry.groupOpenID)
+	if !live.pseudoHolds() {
+		return settings
+	}
+	settings.PseudoMuteAfter = live.PseudoMuteAfter
+	settings.PseudoMuteNotice = live.PseudoMuteNotice
+	settings.MuteMinutes = live.MuteMinutes
+	return settings
+}
+
 // answerPseudoHold is what a member is owed when their message is taken back: why it
 // happened, and -- once they have gone on talking as often as the group allows -- the
 // notice that sends them to the phone, because from then on a real mute is in force and a
 // muted member's desktop client will not run the verification at all.
 func (v *verifier) answerPseudoHold(ctx context.Context, messageID string, entry *pending) {
 	log := v.deps.Logger.With("group", entry.groupOpenID, "member", entry.memberOpenID)
-	told, escalate := v.pseudo.counted(entry.token, entry.settings.PseudoMuteAfter,
-		time.Now())
+	settings := v.pseudoPolicy(entry)
+	told, escalate := v.pseudo.counted(entry.token, settings.PseudoMuteAfter, time.Now())
 	if escalate {
-		v.escalate(ctx, entry, log)
+		v.escalate(ctx, entry, settings, log)
 		return
 	}
 	if !told {
@@ -94,9 +114,9 @@ func (v *verifier) answerPseudoHold(ctx context.Context, messageID string, entry
 // the whole of that mode. And it stays switched afterwards, because unmute() reads the same
 // field: a member who verifies tomorrow has to be released from the mute applied today, and
 // under a pseudo-mode entry that release is a no-op.
-func (v *verifier) escalate(ctx context.Context, entry *pending, log *slog.Logger) {
+func (v *verifier) escalate(ctx context.Context, entry *pending, settings Settings,
+	log *slog.Logger) {
 	now := time.Now()
-	settings := entry.settings
 	settings.MuteMode = MuteModeMute
 	heldUntil := now.Add(time.Duration(settings.MuteMinutes) * time.Minute)
 
