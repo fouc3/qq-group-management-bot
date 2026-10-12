@@ -53,6 +53,15 @@ type handler struct {
 	// bargain the record itself makes.
 	mu    sync.Mutex
 	names map[string]string
+
+	// registrations are what this instance declared on the connection, kept so that
+	// Close can take them back.
+	//
+	// A feature is built again while the bot serves -- a configuration change does
+	// exactly that -- and an instance that kept its handlers would go on answering
+	// every event its replacement already answers, with the configuration it was
+	// built from and has now been superseded for.
+	registrations []*qqbotsdk.Registration
 }
 
 // New builds the feature from its configuration section.
@@ -89,15 +98,26 @@ func (h *handler) Register(_ context.Context) error {
 		}
 	}
 
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberAdd, h.onJoin)
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberRemove, h.onLeave)
+	h.registrations = append(h.registrations,
+		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberAdd, h.onJoin),
+		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMemberRemove, h.onLeave))
 	h.deps.Logger.Info("members coming and going are being recorded",
 		"groups", len(h.deps.Groups))
 	return nil
 }
 
 // Close implements feature.Feature.
-func (h *handler) Close(context.Context) error { return nil }
+//
+// It gives back the handlers this instance declared, so that the one built to replace
+// it is the only one answering. It may run after a Register that failed or never
+// happened, so it tolerates having nothing to give back.
+func (h *handler) Close(context.Context) error {
+	for _, registration := range h.registrations {
+		registration.Cancel()
+	}
+	h.registrations = nil
+	return nil
+}
 
 // onJoin records a member joining.
 func (h *handler) onJoin(ctx context.Context, event *qqbotsdk.Event) error {

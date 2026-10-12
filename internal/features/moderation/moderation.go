@@ -730,6 +730,14 @@ type handler struct {
 	// ones in flight so that Close can wait for them to notice the cancellation.
 	judging    chan struct{}
 	judgingOut sync.WaitGroup
+	// registrations are what this instance declared on the connection, kept so that
+	// Close can take them back.
+	//
+	// A feature is built again while the bot serves -- a configuration change does
+	// exactly that -- and an instance that kept its handlers would write down every
+	// message its replacement already wrote, against a cache that Close has already
+	// closed.
+	registrations []*qqbotsdk.Registration
 }
 
 // New builds the feature from its configuration section.
@@ -940,8 +948,9 @@ func (h *handler) Register(ctx context.Context) error {
 	// Both events, so a message is cached whichever way the group delivers it.
 	// A message that arrives as both is written twice with the same payload,
 	// which the cache treats as one message.
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, h.onMessage)
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, h.onMessage)
+	h.registrations = append(h.registrations,
+		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupAtMessageCreate, h.onMessage),
+		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupMessageCreate, h.onMessage))
 
 	// Once at startup, so that a bot which was down for longer than the retention
 	// does not keep its pictures until the next one arrives in a group that may
@@ -985,7 +994,9 @@ func imageValue64(value *int64) any {
 }
 
 // Close implements feature.Feature.
-// Close implements feature.Feature.
+//
+// The handlers this instance declared go back first: one cancelled after the work in
+// flight had been waited for could still start new work.
 //
 // The judgements in flight are cancelled and waited for, in that order: an
 // instance that has been replaced must not go on to silence somebody, and a
@@ -993,6 +1004,10 @@ func imageValue64(value *int64) any {
 // configuration it was made under is gone. Cancelling ends the model call, which
 // is where the seconds are, so the wait is short rather than the model's timeout.
 func (h *handler) Close(context.Context) error {
+	for _, registration := range h.registrations {
+		registration.Cancel()
+	}
+	h.registrations = nil
 	h.stopPart()
 	h.judgingOut.Wait()
 	return h.cache.Close()

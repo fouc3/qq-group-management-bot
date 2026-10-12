@@ -226,6 +226,16 @@ type handler struct {
 	// request is checked against, and it is a field so that a test can decide
 	// what it says.
 	blacklist Blacklist
+	// registrations are what this instance declared on the connection, kept so that
+	// Close can take them back.
+	//
+	// A feature is built again while the bot serves -- a configuration change does
+	// exactly that -- and an instance that kept its handler would answer the same
+	// join request a second time, from the configuration it was built from and has
+	// now been superseded for. Approving twice is refused by the platform, but the
+	// two answers come from two different files, and which one arrives first is not
+	// something this bot is told.
+	registrations []*qqbotsdk.Registration
 }
 
 // Name implements feature.Feature.
@@ -238,12 +248,23 @@ func (h *handler) Intents() qqbotsdk.Intent {
 
 // Register implements feature.Feature.
 func (h *handler) Register(_ context.Context) error {
-	h.deps.Client.RegisterFunc(qqbotsdk.EventGroupJoinRequest, h.onJoinRequest)
+	h.registrations = append(h.registrations,
+		h.deps.Client.RegisterFunc(qqbotsdk.EventGroupJoinRequest, h.onJoinRequest))
 	return nil
 }
 
 // Close implements feature.Feature.
-func (h *handler) Close(context.Context) error { return nil }
+//
+// It gives back the handler this instance declared, so that the one built to replace
+// it is the only one answering. It may run after a Register that failed or never
+// happened, so it tolerates having nothing to give back.
+func (h *handler) Close(context.Context) error {
+	for _, registration := range h.registrations {
+		registration.Cancel()
+	}
+	h.registrations = nil
+	return nil
+}
 
 // onJoinRequest handles GROUP_JOIN_REQUEST.
 func (h *handler) onJoinRequest(ctx context.Context, event *qqbotsdk.Event) error {
