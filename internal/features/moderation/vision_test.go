@@ -111,7 +111,7 @@ func TestPicturesReachAModelThatMaySeeThem(t *testing.T) {
 	chain[1].ImgCount = 1
 	chain[1].Imgs = []string{"a.jpg"}
 
-	if _, err := h.Judge(context.Background(), "", chain); err != nil {
+	if _, err := h.Judge(context.Background(), "", chain, 0); err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
 	block, parts := userParts(t, stub.lastRequest(t))
@@ -158,7 +158,7 @@ func TestPicturesAreNotSentToAModelThatMayNotSee(t *testing.T) {
 	chain[1].ImgCount = 1
 	chain[1].Imgs = []string{"a.jpg"}
 
-	if _, err := h.Judge(context.Background(), "", chain); err != nil {
+	if _, err := h.Judge(context.Background(), "", chain, 0); err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
 	block, parts := userParts(t, stub.lastRequest(t))
@@ -170,6 +170,87 @@ func TestPicturesAreNotSentToAModelThatMayNotSee(t *testing.T) {
 	}
 	if system := systemContent(t, stub.lastRequest(t)); strings.Contains(system, "图1") {
 		t.Error("the instructions promise pictures that were not sent")
+	}
+}
+
+// TestAPicturePastTheCutoffIsNotSent covers the age limit: a judgement that reaches
+// back past five hours goes without the pictures, and the text still goes.
+func TestAPicturePastTheCutoffIsNotSent(t *testing.T) {
+	stub := &modelStub{answer: `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}
+	h := judgeHarnessWith(t, stub, "  vision: true\n", "")
+
+	pictures := newPictureStub()
+	pictures.keep("a.jpg", []byte("假装这是图"))
+	h.pictures = pictures
+
+	chain := chainOf("正常聊天", "扫码进群")
+	chain[1].ImgCount = 1
+	chain[1].Imgs = []string{"a.jpg"}
+
+	if _, err := h.Judge(context.Background(), "", chain, pictureCutoff+time.Minute); err != nil {
+		t.Fatalf("Judge: %v", err)
+	}
+	block, parts := userParts(t, stub.lastRequest(t))
+	if len(imagesOf(parts)) != 0 {
+		t.Errorf("a picture past the cutoff was sent: %v", imagesOf(parts))
+	}
+	if strings.Contains(block, "[图1]") {
+		t.Error("the block marks a picture that was not sent")
+	}
+	// The text is what is left, and it is judged in full.
+	if !strings.Contains(block, "扫码进群") {
+		t.Error("the message did not go at all")
+	}
+
+	// Just inside it, the picture is sent as usual: the limit is a limit, not an
+	// off switch.
+	if _, err := h.Judge(context.Background(), "", chain, pictureCutoff-time.Minute); err != nil {
+		t.Fatalf("Judge: %v", err)
+	}
+	if _, parts := userParts(t, stub.lastRequest(t)); len(imagesOf(parts)) != 1 {
+		t.Error("a picture inside the cutoff was not sent")
+	}
+}
+
+// TestAPictureMessagePastTheCutoffIsRefused covers the report path's half of the age
+// limit: the reported message carries a picture and is past the cutoff, so the report
+// is refused with the sentinel rather than judged on whatever text sat next to the
+// picture.
+//
+// It matters because the alternative is worse than a refusal: judging the text alone
+// would either miss the advertisement or punish somebody for words nobody reported,
+// and the group would be told nothing about the picture that is the whole message.
+func TestAPictureMessagePastTheCutoffIsRefused(t *testing.T) {
+	old := CachedMessage{ImgCount: 1, Text: "扫码进群",
+		TS: time.Now().Add(-pictureCutoff - time.Hour).UnixMilli()}
+	if err := pastPictureCutoff(old); !errors.Is(err, feature.ErrPastPictureCutoff) {
+		t.Fatalf("pastPictureCutoff = %v, want the cutoff sentinel", err)
+	}
+
+	// A fresh picture message is judged, pictures and all.
+	if err := pastPictureCutoff(CachedMessage{ImgCount: 1, Text: "扫码进群",
+		TS: time.Now().UnixMilli()}); err != nil {
+		t.Errorf("a fresh picture message was refused: %v", err)
+	}
+	// A text message has no picture to be too old for, and the cache is what decides
+	// whether it is still there at all.
+	if err := pastPictureCutoff(CachedMessage{Text: "扫码进群",
+		TS: time.Now().Add(-9 * time.Hour).UnixMilli()}); err != nil {
+		t.Errorf("a text message was refused for the picture cutoff: %v", err)
+	}
+}
+
+// TestACallerThatDidNotSayTheAgeIsJudgedWithPictures covers the zero: a judgement
+// made as somebody talks has no age to speak of, so the cutoff does not apply to it.
+func TestACallerThatDidNotSayTheAgeIsJudgedWithPictures(t *testing.T) {
+	if !judgingPicture(0) {
+		t.Error("an age of zero was read as older than the cutoff")
+	}
+	if !judgingPicture(pictureCutoff - time.Second) {
+		t.Error("a judgement just inside the cutoff lost its pictures")
+	}
+	if judgingPicture(pictureCutoff) {
+		t.Error("a judgement exactly at the cutoff kept its pictures")
 	}
 }
 
@@ -187,7 +268,7 @@ func TestAPictureThatIsNoLongerInTheCacheIsNotSent(t *testing.T) {
 	chain[1].ImgCount = 1
 	chain[1].Imgs = []string{"gone.jpg"}
 
-	if _, err := h.Judge(context.Background(), "", chain); err != nil {
+	if _, err := h.Judge(context.Background(), "", chain, 0); err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
 	block, parts := userParts(t, stub.lastRequest(t))
@@ -218,7 +299,7 @@ func TestAPictureOfATruncatedMessageIsNotSent(t *testing.T) {
 	chain[1].ImgCount = 1
 	chain[1].Imgs = []string{"b.jpg"}
 
-	if _, err := h.Judge(context.Background(), "", chain); err != nil {
+	if _, err := h.Judge(context.Background(), "", chain, 0); err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
 	block, parts := userParts(t, stub.lastRequest(t))
@@ -257,7 +338,7 @@ func TestOnlySoManyPicturesAreSent(t *testing.T) {
 	}
 	h.pictures = pictures
 
-	if _, err := h.Judge(context.Background(), "", chain); err != nil {
+	if _, err := h.Judge(context.Background(), "", chain, 0); err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
 	_, parts := userParts(t, stub.lastRequest(t))
@@ -425,7 +506,7 @@ func TestAPictureFetchedOverTheNetworkReachesTheModel(t *testing.T) {
 	chain[0].ImgCount = 1
 	chain[0].Imgs = refs
 
-	if _, err := h.Judge(context.Background(), "", chain); err != nil {
+	if _, err := h.Judge(context.Background(), "", chain, 0); err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
 	_, parts := userParts(t, stub.lastRequest(t))

@@ -153,6 +153,20 @@ func (h *handler) judgeReport(ctx context.Context, groupOpenID string,
 				h.receiptSentence(verdict.JudgementID))
 		return
 	}
+	if errors.Is(err, feature.ErrPastPictureCutoff) {
+		// The message is old enough that its pictures are not sent any more. Its
+		// own answer, next to "the judgement failed": nothing failed here, and it
+		// is the waiting that made the picture unjudgeable rather than anything the
+		// reporter did -- so telling them to try again would be telling them to do
+		// something that cannot work.
+		h.deps.Logger.Info("a report was about a picture too old to be judged",
+			"group", groupOpenID, "reporter", reporter, "error", err,
+			"receipt", verdict.JudgementID)
+		h.sayInGroup(ctx, groupOpenID,
+			"这条消息带图，但发出来已经太久了（超过 5 小时），图片不再参与判定，"+
+				"所以这次不处理。"+h.receiptSentence(verdict.JudgementID))
+		return
+	}
 	if err != nil {
 		// No judgement is not a clean verdict: nobody is touched, and the group is
 		// told why rather than left wondering.

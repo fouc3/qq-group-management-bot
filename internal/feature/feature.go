@@ -405,6 +405,16 @@ var ErrAlreadyPunished = errors.New("the message has already been taken back")
 // worth trying again; this is not, until the switch behind it is turned on.
 var ErrPictureNotJudgeable = errors.New("the message is a picture and pictures are not judged")
 
+// ErrPastPictureCutoff reports a report about a message with a picture that is old
+// enough that its pictures are not sent for judgement any more.
+//
+// It is a sentinel of its own rather than a plain error for the same reason the ones
+// above are: "this is too old to judge the picture" is an answer to give the group,
+// and it belongs with a message that has aged out of the cache rather than with a
+// judgement that failed. A judgement that failed is worth trying again; this will be
+// this late however many times it is reported.
+var ErrPastPictureCutoff = errors.New("the message is too old for its picture to be judged")
+
 // ModerationVerdict is what a judgement came to.
 type ModerationVerdict struct {
 	// JudgementID identifies the record written when the judgement was reached,

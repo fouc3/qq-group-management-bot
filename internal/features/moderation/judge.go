@@ -120,6 +120,30 @@ const judgePicturePrompt = `本次给你的消息里带有图片（图1、图2�
 但只能拿你真正看到的图当证据：没有图、看不清、或者某条消息只标了图号却没有对应图片时，
 不要因为「那里可能有图」而判违规，也不要因此判 ok —— 就按你实际看到的内容判。`
 
+// pictureCutoff is how old a reported message may be before its pictures stop
+// being sent for judgement.
+//
+// Five hours, and it is about what a picture is worth rather than about what is
+// stored. The cache holds six hours of messages, and the file itself is there for
+// the whole of that -- but a judgement that reaches back past this line is looking
+// at an advertisement nobody is reading any more, and paying the model to look at a
+// 400 KB picture to get there. What is left of the window after it is text, which is
+// still judged in full.
+//
+// The cutoff and the retention are deliberately not the same number: a window of
+// exactly the retention would be a judgement racing the sweep, and the answer would
+// depend on when the sweep last ran.
+const pictureCutoff = 5 * time.Hour
+
+// judgingPicture reports whether pictures may still be sent for a message this old.
+//
+// A zero age means the caller did not say, which is the path a judgement not about
+// an old message takes; it is judged with pictures, as it was before the cutoff
+// existed.
+func judgingPicture(age time.Duration) bool {
+	return age <= 0 || age < pictureCutoff
+}
+
 // Verdict is what the judge decided, in the terms the code acts on.
 type Verdict struct {
 	// Category is a key from the configuration, or empty when nothing was found.
@@ -162,10 +186,14 @@ var ErrUnjudged = errors.New("moderation: no judgement was reached")
 // the list goes into the instructions, where it is trusted context rather than
 // something a member can satisfy by writing it.
 //
+// subjectAge is how long ago the reported message was sent, or zero when the report
+// is about something recent enough that the age does not matter. It is what decides
+// whether the pictures of that message may still be shown: see judgingPicture.
+//
 // It returns ErrUnjudged when the request failed or the answer could not be
 // read; a verdict that comes back is one the code can act on as it stands.
 func (h *handler) Judge(ctx context.Context, groupOpenID string,
-	chain []CachedMessage) (Verdict, error) {
+	chain []CachedMessage, subjectAge time.Duration) (Verdict, error) {
 	if len(chain) == 0 {
 		return Verdict{}, fmt.Errorf("%w: nothing to judge", ErrUnjudged)
 	}
@@ -183,13 +211,17 @@ func (h *handler) Judge(ctx context.Context, groupOpenID string,
 	defer cancel()
 
 	// The pictures are sent only when the model is configured as one that may see
-	// them: an endpoint that cannot read an image answers with an error at best,
-	// and at worst describes one it was never shown -- which is a violation invented
-	// out of nothing. With the switch off the messages still go, and a picture is
-	// simply not part of what the model is given.
+	// them -- and only for a report made soon enough after the message was posted.
+	// See judgingPicture for why the age matters.
 	var pictures pictureSource
 	if h.config().Model.Vision && h.pictures != nil {
-		pictures = h.pictures
+		if judgingPicture(subjectAge) {
+			pictures = h.pictures
+		} else {
+			h.deps.Logger.Info("a report is old enough that its pictures are no "+
+				"longer looked at", "group", groupOpenID,
+				"age", subjectAge.Round(time.Second), "cutoff", pictureCutoff)
+		}
 	}
 	turn := h.buildTurn(chain, pictures)
 	if turn.missing > 0 {

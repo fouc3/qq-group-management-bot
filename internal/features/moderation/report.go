@@ -128,6 +128,30 @@ func unjudgeablePicture(reported CachedMessage, vision bool) error {
 	return nil
 }
 
+// pastPictureCutoff reports whether a report cannot be judged because the picture it
+// is about is too old.
+//
+// A refusal rather than a judgement on the text that is left: reported five hours late,
+// the picture *is* the message, and a verdict picked out of whatever text sat next to
+// it would be a verdict about something nobody reported. The group is owed the same
+// answer it gets for anything else that has aged out, and "this is too old" is that
+// answer -- not "the judgement failed", which invites trying again.
+//
+// A message with no picture is none of this function's business: how long text stays
+// judgeable is the cache's retention to decide, and it already has.
+func pastPictureCutoff(reported CachedMessage) error {
+	if reported.ImgCount == 0 {
+		return nil
+	}
+	age := time.Since(reported.SentAt())
+	if judgingPicture(age) {
+		return nil
+	}
+	return fmt.Errorf("%w: the reported message is %s old, past the %s at which "+
+		"pictures are no longer judged", feature.ErrPastPictureCutoff,
+		age.Round(time.Minute), pictureCutoff)
+}
+
 // usableIndex is the message's own name, or nothing when the platform gave none.
 //
 // The scene's index first because it is the documented one, then the quoted
@@ -285,7 +309,21 @@ func (h *handler) judgeQuoted(ctx context.Context, groupOpenID string,
 		}, err
 	}
 
-	verdict, err := h.Judge(ctx, groupOpenID, chain)
+	// How old the reported message is, which is what decides whether its pictures
+	// are still worth sending. Measured from the message rather than from the
+	// report: what the cutoff is about is the picture, and the picture is as old as
+	// the message that carried it.
+	age := time.Since(reported.SentAt())
+
+	if err := pastPictureCutoff(reported); err != nil {
+		return feature.ModerationVerdict{
+			SubjectOpenID:    subject,
+			QuotedMessageID:  quotedID,
+			JudgedMessageIDs: judged,
+		}, err
+	}
+
+	verdict, err := h.Judge(ctx, groupOpenID, chain, age)
 
 	// Built before the error is looked at, so that a judgement which could not be
 	// reached still records who it was about. The subject is known by now, and a

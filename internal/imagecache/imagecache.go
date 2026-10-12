@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -232,8 +231,8 @@ func (c *Cache) fetch(ctx context.Context, messageID string, index int, url stri
 			len(stored), c.maxBytes)
 	}
 
-	ref := refName(messageID, index, extension)
-	if err := c.write(ref, stored); err != nil {
+	ref := refName(stored, extension)
+	if err := c.store(ref, stored); err != nil {
 		return "", err
 	}
 	return ref, nil
@@ -449,15 +448,37 @@ func (c *Cache) sweepIfDue(ctx context.Context) {
 	}
 }
 
-// write puts the bytes in the directory under the reference, all or nothing.
+// store puts the bytes in the directory under the reference, or keeps what is
+// already there.
 //
-// Written beside its name and moved onto it, so that a picture is either there
-// whole or not there: a reader that found half a JPEG would fail to decode it and
-// lose the picture anyway.
-func (c *Cache) write(ref string, body []byte) error {
+// The name is the hash of the bytes, so the same picture is one file however many
+// times and by however many people it is posted -- which is what a sticker or a
+// reaction image is: the same picture over and over. Finding it already there is
+// not "nothing to do" either: the moment it was last used is what the sweep goes
+// by, so a second sighting is the file being touched. A picture somebody posted
+// five minutes ago stays for as long as somebody keeps posting it, which is the
+// point of keeping it at all.
+//
+// Written beside its final name and moved onto it, all or nothing: a reader that
+// found half a JPEG would fail to decode it and lose the picture anyway. Both
+// writers of one name therefore race over a rename, and a rename onto an existing
+// file is the same bytes being written twice -- harmless, and cheaper than a lock.
+func (c *Cache) store(ref string, body []byte) error {
 	if err := os.MkdirAll(c.dir, 0o700); err != nil {
 		return fmt.Errorf("creating the image cache directory: %w", err)
 	}
+	path := filepath.Join(c.dir, ref)
+	if _, err := os.Stat(path); err == nil {
+		now := time.Now()
+		if err := os.Chtimes(path, now, now); err != nil {
+			// Not a reason to lose the picture: it is already stored and
+			// readable, and all that failed is saying that it is still in use.
+			c.logDebug("could not mark a stored picture as still in use",
+				"picture", ref, "error", err)
+		}
+		return nil
+	}
+
 	temporary, err := os.CreateTemp(c.dir, ".writing-*")
 	if err != nil {
 		return fmt.Errorf("writing a picture: %w", err)
@@ -472,7 +493,7 @@ func (c *Cache) write(ref string, body []byte) error {
 		os.Remove(name)
 		return fmt.Errorf("writing a picture: %w", err)
 	}
-	if err := os.Rename(name, filepath.Join(c.dir, ref)); err != nil {
+	if err := os.Rename(name, path); err != nil {
 		os.Remove(name)
 		return fmt.Errorf("storing a picture: %w", err)
 	}
@@ -481,12 +502,13 @@ func (c *Cache) write(ref string, body []byte) error {
 
 // refName is the name a picture is stored under.
 //
-// Hashed rather than taken from the message id: the id comes from the platform and
-// is not a filename, and hashing makes the same picture of the same message land on
-// the same name however many times the event is delivered -- which the platform
-// does do, sending a mention twice, once as an ordinary message.
-func refName(messageID string, index int, extension string) string {
-	sum := sha256.Sum256([]byte(messageID + "\x00" + strconv.Itoa(index)))
+// The hash is of the bytes that are actually stored, after any shrinking, and not
+// of the message: two members posting the same picture is one file, and a picture
+// that is already there is not written again. The extension comes with the bytes
+// for the same reason -- a shrunk picture is a JPEG whatever it arrived as, and two
+// copies of one picture have to land on one name.
+func refName(body []byte, extension string) string {
+	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:refBytes]) + extension
 }
 

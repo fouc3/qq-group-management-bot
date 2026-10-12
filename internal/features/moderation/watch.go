@@ -275,7 +275,10 @@ func (h *handler) judgeWatched(ctx context.Context, groupOpenID string, message 
 		}
 	}
 
-	verdict, judgeErr := h.Judge(ctx, groupOpenID, chain)
+	// The message is the one that was just sent, so its age is nothing: a
+	// judgement made as somebody talks is never the late one the picture cutoff is
+	// about.
+	verdict, judgeErr := h.Judge(ctx, groupOpenID, chain, 0)
 	// Built before the error is looked at, so that a judgement which could not be
 	// reached still records who it was about -- the same reason the report path
 	// builds it there.

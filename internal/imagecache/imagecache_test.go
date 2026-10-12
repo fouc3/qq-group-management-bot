@@ -219,6 +219,65 @@ func TestOneUnreachablePictureDoesNotCostTheOthers(t *testing.T) {
 	}
 }
 
+// TestTheSamePictureIsKeptOnceHoweverOftenItIsSent covers the case that matters for
+// a group: the same picture posted over and over.
+//
+// A sticker or a reaction image is the same bytes every time, so the name is the hash
+// of those bytes and the second sighting is the first file being touched -- one
+// picture on disk and the same name handed back, not a copy per post.
+func TestTheSamePictureIsKeptOnceHoweverOftenItIsSent(t *testing.T) {
+	server := pictureServer(t, pngPicture(t, 40, 40))
+	cache := testCache(t, Config{Retention: time.Hour})
+
+	first := cache.FetchAll(context.Background(), "MSG-A", []string{server.URL + "/a.png"})
+	second := cache.FetchAll(context.Background(), "MSG-B", []string{server.URL + "/b.png"})
+	third := cache.FetchAll(context.Background(), "MSG-C", []string{server.URL + "/c.png"})
+	if len(first) != 1 || len(second) != 1 || len(third) != 1 {
+		t.Fatalf("the pictures were not all kept: %v %v %v", first, second, third)
+	}
+	if first[0] != second[0] || second[0] != third[0] {
+		t.Fatalf("one picture sent three times was stored under %q, %q and %q",
+			first[0], second[0], third[0])
+	}
+
+	entries, err := os.ReadDir(cache.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("the directory holds %d files, want one picture stored once",
+			len(entries))
+	}
+}
+
+// TestSeeingAPictureAgainKeepsItAlive covers what touching the file is for: the sweep
+// goes by when a picture was last used, so a picture that keeps being posted stays.
+func TestSeeingAPictureAgainKeepsItAlive(t *testing.T) {
+	server := pictureServer(t, pngPicture(t, 40, 40))
+	cache := testCache(t, Config{Retention: time.Hour})
+
+	refs := cache.FetchAll(context.Background(), "MSG-D", []string{server.URL + "/a.png"})
+	if len(refs) != 1 {
+		t.Fatalf("kept %d pictures, want 1", len(refs))
+	}
+	// Aged past the retention, as if it had been posted hours ago.
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(cache.Dir(), refs[0]), old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// Somebody posts it again, which is the touch.
+	again := cache.FetchAll(context.Background(), "MSG-E", []string{server.URL + "/a.png"})
+	if len(again) != 1 || again[0] != refs[0] {
+		t.Fatalf("the same picture came back as %v, want %v", again, refs)
+	}
+
+	cache.Sweep(context.Background())
+	if _, err := cache.Read(refs[0]); err != nil {
+		t.Errorf("a picture somebody had just posted again was swept: %v", err)
+	}
+}
+
 // TestTheSameMessageAndPositionAlwaysLandsOnTheSameName covers what makes the
 // double delivery of a mention harmless: the same picture is written to the same
 // name, so the second delivery is the same write.

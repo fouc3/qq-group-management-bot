@@ -16,7 +16,7 @@ func TestAnUnreadableAnswerIsAskedAgain(t *testing.T) {
 	stub := &modelStub{answers: []string{"我看看啊", `{"reason":"测试理由","verdict":"ok","confidence":0.9}`}}
 	h := judgeHarness(t, stub, "")
 
-	verdict, err := h.Judge(context.Background(), "", chainOf("正常聊天"))
+	verdict, err := h.Judge(context.Background(), "", chainOf("正常聊天"), 0)
 	if err != nil {
 		t.Fatalf("Judge: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestAnAnswerThatStaysUnreadableIsGivenUpOn(t *testing.T) {
 	stub := &modelStub{answers: []string{"不是 JSON", "还是不是", "仍然不是"}}
 	h := judgeHarness(t, stub, "")
 
-	_, err := h.Judge(context.Background(), "", chainOf("正常聊天"))
+	_, err := h.Judge(context.Background(), "", chainOf("正常聊天"), 0)
 	if err == nil {
 		t.Fatal("an unreadable answer must not become a verdict")
 	}
