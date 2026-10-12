@@ -61,15 +61,6 @@ const (
 	DefaultImageMaxEdge = 1568
 )
 
-// The two ways the window around a quoted message is chosen.
-const (
-	// ScopeGroup follows the group's timeline, which is what judging an
-	// advertisement needs: who else said what, and whether anybody objected.
-	ScopeGroup = "group"
-	// ScopeSender follows the sender alone.
-	ScopeSender = "sender"
-)
-
 // Config is this feature's section.
 type Config struct {
 	// Enabled turns the switch on. A section written without it is on.
@@ -84,8 +75,10 @@ type Config struct {
 	// ChainMinutes bounds the window by time as well as by count: the two ends
 	// of what is sent may not be further apart than this.
 	ChainMinutes int `yaml:"chain_minutes"`
-	// ContextScope is ScopeGroup or ScopeSender.
-	ContextScope string `yaml:"context_scope"`
+	// Whose messages the window holds is not a setting: it is the sender's own and
+	// nobody else's, for the reason expandChain gives. The context_scope key that
+	// offered the other choice is gone rather than honoured -- nothing ever
+	// implemented it, and its default named the version that did not exist.
 
 	// Model is how the judge is reached. It is deliberately optional: a
 	// deployment that only fills the cache is a legitimate stage to run in, and
@@ -482,15 +475,6 @@ func (c *Config) applyDefaults() error {
 	}
 	if c.ChainMinutes <= 0 {
 		c.ChainMinutes = DefaultChainMinutes
-	}
-	if strings.TrimSpace(c.ContextScope) == "" {
-		c.ContextScope = ScopeGroup
-	}
-	switch c.ContextScope {
-	case ScopeGroup, ScopeSender:
-	default:
-		return fmt.Errorf("context_scope %q is not %s or %s",
-			c.ContextScope, ScopeGroup, ScopeSender)
 	}
 	if c.Model.TimeoutSeconds <= 0 {
 		c.Model.TimeoutSeconds = 30

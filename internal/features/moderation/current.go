@@ -47,9 +47,6 @@ func (h *handler) Reload(section yaml.Node) error {
 	if fresh.CacheHours != inForce.CacheHours {
 		return errors.New("cache_hours 改了：缓存的寿命在启动时决定，需要重启")
 	}
-	if fresh.ContextScope != inForce.ContextScope {
-		return errors.New("context_scope 改了：取窗方式在启动时决定，需要重启")
-	}
 	if fresh.HighRisk.MaxInFlight != inForce.HighRisk.MaxInFlight {
 		// The room for automatic judgements is a channel made at startup, so a new
 		// number here would be a setting that reads as applied and is not.
