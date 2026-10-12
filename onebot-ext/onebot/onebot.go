@@ -227,6 +227,12 @@ type Match struct {
 // while OneBot reports the recorded join time. A tolerance covers that, and the
 // match must be unique, because removing the wrong member is much worse than
 // reporting that the member could not be identified.
+//
+// The bot this was written for does not call it yet: a hold is identified by its own
+// token there, and the join time is only written down. It stays because the join time
+// exists only in the event that announced the join, so the caller that would use it has
+// to have somewhere to put it -- which is that bot's own field, not this function's
+// problem.
 func MatchByJoinTime(members []Member, joinTime, toleranceSeconds int64) (Match, error) {
 	if toleranceSeconds < 0 {
 		toleranceSeconds = -toleranceSeconds

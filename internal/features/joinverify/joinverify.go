@@ -517,9 +517,16 @@ type pending struct {
 	token        string
 	groupOpenID  string
 	memberOpenID string
-	// joinedAt is the join time the official platform reported, as a Unix
-	// timestamp. It is what identifies the same person in OneBot's member
-	// list, since an openid means nothing there.
+	// joinedAt is the join time the official platform reported, as a Unix timestamp.
+	//
+	// It is written down and kept across a restart, but nothing matches on it today.
+	// Identifying the same person in OneBot's member list is a path that was never
+	// wired up -- onebot.MatchByJoinTime is the piece that would do it, and this bot
+	// does not call it -- and what identifies a hold is its token.
+	//
+	// The field stays because the platform gives the join time exactly once, in the
+	// event that announced the join: throwing away the one moment it is available is
+	// what would make that path impossible to wire up later.
 	joinedAt int64
 	// deadline is when the administrators are told about this member.
 	deadline time.Time
