@@ -1387,18 +1387,52 @@ func parseDuration(text string) (time.Duration, error) {
 	return time.Duration(amount) * unit, nil
 }
 
-// humanDuration renders a duration the way the commands accept it.
+// durationUnits is what a duration is spelled out in, longest first.
+//
+// alone is the spelling for a unit nothing smaller follows: a minute on its own is
+// "10分钟" and a minute with seconds behind it is "1分30秒", which is how anybody would
+// say either of them out loud.
+var durationUnits = []struct {
+	size  time.Duration
+	name  string
+	alone string
+}{
+	{24 * time.Hour, "天", "天"},
+	{time.Hour, "小时", "小时"},
+	{time.Minute, "分", "分钟"},
+	{time.Second, "秒", "秒"},
+}
+
+// humanDuration renders a duration in the units it is made of.
+//
+// 90 seconds is "1分30秒" rather than "90秒": the member reading it back is comparing it
+// with what they meant when they typed it, and they did not mean 90 of anything. Only the
+// units that are there are written, so 25 hours is "1天1小时" and a day is "1天".
+//
+// moderation/watch.go keeps its own copy of this, word for word, rather than sharing it: a
+// shared one would need a package for two features to import, and no feature here imports
+// another. What keeps the two together is a test with the same cases in each package -- and
+// until this was written they disagreed, on zero and on everything smaller than the unit
+// they happened to land in.
 func humanDuration(duration time.Duration) string {
-	switch {
-	case duration%(24*time.Hour) == 0:
-		return fmt.Sprintf("%d天", int(duration/(24*time.Hour)))
-	case duration%time.Hour == 0:
-		return fmt.Sprintf("%d小时", int(duration/time.Hour))
-	case duration%time.Minute == 0:
-		return fmt.Sprintf("%d分钟", int(duration/time.Minute))
-	default:
-		return fmt.Sprintf("%d秒", int(duration/time.Second))
+	if duration < time.Second {
+		return "0秒"
 	}
+	var rendered strings.Builder
+	for _, unit := range durationUnits {
+		whole := duration / unit.size
+		if whole == 0 {
+			continue
+		}
+		duration -= whole * unit.size
+		name := unit.name
+		if duration == 0 {
+			// Nothing smaller follows, so this is the last one.
+			name = unit.alone
+		}
+		fmt.Fprintf(&rendered, "%d%s", whole, name)
+	}
+	return rendered.String()
 }
 
 // contains reports whether a list holds a value.

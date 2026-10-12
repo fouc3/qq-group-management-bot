@@ -497,19 +497,46 @@ func recallReason(err error) string {
 	return text
 }
 
-// humanDuration renders a duration the way the group is told it, in the same words
-// the report path uses.
+// durationUnits is what a duration is spelled out in, longest first.
+//
+// alone is the spelling for a unit nothing smaller follows: a minute on its own is
+// "10分钟" and a minute with seconds behind it is "1分30秒".
+var durationUnits = []struct {
+	size  time.Duration
+	name  string
+	alone string
+}{
+	{24 * time.Hour, "天", "天"},
+	{time.Hour, "小时", "小时"},
+	{time.Minute, "分", "分钟"},
+	{time.Second, "秒", "秒"},
+}
+
+// humanDuration renders a duration in the units it is made of.
+//
+// This is admincmd/humanDuration kept word for word rather than shared, and the reason is
+// on that one: two features do not import each other here, and a package for one function
+// would be a package for nothing. A test with the same cases in each package is what keeps
+// them the same; before, they did not agree -- this one said "0秒" for zero where the other
+// said "0天", and both said "90秒" for a minute and a half.
 func humanDuration(duration time.Duration) string {
-	switch {
-	case duration >= 24*time.Hour && duration%(24*time.Hour) == 0:
-		return fmt.Sprintf("%d天", int(duration/(24*time.Hour)))
-	case duration >= time.Hour && duration%time.Hour == 0:
-		return fmt.Sprintf("%d小时", int(duration/time.Hour))
-	case duration >= time.Minute && duration%time.Minute == 0:
-		return fmt.Sprintf("%d分钟", int(duration/time.Minute))
-	default:
-		return fmt.Sprintf("%d秒", int(duration/time.Second))
+	if duration < time.Second {
+		return "0秒"
 	}
+	var rendered strings.Builder
+	for _, unit := range durationUnits {
+		whole := duration / unit.size
+		if whole == 0 {
+			continue
+		}
+		duration -= whole * unit.size
+		name := unit.name
+		if duration == 0 {
+			name = unit.alone
+		}
+		fmt.Fprintf(&rendered, "%d%s", whole, name)
+	}
+	return rendered.String()
 }
 
 // markIfCaughtEnough marks a member nobody marked, once they have been caught

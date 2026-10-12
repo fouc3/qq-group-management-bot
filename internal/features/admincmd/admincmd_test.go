@@ -68,18 +68,29 @@ func TestParseDuration(t *testing.T) {
 }
 
 // TestHumanDuration mirrors what the operator typed.
+//
+// Spelled out in the units it is made of rather than as one unit: 90 seconds is
+// "1分30秒", which is the shape somebody has in mind when they set a mute. moderation
+// keeps a copy of the renderer and a test with these same cases, because the two are
+// deliberately not shared code.
 func TestHumanDuration(t *testing.T) {
-	cases := map[time.Duration]string{
-		30 * time.Second:    "30秒",
-		10 * time.Minute:    "10分钟",
-		2 * time.Hour:       "2小时",
-		29 * 24 * time.Hour: "29天",
-		100 * time.Minute:   "100分钟",
-		90 * time.Second:    "90秒",
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{0, "0秒"},
+		{30 * time.Second, "30秒"},
+		{90 * time.Second, "1分30秒"},
+		{10 * time.Minute, "10分钟"},
+		{100 * time.Minute, "1小时40分钟"},
+		{2 * time.Hour, "2小时"},
+		{25 * time.Hour, "1天1小时"},
+		{time.Hour + time.Minute + time.Second, "1小时1分1秒"},
+		{29 * 24 * time.Hour, "29天"},
 	}
-	for duration, want := range cases {
-		if got := humanDuration(duration); got != want {
-			t.Errorf("humanDuration(%s) = %q, want %q", duration, got, want)
+	for _, one := range cases {
+		if got := humanDuration(one.in); got != one.want {
+			t.Errorf("humanDuration(%s) = %q, want %q", one.in, got, one.want)
 		}
 	}
 }
