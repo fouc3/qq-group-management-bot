@@ -440,6 +440,11 @@ func (h *handler) allowReport(reporter string) bool {
 // The raw error is a request line, an HTTP status, an error code and a trace id:
 // accurate, and useless to the people reading it. What matters is the one fact a
 // member can act on, and the code for it is stable enough to name.
+//
+// moderation/watch.go keeps a copy of this, called recallReason, and a test with these
+// same cases in each package is what keeps the two in step: they used to cut at 80
+// characters here and 120 there, and to look for the trace id only where a space came
+// before it.
 func shortReason(err error) string {
 	if err == nil {
 		return ""
@@ -461,7 +466,7 @@ func shortReason(err error) string {
 	if index := strings.Index(text, "[trace_id"); index >= 0 {
 		text = strings.TrimSpace(text[:index])
 	}
-	return shortened(text, 80)
+	return shortened(text, 120)
 }
 
 // shortened keeps a message readable, counting characters rather than bytes so it

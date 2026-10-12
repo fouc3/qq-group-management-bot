@@ -472,9 +472,12 @@ func recallSentence(recalled, failed int, firstFailure string) string {
 
 // recallReason shortens a platform refusal for the record.
 //
-// It says the same words the report path does, deliberately: an operator reading
-// either row has to recognise the same refusal, and the one refusal worth naming is
-// the platform refusing to silence a group's own administrator.
+// It says the same words the report path does, deliberately: an operator reading either
+// row has to recognise the same refusal, and the one refusal worth naming is the platform
+// refusing to silence a group's own administrator. admincmd/shortReason is the other copy
+// of this, and a test with these same cases in each package is what keeps them in step --
+// they used to cut at 120 here and 80 there, and this one looked for the trace id only
+// where a space came before it.
 func recallReason(err error) string {
 	if err == nil {
 		return ""
@@ -483,18 +486,15 @@ func recallReason(err error) string {
 	if strings.Contains(text, "40103004") {
 		return "平台不允许禁言群主或管理员"
 	}
-	// The code and its own wording, with the request line and the trace id taken
-	// off: those belong in the log rather than in a record somebody reads later.
-	if start := strings.Index(text, "err_code"); start >= 0 {
-		text = text[start:]
+	// The code and its own wording, with the request line and the trace id taken off:
+	// those belong in the log rather than in a record somebody reads later.
+	if index := strings.Index(text, "err_code"); index >= 0 {
+		text = strings.TrimSpace(text[index:])
 	}
-	if end := strings.Index(text, " [trace_id="); end >= 0 {
-		text = text[:end]
+	if index := strings.Index(text, "[trace_id"); index >= 0 {
+		text = strings.TrimSpace(text[:index])
 	}
-	if len([]rune(text)) > 120 {
-		text = string([]rune(text)[:120]) + "…"
-	}
-	return text
+	return shortened(text, 120)
 }
 
 // durationUnits is what a duration is spelled out in, longest first.
