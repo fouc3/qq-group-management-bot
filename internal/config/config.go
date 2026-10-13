@@ -8,6 +8,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -64,6 +65,8 @@ type Config struct {
 	HumanVerification HumanVerification `yaml:"human_verification"`
 	// Log holds logging settings.
 	Log Log `yaml:"log"`
+	// Admin holds the management console's HTTP settings.
+	Admin Admin `yaml:"admin"`
 	// Features holds one raw node per feature, keyed by the feature name.
 	//
 	// It is deliberately untyped: each feature decodes its own section, so a
@@ -326,6 +329,80 @@ type Log struct {
 	Format string `yaml:"format"`
 }
 
+// DefaultAdminListen is where the management console listens when the file names
+// no place.
+//
+// The loopback interface, because the console can silence members and take
+// messages back: a bot that opens it to the network by leaving a line out has
+// published an administrative interface of a real QQ group.
+const DefaultAdminListen = "127.0.0.1:8787"
+
+// Admin is the management console: the HTTP service that serves the web
+// application and the read-only API behind it.
+//
+// It is off unless it is asked for. Everything here is about reaching it, not
+// about what it may do -- what it may do is decided by the same configuration
+// the bot already obeys.
+type Admin struct {
+	// Enabled turns the console on.
+	Enabled bool `yaml:"enabled"`
+	// Listen is host:port. Empty means DefaultAdminListen.
+	Listen string `yaml:"listen"`
+	// Token is the bearer token every request must carry.
+	//
+	// Required as soon as the address is not a loopback one: without it, anybody
+	// who can reach the port can kick members out of the group. An unset token on
+	// a loopback address is accepted, because reaching the loopback interface
+	// already means being on the machine.
+	Token string `yaml:"token"`
+	// WebDir serves the web application from a directory instead of the copy
+	// embedded in the binary.
+	//
+	// It exists for working on the front end: a rebuilt file is picked up by a
+	// browser refresh rather than by rebuilding and restarting the bot. Empty --
+	// the ordinary deployment -- serves what was compiled in.
+	WebDir string `yaml:"web_dir"`
+}
+
+// AdminListen is the address the console binds, with the default filled in.
+func (a Admin) AdminListen() string {
+	if strings.TrimSpace(a.Listen) == "" {
+		return DefaultAdminListen
+	}
+	return strings.TrimSpace(a.Listen)
+}
+
+// NeedsToken reports whether a token is required for this address.
+//
+// A loopback address does not need one; anything else does. The distinction is
+// the whole of the check, which is why it is made from the address rather than
+// asked of the operator.
+func (a Admin) NeedsToken() bool {
+	return !IsLoopback(a.AdminListen())
+}
+
+// IsLoopback reports whether host:port names the local machine.
+//
+// It is deliberately strict: an address it cannot parse is not loopback, so a
+// typo fails closed and asks for a token rather than quietly binding somewhere
+// unexpected without one.
+func IsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		// ":8787" binds every interface, which is the opposite of local.
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // OneBot configures the fallback used for actions the official bot is not
 // allowed to perform.
 //
@@ -541,8 +618,33 @@ func (c *Config) applyDefaults() error {
 	if err := c.HumanVerification.applyDefaults(); err != nil {
 		return err
 	}
+	if err := c.adminDefaults(); err != nil {
+		return err
+	}
 	if c.Features == nil {
 		c.Features = map[string]yaml.Node{}
+	}
+	return nil
+}
+
+// adminDefaults fills in the console's address and refuses an unsafe one.
+//
+// The refusal is the important half. A console listening on anything but the
+// loopback interface without a token is a group's kick-and-mute authority on
+// the network, and the one moment it can be caught is here, at startup, where
+// somebody is watching the log.
+func (c *Config) adminDefaults() error {
+	c.Admin.Listen = c.Admin.AdminListen()
+	if !c.Admin.Enabled {
+		return nil
+	}
+	if _, _, err := net.SplitHostPort(c.Admin.Listen); err != nil {
+		return fmt.Errorf("admin.listen %q is not host:port: %w", c.Admin.Listen, err)
+	}
+	if c.Admin.NeedsToken() && strings.TrimSpace(c.Admin.Token) == "" {
+		return fmt.Errorf("admin.listen %q is reachable from the network, "+
+			"so admin.token must be set: without it anybody who can reach the port "+
+			"can silence and remove members", c.Admin.Listen)
 	}
 	return nil
 }

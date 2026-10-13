@@ -779,6 +779,11 @@ func (v *verifier) SetAdminDirectory(directory feature.AdminDirectory) {
 	v.admins = directory
 }
 
+// The console drives these three through the interface it asserts from the
+// running feature. The assertion is here so that a signature that drifts is a
+// compile error rather than a button that answers 503 in production.
+var _ feature.VerifierActions = (*verifier)(nil)
+
 // Name implements feature.Feature.
 func (v *verifier) Name() string { return Name }
 
@@ -1410,8 +1415,9 @@ func (v *verifier) IsPending(groupOpenID, memberOpenID string) bool {
 	return found
 }
 
-// Resend implements feature.Verifier: it sends the prompt again for a member who
-// is already waiting, with the button they already have.
+// Resend implements feature.Verifier and feature.VerifierActions: it sends the
+// prompt again for a member who is already waiting, with the button they already
+// have.
 //
 // Nothing else changes: the member keeps the hold they were given, the token is
 // the same one, and the button already posted keeps working. That is the point
@@ -1420,10 +1426,103 @@ func (v *verifier) IsPending(groupOpenID, memberOpenID string) bool {
 func (v *verifier) Resend(ctx context.Context, groupOpenID, memberOpenID string) error {
 	entry, found := v.findByMember(groupOpenID, memberOpenID)
 	if !found {
-		return errors.New("该成员不在验证中，无法重新发送验证通知")
+		return &NotHeld{Message: "该成员不在验证中，无法重新发送验证通知"}
 	}
 	return v.ask(ctx, groupOpenID, memberOpenID, entry.token, entry.settings,
 		entry.settings.Prompt, "")
+}
+
+// NotHeld is what every action returns when there is nobody to act on.
+//
+// It carries the sentence for the person who asked, so a caller can tell "there
+// is nobody here" (which is an answer, and often the answer the caller wanted)
+// from "it broke". The message is the same text these functions have always
+// returned; only the type is new, so a group reply reads exactly as it did.
+type NotHeld struct {
+	Message string
+}
+
+// Error implements error.
+func (e *NotHeld) Error() string { return e.Message }
+
+// Approve implements feature.VerifierActions: it lets a member through now,
+// whether or not they pressed anything.
+//
+// The steps are the ones an administrator's skip performs, in the same order and
+// for the same reason: the hold is lifted first, and only a lifted hold closes the
+// record. A record that was closed while the member was still silenced would be
+// the worst of both -- nobody is waiting for them any more, and they still
+// cannot speak, which is a state nothing would ever end.
+//
+// It also says so in the group, with the same sentence the skip button posts. The
+// group is where the consequence shows up -- somebody who was being held starts
+// talking again -- and a release that said nothing would leave them to work out
+// why on their own. There is no event to reply to here, so this notice is an
+// active message rather than a passive one.
+func (v *verifier) Approve(ctx context.Context, groupOpenID, memberOpenID string) error {
+	entry, found := v.findByMember(groupOpenID, memberOpenID)
+	if !found {
+		return &NotHeld{Message: "该成员不在验证中，无法放行"}
+	}
+	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings); err != nil {
+		return fmt.Errorf("解除扣留失败，该成员仍在验证队列中：%w", err)
+	}
+	v.forget(entry.token)
+	v.deps.Logger.Info("a member was let through from the management console",
+		"group", entry.groupOpenID, "member", entry.memberOpenID)
+	v.notify("", entry.groupOpenID, skipNotice(entry))
+	return nil
+}
+
+// Reject implements feature.VerifierActions: it closes a waiting member's record
+// without lifting their hold.
+//
+// Two things it deliberately does not do, and both are the point:
+//
+//   - It does not unmute. The hold is the platform's; a member who is barred from
+//     coming back has not asked to be able to speak again, and the record going
+//     away must not be what releases them. A real mute runs out on its own, as it
+//     always would have.
+//   - It does not remove anybody from the group. The bot cannot kick, so an
+//     attempt would be a request that always fails reported as an action; taking
+//     somebody out is something a person does by hand.
+//
+// What it does do is drop the record, which is what the queue shows. For a
+// pseudo-mute that record *is* the hold -- messages are taken back while it
+// exists -- so closing it would hand the member their voice back. That case is
+// therefore silenced for real first: the pseudo-hold becomes a platform mute of
+// the configured length, and only then does the record go.
+//
+// A pseudo-hold that cannot be turned into a real mute leaves the record exactly
+// where it was, and says why. Closing it anyway would be releasing a member the
+// operator has just decided to bar.
+func (v *verifier) Reject(ctx context.Context, groupOpenID, memberOpenID string) error {
+	entry, found := v.findByMember(groupOpenID, memberOpenID)
+	if !found {
+		return &NotHeld{Message: "该成员不在验证中，无法拉黑"}
+	}
+
+	if entry.settings.pseudoHolds() && !entry.settings.DryRun {
+		// The same length the group configured for holding a new member. The
+		// mode is flipped rather than the settings re-read: what is being asked
+		// for is the silence this group would have given them had it chosen the
+		// mute mode.
+		realMute := entry.settings
+		realMute.MuteMode = MuteModeMute
+		until := time.Now().Add(time.Duration(entry.settings.MuteMinutes) * time.Minute)
+		if err := v.mute(ctx, entry.groupOpenID, entry.memberOpenID, until, realMute); err != nil {
+			return fmt.Errorf("改为真禁言失败，验证记录保持原样（可以重试）：%w", err)
+		}
+		v.deps.Logger.Info("a pseudo-held member was muted for real before being barred",
+			"group", entry.groupOpenID, "member", entry.memberOpenID,
+			"until", until.Format(time.RFC3339))
+	}
+
+	v.forget(entry.token)
+	v.deps.Logger.Info("a waiting member was barred from the management console",
+		"group", entry.groupOpenID, "member", entry.memberOpenID,
+		"pseudo_hold", entry.settings.pseudoHolds())
+	return nil
 }
 
 // Reverify implements feature.Verifier: it holds the member again and sends a
@@ -1677,9 +1776,21 @@ func (v *verifier) foreignPress(ctx context.Context,
 	if err := v.answer(data.ID, qqbotsdk.InteractionCodeSuccess); err != nil {
 		log.Error("the skip went unanswered", "error", err)
 	}
-	v.notify(eventID, entry.groupOpenID, renderTemplate(entry.settings.SkipMessage,
-		map[string]string{"{target}": atTag(entry.memberOpenID)}))
+	v.notify(eventID, entry.groupOpenID, skipNotice(entry))
 	return nil
+}
+
+// skipNotice is what the group is told when somebody is let through without
+// verifying.
+//
+// One sentence for both ways that happens -- an administrator pressing the button
+// in the group, or the operator letting them through from the management console
+// -- because it is one decision: the member proved nothing, and somebody who may
+// decide decided for them. Two wordings would also drift apart the first time one
+// of them was edited.
+func skipNotice(entry *pending) string {
+	return renderTemplate(entry.settings.SkipMessage,
+		map[string]string{"{target}": atTag(entry.memberOpenID)})
 }
 
 // notify posts a message as a passive reply to an interaction event.

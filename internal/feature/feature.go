@@ -549,6 +549,36 @@ type Verifier interface {
 	Resend(ctx context.Context, groupOpenID, memberOpenID string) error
 }
 
+// VerifierActions is what a person with a console does to somebody who is waiting
+// to verify.
+//
+// Kept apart from Verifier, which is what the bot asks itself while it is running
+// -- is this member held, say the prompt again -- and whose two sides are the
+// member and the sweep. Letting somebody through or turning them away is neither
+// of those: it is a decision, and the only thing that makes it is a person.
+//
+// The console asserts this shape from the running feature rather than being
+// handed one at assembly time, because it is not a dependency of the bot: a
+// deployment that never opens a console is unaffected by it, and one that opens
+// a console without this feature gets a refusal rather than a failed startup.
+type VerifierActions interface {
+	// Resend sends the prompt again, exactly as Verifier.Resend does.
+	Resend(ctx context.Context, groupOpenID, memberOpenID string) error
+	// Approve lets a member through now: the hold is lifted and the record is
+	// closed, whether or not they ever pressed the button.
+	Approve(ctx context.Context, groupOpenID, memberOpenID string) error
+	// Reject closes a waiting member's record without lifting their hold.
+	//
+	// The record is the queue's and the hold is the platform's, and closing the
+	// first must not touch the second: somebody barring a member from coming back
+	// is not asking for them to be able to speak again.
+	//
+	// Nobody is removed from the group either. This bot cannot kick (the platform
+	// refuses it), so an attempt would be a request that always fails dressed up
+	// as an action -- removing the member is a thing a person does by hand.
+	Reject(ctx context.Context, groupOpenID, memberOpenID string) error
+}
+
 // VerifierAware is implemented by a feature that uses the join verification.
 type VerifierAware interface {
 	SetVerifier(Verifier)

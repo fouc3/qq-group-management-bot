@@ -295,3 +295,14 @@ func (d Def) panelPlace(scene Scene) (PanelPlacement, bool) {
 func fillPrefix(line, prefix string) string {
 	return strings.ReplaceAll(line, prefixPlaceholder, prefix)
 }
+
+// Show renders this command's usage line with the configured prefix in it.
+//
+// The table writes its lines with a placeholder rather than with the prefix
+// itself, because the prefix is a configuration value and the table is written
+// before the file is read. Anything that shows a line to somebody -- the help
+// does, and so does the management console -- has to make the same substitution,
+// and it should make it here rather than spelling the placeholder a second time.
+func (d Def) Show(prefix string) string {
+	return fillPrefix(d.Usage, prefix)
+}

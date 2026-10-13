@@ -15,6 +15,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -117,6 +118,49 @@ func manager(t *testing.T, names ...string) (*parts, map[string][]feature.Featur
 		Store:  database,
 	}, ctx, quiet)
 	return live, built, client
+}
+
+// stubHumanVerify is an online verification service that answers what a test says.
+type stubHumanVerify struct{ connected bool }
+
+func (s stubHumanVerify) Issue(context.Context, humanverify.Request) (humanverify.Link, error) {
+	return humanverify.Link{}, nil
+}
+
+func (s stubHumanVerify) OnVerified(func(humanverify.Event)) func() { return func() {} }
+
+func (s stubHumanVerify) Connected() bool { return s.connected }
+
+// TestTheConsoleReadsTheVerificationServiceInForce covers the answer the console gives
+// about the online verification service.
+//
+// The case worth pinning is the replacement. A reload builds a new client and closes
+// the old one, so a console that had been handed a client rather than the parts would
+// go on answering about a connection nobody is listening on -- and "connected" is
+// exactly the answer that decides whether a held member can be given a link at all.
+func TestTheConsoleReadsTheVerificationServiceInForce(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	live := newParts(feature.NewRegistry(), feature.Deps{
+		HumanVerify: stubHumanVerify{connected: true},
+	}, ctx, logger)
+	if !live.HumanVerifyConnected() {
+		t.Fatal("the service the parts were given was reported as down")
+	}
+
+	// A deployment that names no service. Nobody is connected to a service that does
+	// not exist, and the console must not report one.
+	none := newParts(feature.NewRegistry(), feature.Deps{}, ctx, logger)
+	if none.HumanVerifyConnected() {
+		t.Fatal("a deployment with no service reported a connection")
+	}
+
+	// And the reload that takes the service away.
+	live.setHumanVerify(nil)
+	if live.HumanVerifyConnected() {
+		t.Fatal("a service that was replaced was still reported as connected")
+	}
 }
 
 // section is one feature's configuration section.

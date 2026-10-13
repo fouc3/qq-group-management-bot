@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,12 @@ const reloadInterval = 3 * time.Second
 // Two ways in, both ending in the same place: the file is looked at on a timer, and
 // SIGHUP asks immediately.
 type reloader struct {
+	// mu serialises adopting a reading of the file.
+	//
+	// Two callers can ask for a reload: the file watcher, every few seconds and on
+	// SIGHUP, and the management console, when somebody presses the button. What is
+	// in force has to be the last reading adopted, not whichever finished last.
+	mu     sync.Mutex
 	path   string
 	parts  *parts
 	logger *slog.Logger
@@ -77,7 +84,44 @@ func watchReloads(ctx context.Context, reload *reloader) {
 }
 
 // once reads the file and adopts whatever changed.
+//
+// The file watcher has nobody to answer, so the outcome is only logged -- and it
+// is logged inside reload, at the level the failure deserves. A caller with
+// somebody waiting is Reload.
 func (r *reloader) once(why string) {
+	_ = r.reload(why)
+}
+
+// Reload reads the file again and adopts what changed, reporting whether the
+// whole change was adopted.
+//
+// It exists for the management console: a person who edited the file and pressed
+// reload is waiting for an answer, and a silent success is the one outcome that
+// leaves them believing a change is in force when it is not.
+//
+// The lock is what makes a console reload and the file watcher safe together:
+// without it two readings could be adopted at once, and what is in force would be
+// whichever finished last rather than whichever was read last.
+func (r *reloader) Reload(why string) error {
+	return r.reload(why)
+}
+
+// Current is the configuration in force.
+//
+// The file may have changed since it was read, so this is what the bot is obeying
+// rather than what is on disk -- which is the question the console is asking when
+// it shows settings.
+func (r *reloader) Current() *config.Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.current
+}
+
+// reload is once() with an answer, and the only place the reload state moves.
+func (r *reloader) reload(why string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	fresh, err := config.Load(r.path)
 	if err != nil {
 		// A file that cannot be read leaves the bot exactly as it was. The
@@ -89,13 +133,13 @@ func (r *reloader) once(why string) {
 			r.logger.Error("the configuration could not be read, so nothing changed",
 				"path", r.path, "error", err)
 		}
-		return
+		return err
 	}
 	r.lastError = ""
 
 	if sameConfig(r.current, fresh) {
 		r.logger.Debug("no configuration change to apply", "why", why)
-		return
+		return nil
 	}
 	// What is in force moves only once the change has been adopted. A failure measured
 	// as applied would never be looked at again: the next look at the same file would
@@ -108,10 +152,11 @@ func (r *reloader) once(why string) {
 				"in force is the one before it, and the file will be tried again",
 				"path", r.path, "error", err)
 		}
-		return
+		return err
 	}
 	r.lastApplyError = ""
 	r.current = fresh
+	return nil
 }
 
 // apply adopts what the file changed into what is running, and reports whether the
@@ -188,6 +233,18 @@ func (r *reloader) immovable(fresh *config.Config) []string {
 	if before.Log.Format != fresh.Log.Format {
 		reasons = append(reasons, "log.format 改了：日志器在启动时建立，"+
 			"每个功能手里都是它")
+	}
+	// The console reads its token and its web directory from the configuration in
+	// force, so those two move with an edit. What cannot move is the socket: a
+	// listener is bound once, and an edit that named a different address would
+	// leave the console answering where it was told to and nowhere else.
+	if before.Admin.AdminListen() != fresh.Admin.AdminListen() {
+		reasons = append(reasons, "admin.listen 改了：监听地址只在启动时绑定，"+
+			"新的地址要重启才会生效（admin.token 与 admin.web_dir 不需要重启）")
+	}
+	if before.Admin.Enabled != fresh.Admin.Enabled {
+		reasons = append(reasons, "admin.enabled 改了：管理后台只在启动时决定是否建立，"+
+			"要重启")
 	}
 	return reasons
 }

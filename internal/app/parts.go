@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	qqbotsdk "github.com/fouc3/qq-bot-sdk"
 	"gopkg.in/yaml.v3"
@@ -38,7 +39,23 @@ type parts struct {
 	deps feature.Deps
 	// live is what is running, by name.
 	live map[string]*part
+	// humanVerify is the online verification service in force, or an empty
+	// holder when the file names none.
+	//
+	// Held here rather than handed to the console as a client because a reload
+	// replaces the client, and the console answers requests while that happens:
+	// what it has to read is the service in force now, not the one that existed
+	// when the process started. atomic.Value because the write is on the reload
+	// goroutine and the read is on a request.
+	humanVerify atomic.Value
 }
+
+// humanVerifyHolder is what the atomic holds.
+//
+// A one-field struct rather than the interface itself, because atomic.Value
+// refuses a nil interface and "this deployment has no service" is a state it has
+// to be able to hold.
+type humanVerifyHolder struct{ service feature.HumanVerify }
 
 // part is one feature that is running, and the section it was built from.
 //
@@ -67,13 +84,15 @@ func newParts(registry *feature.Registry, deps feature.Deps, ctx context.Context
 	if deps.Mutes == nil {
 		deps.Mutes = mutelog.New()
 	}
-	return &parts{
+	built := &parts{
 		registry: registry,
 		deps:     deps,
 		ctx:      ctx,
 		logger:   logger,
 		live:     map[string]*part{},
 	}
+	built.humanVerify.Store(humanVerifyHolder{service: deps.HumanVerify})
+	return built
 }
 
 // startFromConfig starts every feature the configuration turns on.
@@ -353,6 +372,37 @@ func (p *parts) running(name string) bool {
 	return live
 }
 
+// Running reports whether a named feature is built and registered.
+//
+// It is running() for the management console, which is another package and cannot
+// see an unexported method. The distinction it makes is the one the console needs:
+// a feature written in the file but not running is a fact worth showing, because
+// the alternative is an operator who believes they turned something on.
+func (p *parts) Running(name string) bool { return p.running(name) }
+
+// Instance returns the running instance of a feature, or nil.
+//
+// Handed out so that the console can ask a feature what it already answers
+// questions about -- the command table is the one that matters today -- rather
+// than keeping a second copy of an answer that would drift from the first.
+func (p *parts) Instance(name string) feature.Feature { return p.instanceOf(name) }
+
+// CommandDefs lists the commands the bot answers, for the console.
+//
+// The table's keeper is asked first, because its table is the whole list: its own
+// commands plus everything the other features offered. Only when there is no keeper
+// -- a bot whose admin_commands feature is off -- is what the other features offer
+// on their own the truth. Asking the keeper for its *sources* instead of its table
+// is what made the console answer an empty list on a bot with a full command table.
+func (p *parts) CommandDefs() []command.Def {
+	if keeper := p.instanceOf(admincmd.Name); keeper != nil {
+		if whole, ok := any(keeper).(interface{ Definitions() []command.Def }); ok {
+			return whole.Definitions()
+		}
+	}
+	return feature.CommandSources(p.features(), nil)
+}
+
 // sectionOf returns the section a running feature was built from.
 func (p *parts) sectionOf(name string) (yaml.Node, bool) {
 	part, live := p.live[name]
@@ -406,5 +456,34 @@ func (p *parts) setHumanVerify(client *humanverify.Client) *humanverify.Client {
 	if client != nil {
 		p.deps.HumanVerify = client
 	}
+	// The console reads this one, so it is replaced in the same step as the copy
+	// the features are handed: a console still answering about the closed client
+	// would report a service nobody is connected to.
+	//
+	// A client that is not there is stored as no interface at all, for the same
+	// reason the deps above are: a nil pointer inside an interface is not a nil
+	// interface, and asking it whether it is connected dereferences the pointer.
+	if client == nil {
+		p.humanVerify.Store(humanVerifyHolder{})
+	} else {
+		p.humanVerify.Store(humanVerifyHolder{service: client})
+	}
 	return previous
+}
+
+// HumanVerifyConnected reports whether the online verification service could
+// deliver a result right now.
+//
+// The console asks, because the answer decides what a held member can be given: a
+// service that is not connected gets no link -- the service delivers each result
+// once, so a link issued with nobody listening is a member who passed the check
+// and is still held -- which means that group falls back to the button in the
+// group. False is also the answer for a deployment that configured no service:
+// nobody is connected to a service that does not exist.
+func (p *parts) HumanVerifyConnected() bool {
+	holder, _ := p.humanVerify.Load().(humanVerifyHolder)
+	if holder.service == nil {
+		return false
+	}
+	return holder.service.Connected()
 }

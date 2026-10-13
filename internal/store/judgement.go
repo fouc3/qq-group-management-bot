@@ -136,6 +136,19 @@ type JudgementStore interface {
 	SetOutcome(ctx context.Context, id string, outcome Outcome) error
 	// Recent returns the judgements about one member since a moment, newest first.
 	Recent(ctx context.Context, groupOpenID, subjectOpenID string, since time.Time) ([]Judgement, error)
+	// RecentInGroup returns what happened in one group since a moment, whoever it
+	// was about, newest first, at most limit of them.
+	//
+	// Recent cannot answer this, and the reason is worth writing down because it
+	// is not obvious: its query matches the member exactly, and a judgement that
+	// found a violation always names the member it was about. A caller that read
+	// Recent as "the group's judgements" and passed an empty member would be
+	// answered with the records naming nobody -- which is the judgements that
+	// never happened -- and would report a group with a hundred violations as a
+	// group with none.
+	//
+	// Two questions, two queries, and each says which one it is.
+	RecentInGroup(ctx context.Context, groupOpenID string, since time.Time, limit int) ([]Judgement, error)
 	// Find returns one judgement by its id, or by a prefix of it that matches
 	// exactly one record.
 	//
@@ -230,6 +243,39 @@ ORDER BY created_at DESC
 LIMIT 50`), groupOpenID, subjectOpenID, since.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("reading recent judgements: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []Judgement
+	for rows.Next() {
+		entry, err := scanJudgement(rows)
+		if err != nil {
+			return nil, fmt.Errorf("reading a judgement: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+// RecentInGroup implements JudgementStore.
+//
+// It is the same query as Recent with the member taken out, which is what makes
+// it a second one rather than a flag on the first: a caller that meant "everybody"
+// and got "nobody in particular" would be answered with the judgements that never
+// happened, and would call a group with a hundred violations quiet.
+func (j judgementStore) RecentInGroup(ctx context.Context, groupOpenID string,
+	since time.Time, limit int) ([]Judgement, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := j.store.db.QueryContext(ctx, j.store.query(`
+SELECT `+judgementColumns+`
+FROM moderation_judgements
+WHERE group_openid = ? AND created_at >= ?
+ORDER BY created_at DESC
+LIMIT ?`), groupOpenID, since.Unix(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("reading a group's recent judgements: %w", err)
 	}
 	defer rows.Close()
 

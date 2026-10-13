@@ -15,6 +15,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
+	"github.com/fouc3/qq-group-management-bot/internal/logring"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -28,7 +29,11 @@ const stopTimeout = 15 * time.Second
 // setting that can change while the bot runs: the handler is fixed once built, and
 // every feature holds a copy of the logger, so a new level has to reach the same
 // handler rather than replace it.
-func NewLogger(cfg config.Log) (*slog.Logger, *slog.LevelVar) {
+//
+// Everything logged is also copied into the buffer, when there is one, so the
+// console can show what the bot just said. The copy is wrapped around stderr
+// rather than put in its place: a bounded buffer forgets, and the log must not.
+func NewLogger(cfg config.Log, logs *logring.Ring) (*slog.Logger, *slog.LevelVar) {
 	level := new(slog.LevelVar)
 	level.Set(levelOf(cfg.Level))
 	options := &slog.HandlerOptions{Level: level}
@@ -39,7 +44,7 @@ func NewLogger(cfg config.Log) (*slog.Logger, *slog.LevelVar) {
 	} else {
 		handler = slog.NewTextHandler(os.Stderr, options)
 	}
-	return slog.New(handler), level
+	return slog.New(logs.Wrap(handler)), level
 }
 
 // Run builds the bot and serves until ctx is cancelled.
@@ -51,7 +56,8 @@ func NewLogger(cfg config.Log) (*slog.Logger, *slog.LevelVar) {
 // What is built here is not built once and for all: a configuration change builds
 // a feature again, which is why the assembly and the lifetimes live in parts.
 func Run(ctx context.Context, cfg *config.Config, configPath string,
-	registry *feature.Registry, logger *slog.Logger, level *slog.LevelVar) error {
+	registry *feature.Registry, logger *slog.Logger, level *slog.LevelVar,
+	logs *logring.Ring) error {
 	client, err := buildClient(cfg)
 	if err != nil {
 		return err
@@ -142,6 +148,13 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 		current: cfg,
 	}
 	go watchReloads(ctx, reload)
+
+	// The management console, if the file asks for one. It is handed the reloader
+	// rather than the configuration, so what it reports is what the bot is obeying
+	// rather than what was read at startup.
+	if err := startConsole(ctx, cfg, configPath, database, live, reload, logs, logger); err != nil {
+		return err
+	}
 
 	intents := live.intents()
 	gateway, err := client.GetGateway(ctx)

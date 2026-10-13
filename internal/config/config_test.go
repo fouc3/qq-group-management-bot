@@ -140,3 +140,82 @@ func TestTheDatabaseSectionIsValidated(t *testing.T) {
 		})
 	}
 }
+
+// TestTheConsoleRefusesToBeOpenedWithoutAToken covers the one check in this
+// package that is about safety rather than about correctness.
+//
+// The console can silence members and take their messages back. A token on a
+// loopback address is optional -- reaching the loopback interface already means
+// being on the machine -- but the moment the address is not loopback, an empty
+// token is a group's moderation authority published on the network. The one
+// moment that can be caught is startup, where somebody is watching the output,
+// which is why it is refused there and not at the first request.
+func TestTheConsoleRefusesToBeOpenedWithoutAToken(t *testing.T) {
+	refused := []Admin{
+		{Enabled: true, Listen: "0.0.0.0:8787"},
+		{Enabled: true, Listen: ":8787"},
+		{Enabled: true, Listen: "192.168.1.10:8787"},
+	}
+	for _, admin := range refused {
+		t.Run("refused "+admin.Listen, func(t *testing.T) {
+			// Credentials are set because applyDefaults validates them first: a
+			// file with neither has two problems, and the one it reports is the
+			// one it checks first. The case here is a file that is otherwise
+			// fine.
+			parsed := Config{Admin: admin, Bot: Bot{AccessToken: "a-placeholder-credential"}}
+			err := parsed.applyDefaults()
+			if err == nil {
+				t.Fatalf("admin.listen %q was accepted with no token", admin.Listen)
+			}
+			if !strings.Contains(err.Error(), "admin.token") {
+				t.Errorf("the refusal does not say what to set: %v", err)
+			}
+		})
+	}
+
+	// An address that is not host:port is refused too, and for its own reason: it
+	// is not knowably local, so it cannot be treated as one.
+	t.Run("refused as malformed", func(t *testing.T) {
+		parsed := Config{
+			Admin: Admin{Enabled: true, Listen: "127.0.0.1"},
+			Bot:   Bot{AccessToken: "a-placeholder-credential"},
+		}
+		err := parsed.applyDefaults()
+		if err == nil {
+			t.Fatal("an address with no port was accepted")
+		}
+		if !strings.Contains(err.Error(), "host:port") {
+			t.Errorf("the refusal does not say what is wrong with the address: %v", err)
+		}
+	})
+
+	accepted := []Admin{
+		{Enabled: true, Listen: "0.0.0.0:8787", Token: "a-token"},
+		{Enabled: true, Listen: "127.0.0.1:8787"},
+		{Enabled: true, Listen: "localhost:8787"},
+		{Enabled: true, Listen: "[::1]:8787"},
+		{Enabled: false, Listen: "0.0.0.0:8787"}, // off, so there is nothing to reach
+	}
+	for _, admin := range accepted {
+		t.Run("accepted "+admin.Listen, func(t *testing.T) {
+			parsed := Config{Admin: admin}
+			if err := parsed.adminDefaults(); err != nil {
+				t.Fatalf("admin.listen %q was refused: %v", admin.Listen, err)
+			}
+		})
+	}
+
+	// An address left out is the loopback default, not every interface: a file
+	// that says nothing about where to listen must not be the file that opens the
+	// console to the network.
+	empty := Config{Bot: Bot{AccessToken: "a-placeholder-credential"}}
+	if err := empty.applyDefaults(); err != nil {
+		t.Fatalf("an empty admin section was refused: %v", err)
+	}
+	if got := empty.Admin.AdminListen(); got != DefaultAdminListen {
+		t.Errorf("an empty admin.listen became %q, want %q", got, DefaultAdminListen)
+	}
+	if !IsLoopback(DefaultAdminListen) {
+		t.Errorf("the default address %q is not loopback", DefaultAdminListen)
+	}
+}

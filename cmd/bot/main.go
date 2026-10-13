@@ -28,6 +28,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/features/memberlog"
 	"github.com/fouc3/qq-group-management-bot/internal/features/moderation"
 	"github.com/fouc3/qq-group-management-bot/internal/features/muteguard"
+	"github.com/fouc3/qq-group-management-bot/internal/logring"
 )
 
 func main() {
@@ -45,7 +46,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger, level := app.NewLogger(cfg.Log)
+
+	// The newest log lines are kept in memory as well as written to stderr, so
+	// the console can show them: the page runs in a browser and cannot read the
+	// journal. The size is what one screen of reading needs -- anything larger
+	// would be a log file, and stderr already is one.
+	logs := logring.New(500)
+	logger, level := app.NewLogger(cfg.Log, logs)
 
 	// Registering the features here is the whole extension point: a new
 	// feature adds one line to this list and a section to the file.
@@ -67,7 +74,7 @@ func run() error {
 		os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.Run(ctx, cfg, *configPath, registry, logger, level); err != nil {
+	if err := app.Run(ctx, cfg, *configPath, registry, logger, level, logs); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}

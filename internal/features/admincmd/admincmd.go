@@ -199,6 +199,17 @@ func (h *handler) commands() *command.Catalog {
 	return h.table
 }
 
+// Definitions exposes the whole table, for the console.
+//
+// Deliberately not CommandDefs: that is the interface the wiring gathers from every
+// feature and hands back to this table, so answering it here would feed the table
+// its own commands a second time. The console wants the finished list -- these
+// commands plus everything the others offered -- because that is the list a member
+// reads when they ask what the bot can do.
+func (h *handler) Definitions() []command.Def {
+	return h.commands().Definitions()
+}
+
 // SetCommandSources takes the commands other features offer for this table.
 //
 // It is called every time the features are wired, which is after any of them has
