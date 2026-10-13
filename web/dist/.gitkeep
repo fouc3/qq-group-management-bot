@@ -1,0 +1,3 @@
+# Keeps web/dist present so //go:embed compiles on a checkout that has not been built.
+# `pnpm build` writes the real front end here; vite is configured with emptyOutDir: false
+# so this file survives a build.

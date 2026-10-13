@@ -1,0 +1,7 @@
+node_modules/
+dist/*
+!dist/.gitkeep
+.vite/
+*.local
+*.log
+tsconfig.tsbuildinfo

@@ -1,0 +1,66 @@
+/* =========================================================================
+   风格 D · Claude — 暖色深色令牌（Anthropic 暖调 + shadcn 应用外壳）
+   来源：docs/frontend/mockups/d-claude.html 的 :root 块，逐值移植。
+   任何组件都只从这里取值，不允许散落魔法色值。
+   ========================================================================= */
+:root {
+  /* Surfaces */
+  --background: #1b1b19;
+  --card: #292927;
+  --muted: #333331;
+  --accent: #2e2e2c;
+  --secondary: #5e5e5b;
+  --sidebar: #141413;
+
+  /* Text */
+  --foreground: #faf9f5;
+  --muted-foreground: #b0aea5;
+
+  /* Brand & semantic */
+  --primary: #cc785c;
+  --primary-foreground: #141413;
+  --ring: #cc785c;
+  --success: #96b075;
+  --warning: #d8b25c;
+  --destructive: #f75d59;
+  --destructive-solid: #db2b33;
+
+  /* Alpha ladder（白色透明阶梯，不用实心灰） */
+  --border: rgba(255, 255, 255, 0.24);
+  --input: rgba(255, 255, 255, 0.16);
+  --hairline: rgba(255, 255, 255, 0.1);
+  --hairline-soft: rgba(255, 255, 255, 0.06);
+  --wash-soft: rgba(250, 249, 245, 0.1);
+  --wash-mid: rgba(250, 249, 245, 0.15);
+  --wash-strong: rgba(250, 249, 245, 0.2);
+
+  /* 语义色的透明前身（供 tint 徽标 / 图表使用） */
+  --primary-tint: rgba(204, 120, 92, 0.2);
+  --primary-tint-text: #e8a587;
+  --success-tint: rgba(150, 176, 117, 0.18);
+  --success-tint-text: #bcd39f;
+  --warning-tint: rgba(216, 178, 92, 0.18);
+  --danger-tint: rgba(247, 93, 89, 0.16);
+  --ring-shadow: 0 0 0 3px rgba(204, 120, 92, 0.3);
+
+  /* Radius — 单一基准上的倍率刻度 */
+  --radius: 8px;
+  --r-sm: 4.8px;
+  --r-md: 6.4px;
+  --r-lg: var(--radius);
+  --r-xl: 11.2px;
+  --r-2xl: 14.4px;
+  --r-4xl: 20.8px;
+
+  /* Type */
+  --font-sans: Inter, 'Segoe UI', system-ui, -apple-system, 'Noto Sans SC', sans-serif;
+  --font-serif: 'Iowan Old Style', Georgia, 'Songti SC', serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+
+  /* Depth — 先描边，再阴影 */
+  --ring-card: 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-xl: 0 14px 40px rgba(0, 0, 0, 0.45);
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);
+}

@@ -1,0 +1,5 @@
+# pnpm 11 的依赖构建白名单（`onlyBuiltDependencies` 的替代设置）。
+# esbuild 的 postinstall 只做本机二进制校验/链接；这里显式放行，避免安装时
+# 因为「存在未批准的构建脚本」而报 ERR_PNPM_IGNORED_BUILDS。
+allowBuilds:
+  esbuild: true
