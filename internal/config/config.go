@@ -8,6 +8,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -54,6 +55,13 @@ type Config struct {
 	Database Database `yaml:"database"`
 	// Redis says where the volatile cache lives.
 	Redis Redis `yaml:"redis"`
+	// HumanVerification says where the online human verification service lives.
+	//
+	// Optional, and typed here rather than owned by a feature: the client it
+	// describes is opened once for the whole process, because the results arrive
+	// on one long connection and that connection must not go down every time a
+	// feature is built again.
+	HumanVerification HumanVerification `yaml:"human_verification"`
 	// Log holds logging settings.
 	Log Log `yaml:"log"`
 	// Features holds one raw node per feature, keyed by the feature name.
@@ -117,6 +125,132 @@ const DefaultRedisPrefix = "qgb"
 
 // DefaultRedisDialTimeoutSeconds is how long a cache command may take.
 const DefaultRedisDialTimeoutSeconds = 3
+
+// HumanVerification is where the online human verification service lives: the
+// service that checks a person in a browser, so the bot can let somebody who has
+// proved themselves in without ever knowing what they look like.
+//
+// One section for the whole bot, not one per group, and one section rather than
+// a feature's own: the address and the two tokens identify the service account,
+// and the connection the results arrive on is opened once for the process. A
+// group only decides whether it uses it at all.
+//
+// Optional. A deployment that leaves the section out simply cannot offer online
+// verification, and a group that asks for it is refused at startup rather than
+// quietly holding members with no way to verify themselves.
+type HumanVerification struct {
+	// BaseURL is the service's address, http(s)://host[:port]. The result
+	// connection is derived from it, so this is the only address to write down.
+	BaseURL string `yaml:"base_url"`
+	// IssueToken authorises asking the service for a link. Server-side secret:
+	// whoever holds it can issue a verification link for anything.
+	IssueToken string `yaml:"issue_token"`
+	// WSToken authorises the connection the results arrive on. Server-side
+	// secret for the same reason.
+	WSToken string `yaml:"ws_token"`
+	// Cdata is the business marker every link is signed with, and it is what
+	// the service's statistics group by. Empty means the marker this bot ships
+	// with.
+	//
+	// Changing it while links are outstanding has a consequence worth knowing:
+	// a result is only acted on when it carries the marker this bot signs, so
+	// links issued under the old one are held in silence until the member is
+	// asked to verify again or the deadline acts.
+	Cdata string `yaml:"cdata"`
+	// TTLSeconds is how long one link stays usable. The service's bounds are
+	// 60..86400 and it refuses a value outside them; 0 means the default.
+	//
+	// It is also how long a member has to find the link and open it: a link
+	// that has expired is answered with 链接已过期, and the way to get another
+	// one is for an administrator to send the verification again.
+	TTLSeconds int `yaml:"ttl_seconds"`
+	// TimeoutSeconds bounds one call to the service. 0 means the default.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+}
+
+// DefaultHumanVerificationTTLSeconds and DefaultHumanVerificationTimeoutSeconds
+// are what an unset field means.
+const (
+	// DefaultHumanVerificationTTLSeconds is the service's own default lifetime.
+	DefaultHumanVerificationTTLSeconds = 900
+	// MinHumanVerificationTTLSeconds and MaxHumanVerificationTTLSeconds are the
+	// service's bounds, which it enforces by refusing the request.
+	MinHumanVerificationTTLSeconds = 60
+	MaxHumanVerificationTTLSeconds = 86400
+	// DefaultHumanVerificationTimeoutSeconds is how long one call may take.
+	DefaultHumanVerificationTimeoutSeconds = 10
+)
+
+// humanVerificationCdata matches what the service accepts as a business marker:
+// letters, digits, underscores and hyphens, at most 255 of them.
+//
+// It is checked here rather than left to the service because the failure is
+// silent and expensive: anything else makes Turnstile drop the value without
+// saying so, and with the marker gone the result of a genuine verification is
+// discarded as somebody else's.
+var humanVerificationCdata = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+
+// Configured reports whether the file asks for an online verification service at
+// all.
+//
+// The address is what decides it: a section with tokens and no address is a
+// mistake the validation refuses, and a section nobody wrote has neither.
+func (h HumanVerification) Configured() bool {
+	return strings.TrimSpace(h.BaseURL) != ""
+}
+
+// applyDefaults fills in what the section leaves out, then validates it.
+func (h *HumanVerification) applyDefaults() error {
+	if !h.Configured() {
+		// Nothing is asked for, so there is nothing to check -- and the tokens
+		// are deliberately not reported as missing, because a deployment that
+		// does not verify online has no use for them.
+		return nil
+	}
+	address, err := url.Parse(strings.TrimRight(strings.TrimSpace(h.BaseURL), "/"))
+	if err != nil {
+		return fmt.Errorf("human_verification.base_url %q: %w", h.BaseURL, err)
+	}
+	switch address.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("human_verification.base_url %q is not http or https", h.BaseURL)
+	}
+	if address.Host == "" {
+		return fmt.Errorf("human_verification.base_url %q names no host", h.BaseURL)
+	}
+	if strings.TrimSpace(h.IssueToken) == "" {
+		return errors.New("human_verification.issue_token is required: without it " +
+			"no verification link can be asked for")
+	}
+	if strings.TrimSpace(h.WSToken) == "" {
+		return errors.New("human_verification.ws_token is required: without it the " +
+			"results have nowhere to arrive, and a member who verifies would never " +
+			"be let out of the hold")
+	}
+	if marker := strings.TrimSpace(h.Cdata); marker != "" &&
+		!humanVerificationCdata.MatchString(marker) {
+		return fmt.Errorf("human_verification.cdata %q may only contain letters, "+
+			"digits, underscores and hyphens (up to 255): anything else is dropped "+
+			"by Cloudflare without a word, and a result that comes back without its "+
+			"marker is discarded as somebody else's", h.Cdata)
+	}
+	if h.TTLSeconds == 0 {
+		h.TTLSeconds = DefaultHumanVerificationTTLSeconds
+	}
+	if h.TTLSeconds < MinHumanVerificationTTLSeconds || h.TTLSeconds > MaxHumanVerificationTTLSeconds {
+		return fmt.Errorf("human_verification.ttl_seconds must be between %d and %d, got %d",
+			MinHumanVerificationTTLSeconds, MaxHumanVerificationTTLSeconds, h.TTLSeconds)
+	}
+	if h.TimeoutSeconds < 0 {
+		return fmt.Errorf("human_verification.timeout_seconds must not be negative, got %d",
+			h.TimeoutSeconds)
+	}
+	if h.TimeoutSeconds == 0 {
+		h.TimeoutSeconds = DefaultHumanVerificationTimeoutSeconds
+	}
+	return nil
+}
 
 // Database is where the bot keeps what must survive a restart: the members held
 // until they verify, and the applicants barred from joining.
@@ -403,6 +537,9 @@ func (c *Config) applyDefaults() error {
 	if c.OneBot.JoinTimeToleranceSeconds < 0 {
 		return fmt.Errorf("onebot.join_time_tolerance_seconds must not be negative, got %d",
 			c.OneBot.JoinTimeToleranceSeconds)
+	}
+	if err := c.HumanVerification.applyDefaults(); err != nil {
+		return err
 	}
 	if c.Features == nil {
 		c.Features = map[string]yaml.Node{}

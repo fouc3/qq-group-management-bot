@@ -49,12 +49,13 @@ func TestTheExampleConfigurationNamesOnlyKeysTheCodeReads(t *testing.T) {
 	}
 
 	var document struct {
-		Bot      yaml.Node            `yaml:"bot"`
-		OneBot   yaml.Node            `yaml:"onebot"`
-		Database yaml.Node            `yaml:"database"`
-		Redis    yaml.Node            `yaml:"redis"`
-		Log      yaml.Node            `yaml:"log"`
-		Features map[string]yaml.Node `yaml:"features"`
+		Bot               yaml.Node            `yaml:"bot"`
+		OneBot            yaml.Node            `yaml:"onebot"`
+		Database          yaml.Node            `yaml:"database"`
+		Redis             yaml.Node            `yaml:"redis"`
+		HumanVerification yaml.Node            `yaml:"human_verification"`
+		Log               yaml.Node            `yaml:"log"`
+		Features          map[string]yaml.Node `yaml:"features"`
 	}
 	if err := yaml.Unmarshal(raw, &document); err != nil {
 		t.Fatalf("reading the sections of %s: %v", exampleConfigPath, err)
@@ -69,6 +70,7 @@ func TestTheExampleConfigurationNamesOnlyKeysTheCodeReads(t *testing.T) {
 		{"onebot", document.OneBot, &config.OneBot{}},
 		{"database", document.Database, &config.Database{}},
 		{"redis", document.Redis, &config.Redis{}},
+		{"human_verification", document.HumanVerification, &config.HumanVerification{}},
 		{"log", document.Log, &config.Log{}},
 		{"features." + admincmd.Name, document.Features[admincmd.Name], &admincmd.Config{}},
 		{"features." + broadcast.Name, document.Features[broadcast.Name], &broadcast.Config{}},

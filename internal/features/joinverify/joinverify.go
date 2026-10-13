@@ -27,6 +27,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -36,6 +37,21 @@ const Name = "join_verification"
 // buttonPrefix marks a button as ours, so another feature's button data is
 // never mistaken for a verification token.
 const buttonPrefix = "v:"
+
+// onlineAction is what this bot asks the verification service for. The service
+// only passes it back, so it is this bot's own word for the kind of check --
+// and it is what would tell two kinds of link apart if there were ever a second.
+const onlineAction = "join_group"
+
+// skipButtonLabel is what the administrators' button says on the card a group
+// that verifies online sends.
+//
+// It is a constant rather than a setting: the text that matters on that card is
+// the prompt and the member's own button, both of which are configurable, and a
+// knob for a five-character label that only ever appears beside them is a knob
+// nobody would look for. The platform allows ten characters, and a Chinese
+// character counts as one.
+const skipButtonLabel = "管理员跳过"
 
 // LongestMuteMinutes is the platform's ceiling for one mute: thirty days.
 const LongestMuteMinutes = 30 * 24 * 60
@@ -213,6 +229,16 @@ type Config struct {
 	// refuses to run the verification at all. {at} -- or [at], both are accepted -- is the
 	// member's mention.
 	PseudoMuteNotice string `yaml:"pseudo_mute_notice"`
+	// OnlineVerify asks the browser-based verification service to do the
+	// checking instead of the button in the group, for every group that does not
+	// say otherwise.
+	//
+	// It is a default rather than the whole answer: which groups verify online
+	// is each group's own decision, made in the groups section, and a deployment
+	// that has no human_verification section at all cannot do it -- turning this
+	// on there is refused at startup rather than holding members with no way to
+	// verify themselves.
+	OnlineVerify bool `yaml:"online_verify"`
 	// Groups overrides the fields above for named groups, keyed by group
 	// openid.
 	//
@@ -260,6 +286,16 @@ type Override struct {
 	DryRun           *bool     `yaml:"dry_run"`
 	PseudoMuteAfter  *int      `yaml:"pseudo_mute_after"`
 	PseudoMuteNotice *string   `yaml:"pseudo_mute_notice"`
+
+	// OnlineVerify asks the browser-based verification service to check this
+	// group's new members, instead of the button in the group.
+	//
+	// A group that turns it on gets a link button that only the member it was
+	// made for can press, and stays held until the service says that member
+	// passed. It needs a human_verification section in the file: with none, the
+	// service cannot be reached at all, and a group asking for it here is
+	// refused at startup rather than held with no way to verify.
+	OnlineVerify *bool `yaml:"online_verify"`
 }
 
 // Settings is one group's settings, after the defaults and that group's
@@ -289,6 +325,14 @@ type Settings struct {
 	DryRun           bool
 	PseudoMuteAfter  int
 	PseudoMuteNotice string
+	// OnlineVerify reports whether this group verifies through the service in a
+	// browser rather than through the button in the group.
+	//
+	// It is frozen with the rest of the settings when a member is held, so a
+	// hold taken before the service was asked for keeps the button it was given
+	// -- and a hold that is waiting on the service goes on waiting for it even
+	// if the group is switched back in the meantime.
+	OnlineVerify bool
 }
 
 // defaults returns the settings every group starts from.
@@ -311,6 +355,7 @@ func (c *Config) defaults() Settings {
 		PassMessage:      c.PassMessage,
 		SkipMessage:      c.SkipMessage,
 		DryRun:           c.DryRun,
+		OnlineVerify:     c.OnlineVerify,
 		PseudoMuteAfter:  c.PseudoMuteAfter,
 		PseudoMuteNotice: c.PseudoMuteNotice,
 	}
@@ -325,6 +370,9 @@ func (c *Config) settingsFor(groupOpenID string) Settings {
 	}
 	if override.Enabled != nil {
 		settings.Enabled = *override.Enabled
+	}
+	if override.OnlineVerify != nil {
+		settings.OnlineVerify = *override.OnlineVerify
 	}
 	if override.MuteMinutes != nil {
 		settings.MuteMinutes = *override.MuteMinutes
@@ -395,7 +443,27 @@ func (s Settings) asConfig() *Config {
 		PassMessage:      s.PassMessage,
 		SkipMessage:      s.SkipMessage,
 		DryRun:           s.DryRun,
+		OnlineVerify:     s.OnlineVerify,
 	}
+}
+
+// anyOnlineVerify reports whether any group this configuration covers verifies
+// through the service.
+//
+// The same shape as anyPseudoHolds, and asked for a different reason: it decides
+// whether the deployment has to be able to reach a service at all, which is a
+// question the feature asks once at startup rather than every time somebody
+// joins.
+func (c *Config) anyOnlineVerify() bool {
+	if c.defaults().OnlineVerify {
+		return true
+	}
+	for groupOpenID := range c.Groups {
+		if c.settingsFor(groupOpenID).OnlineVerify {
+			return true
+		}
+	}
+	return false
 }
 
 // pseudoHolds reports whether this group holds a member back by taking their
@@ -583,6 +651,18 @@ func New(section yaml.Node, deps feature.Deps) (feature.Feature, error) {
 		instance.pending = deps.Store.Pending()
 		instance.meta = deps.Store.Meta()
 	}
+	// A group may ask for the online service, and a deployment may have none: the
+	// sections are separate, so the two can disagree. Refusing here rather than at
+	// the first join is the difference between a message an operator can act on
+	// and a group quietly holding members with no way to verify themselves.
+	if deps.HumanVerify != nil {
+		instance.online = deps.HumanVerify
+	}
+	if instance.online == nil && cfg.anyOnlineVerify() {
+		return nil, errors.New("online_verify is on, but no human_verification " +
+			"section is configured, so nothing could check anybody: either add " +
+			"that section or turn online_verify off")
+	}
 	instance.part, instance.stopPart = context.WithCancel(context.Background())
 	// Holds that outlived an earlier process are restored here, before anything
 	// can answer a button or sweep a deadline for them. The older JSON file is
@@ -674,7 +754,21 @@ type verifier struct {
 
 	// events is where this instance declares the handlers it answers, and what gives
 	// them back in Close.
-	events    *command.Events
+	events *command.Events
+
+	// online is the browser-based verification service, or nil when the
+	// deployment has none.
+	//
+	// It is a slice of the service rather than the client, for the same reason
+	// the data layer is a slice of the store: what this feature does with it is
+	// ask for a link and be told a result, and a test builds one that can be
+	// made to answer, refuse or fall silent.
+	online feature.HumanVerify
+	// unsubscribe stops this instance hearing results. Held because a rebuilt
+	// feature subscribes again, and the instance it replaced must stop answering
+	// or every result would be acted on twice.
+	unsubscribe func()
+
 	stopping  chan struct{}
 	stopped   chan struct{}
 	closeOnce sync.Once
@@ -733,6 +827,13 @@ func (v *verifier) Register(_ context.Context) error {
 		return err
 	}
 	v.buttons.Register(v.deps.Client)
+	// Results from the online service are subscribed to here rather than at
+	// build time: Register is where this instance starts answering, and Close is
+	// where it stops, so an instance that is being replaced does not answer one
+	// more result on its way out.
+	if v.online != nil {
+		v.unsubscribe = v.online.OnVerified(v.onOnlineVerified)
+	}
 	v.warnAboutRemoval()
 	v.warnAboutPseudoHold()
 	go v.sweep()
@@ -759,7 +860,11 @@ func (v *verifier) Register(_ context.Context) error {
 			"pseudo_mute_after", settings.PseudoMuteAfter,
 			"deadline_hours", settings.DeadlineHours,
 			"on_deadline", settings.OnDeadline,
-			"notify_members", len(settings.NotifyMembers))
+			"notify_members", len(settings.NotifyMembers),
+			// Whether the card carries a button the member presses or a link they
+			// open is the first thing to know when a member says they were asked
+			// to do something the group's screenshots do not show.
+			"online_verify", settings.OnlineVerify)
 	})
 	return nil
 }
@@ -843,7 +948,14 @@ func (v *verifier) eachSettings(report func(label string, settings Settings)) {
 // finish -- in that order, because a rebuild that started while the old instance
 // was still sweeping would have two of them acting on the same holds. The waiting
 // is what makes this feature rebuildable rather than merely stoppable.
+//
+// The subscription to the verification service goes first: a result acted on by
+// an instance that is on its way out would be a result the instance that
+// replaces it never sees, and the member would stay held over it.
 func (v *verifier) Close(_ context.Context) error {
+	if v.unsubscribe != nil {
+		v.unsubscribe()
+	}
 	v.events.Stop()
 	v.buttons.Release(Name)
 	v.stopPart()
@@ -1440,6 +1552,59 @@ func (v *verifier) begin(ctx context.Context, groupOpenID, memberOpenID string, 
 	return nil
 }
 
+// onOnlineVerified is what the verification service reports: the member it made
+// a link for opened that link and passed the check in a browser.
+//
+// It arrives on the service's own connection rather than as an event from the
+// platform, so the hold is the only way back to the member: the result carries
+// the token the link was asked for as its target, which is the same token the
+// button in the group would have carried.
+//
+// Nothing is answered here. There is no interaction waiting for a reply and no
+// message to reply to, so the pass message is an ordinary message the group
+// sees -- and the card already in the group is left as it is: its link has been
+// used up, and the service refuses a spent link on its own.
+func (v *verifier) onOnlineVerified(event humanverify.Event) {
+	entry, found := v.lookup(event.Target)
+	if !found {
+		// Two ordinary ways here, and neither is a mistake: the same result can
+		// be delivered twice if the connection was replaced mid-flight, and the
+		// hold can end before the result arrives -- an administrator let the
+		// member through by hand, or their deadline removed them.
+		v.deps.Logger.Debug("an online verification arrived for a hold that is gone",
+			"target", event.Target, "link", event.ID)
+		return
+	}
+	log := v.deps.Logger.With(
+		"group", entry.groupOpenID,
+		"member", entry.memberOpenID,
+		"link", event.ID,
+		// What the service saw of the browser, which is what makes a surprising
+		// verification answerable later: the member's own phone against a data
+		// centre, or the country their provider happens to route through.
+		"ip", event.Client.IP,
+		"country", event.Client.Country)
+
+	// The context is the feature's rather than the connection's: this work has to
+	// outlive the frame that carried the result, and it must not outlive the
+	// instance it belongs to -- an instance that is being replaced has already
+	// been unsubscribed, so what is left here cannot hold a replacement up.
+	ctx, cancel := context.WithTimeout(v.part, 30*time.Second)
+	defer cancel()
+
+	if err := v.unmute(ctx, entry.groupOpenID, entry.memberOpenID, entry.settings); err != nil {
+		// The hold stands, and the log says so: a verification this bot could not
+		// act on is one the administrators have to finish by hand, and the
+		// deadline is still running for the member.
+		log.Error("the online verification passed but the hold could not be lifted",
+			"error", err)
+		return
+	}
+	v.forget(entry.token)
+	log.Info("a member passed the online verification and can speak again")
+	v.greet(ctx, "", entry)
+}
+
 // onInteractionPress answers a press of the verification button.
 //
 // The routing happened before this was called: a press reaches here when its
@@ -1585,26 +1750,10 @@ func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token str
 	// always shipped write {at}, and [at] is what an operator reaches for.
 	tag := mentionTag(memberOpenID, settings)
 	prompt = renderTemplate(prompt, map[string]string{"{at}": tag, "[at]": tag})
-	keyboard := &qqbotsdk.Keyboard{Content: &qqbotsdk.KeyboardContent{Rows: []qqbotsdk.Row{{
-		Buttons: []qqbotsdk.Button{{
-			ID: "verify_" + token,
-			RenderData: &qqbotsdk.RenderData{
-				Label:        settings.ButtonLabel,
-				VisitedLabel: settings.VisitedLabel,
-				Style:        qqbotsdk.KeyboardStyleBlue,
-			},
-			Action: &qqbotsdk.Action{
-				Type:          qqbotsdk.ActionTypeCallback,
-				Data:          buttonPrefix + token,
-				Permission:    &qqbotsdk.Permission{Type: qqbotsdk.PermissionTypeEveryone},
-				UnsupportTips: "请升级 QQ 客户端后重试",
-			},
-		}},
-	}}}}
 	card := &qqbotsdk.Message{
 		MsgType:  qqbotsdk.MsgTypeMarkdown,
 		Markdown: &qqbotsdk.MessageMarkdown{Content: prompt},
-		Keyboard: keyboard,
+		Keyboard: v.keyboardFor(ctx, groupOpenID, memberOpenID, token, settings),
 	}
 	if replyTo != "" {
 		card.MsgID = replyTo
@@ -1614,6 +1763,153 @@ func (v *verifier) ask(ctx context.Context, groupOpenID, memberOpenID, token str
 	}
 	_, err := v.deps.Client.SendGroupMessage(ctx, groupOpenID, card)
 	return err
+}
+
+// keyboardFor builds the buttons one card carries.
+//
+// The ordinary card has one button: the member presses it and the press comes
+// back to this feature. A group that verifies online gets a link instead -- the
+// person is checked by the service in a browser, and the service tells this bot
+// the outcome on its own connection -- and, because a link reports nothing back
+// to the platform, a second button for the administrators, whose press is how
+// somebody who cannot pass the check is let through by hand.
+//
+// The link is asked for here rather than earlier because it is per member and
+// per prompt: the service lets one link be used once, so a card sent again
+// needs a link of its own, and a link asked for when the prompt was first built
+// would be expired by the time a resend needed it.
+//
+// A service that cannot be reached, or that refuses, does not cost the member
+// their way out: the card falls back to the button they can press, and the
+// failure is said out loud. Holding somebody with nothing to press would be the
+// worse outcome of the two -- it locks them out of the group entirely.
+func (v *verifier) keyboardFor(ctx context.Context, groupOpenID, memberOpenID, token string,
+	settings Settings) *qqbotsdk.Keyboard {
+	buttons := make([]qqbotsdk.Button, 0, 2)
+	if settings.OnlineVerify && v.online != nil {
+		link, err := v.askForLink(ctx, groupOpenID, memberOpenID, token)
+		if err == nil {
+			buttons = append(buttons, linkButton(settings, memberOpenID, token, link))
+			buttons = append(buttons, skipButton(token))
+		} else {
+			v.deps.Logger.Warn("online verification could not be asked for, so this "+
+				"member is being asked to press the button instead",
+				"group", groupOpenID, "member", memberOpenID, "error", err)
+		}
+	}
+	if len(buttons) == 0 {
+		buttons = append(buttons, pressButton(settings, token))
+	}
+	return &qqbotsdk.Keyboard{Content: &qqbotsdk.KeyboardContent{
+		Rows: []qqbotsdk.Row{{Buttons: buttons}},
+	}}
+}
+
+// askForLink asks the service for one verification link for one member.
+//
+// A service that is not connected is treated as a service that failed, and for
+// the same reason: the result of a link is delivered once, to whatever is
+// connected when the person finishes, so a link asked for now would be a member
+// who passes the check and hears nothing back.
+func (v *verifier) askForLink(ctx context.Context, groupOpenID, memberOpenID,
+	token string) (string, error) {
+	if !v.online.Connected() {
+		return "", errors.New("the verification service is not connected")
+	}
+	link, err := v.online.Issue(ctx, humanverify.Request{
+		// The action is this bot's own word for what the link is for; the service
+		// only passes it back, and it is what tells two kinds of link apart if
+		// this bot ever asks for another one.
+		Action: onlineAction,
+		// The target is what comes back: a hold is identified by its token, so
+		// this is what finds the member when the service reports the result.
+		Target: token,
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(link.URL) == "" {
+		return "", errors.New("the verification service issued a link with no url")
+	}
+	return link.URL, nil
+}
+
+// pressButton is the button the member presses to verify inside the group.
+func pressButton(settings Settings, token string) qqbotsdk.Button {
+	return qqbotsdk.Button{
+		ID: "verify_" + token,
+		RenderData: &qqbotsdk.RenderData{
+			Label:        settings.ButtonLabel,
+			VisitedLabel: settings.VisitedLabel,
+			Style:        qqbotsdk.KeyboardStyleBlue,
+		},
+		Action: &qqbotsdk.Action{
+			Type:          qqbotsdk.ActionTypeCallback,
+			Data:          buttonPrefix + token,
+			Permission:    &qqbotsdk.Permission{Type: qqbotsdk.PermissionTypeEveryone},
+			UnsupportTips: "请升级 QQ 客户端后重试",
+		},
+	}
+}
+
+// linkButton is the button that opens the verification page in a browser.
+//
+// It is restricted to the member it was made for, and that restriction is the
+// platform's rather than this feature's: a link button reports nothing back, so
+// there is no press for the bot to refuse -- whoever can tap it can open it, and
+// what they would open is a page that verifies them. The openid is the member's
+// own, which is what every other member identifier in this bot is.
+//
+// The text shown after a press is the button's own text and not the visited
+// label the other card uses: opening the page says nothing about whether the
+// member passed, and a button reading 已验证 the moment it was tapped would be
+// telling the group something the bot does not know yet.
+func linkButton(settings Settings, memberOpenID, token, url string) qqbotsdk.Button {
+	return qqbotsdk.Button{
+		ID: "verify_link_" + token,
+		RenderData: &qqbotsdk.RenderData{
+			Label:        settings.ButtonLabel,
+			VisitedLabel: settings.ButtonLabel,
+			Style:        qqbotsdk.KeyboardStyleBlue,
+		},
+		Action: &qqbotsdk.Action{
+			// For a link button the platform takes the address in data, which is
+			// also why the SDK's own validation wants it non-empty.
+			Type: qqbotsdk.ActionTypeLink,
+			Data: url,
+			Permission: &qqbotsdk.Permission{
+				Type:           qqbotsdk.PermissionTypeSpecified,
+				SpecifyUserIDs: []string{memberOpenID},
+			},
+			UnsupportTips: "请升级 QQ 客户端后重试",
+		},
+	}
+}
+
+// skipButton is the administrators' way past the online check.
+//
+// It carries the same button data as the button the member would press, so the
+// press lands in the same handler and is judged the same way: somebody who is
+// not the member being held is either an administrator skipping them or a
+// stranger being refused. The platform is asked to show it to administrators
+// only, and the feature's own administrator list is checked again on the press
+// -- the platform's idea of an administrator is the group's, and this bot's is
+// the list the operator wrote down.
+func skipButton(token string) qqbotsdk.Button {
+	return qqbotsdk.Button{
+		ID: "verify_skip_" + token,
+		RenderData: &qqbotsdk.RenderData{
+			Label:        skipButtonLabel,
+			VisitedLabel: skipButtonLabel,
+			Style:        qqbotsdk.KeyboardStyleGrey,
+		},
+		Action: &qqbotsdk.Action{
+			Type:          qqbotsdk.ActionTypeCallback,
+			Data:          buttonPrefix + token,
+			Permission:    &qqbotsdk.Permission{Type: qqbotsdk.PermissionTypeAdmin},
+			UnsupportTips: "请升级 QQ 客户端后重试",
+		},
+	}
 }
 
 // sendMarkdown sends one markdown message, optionally as a passive reply.

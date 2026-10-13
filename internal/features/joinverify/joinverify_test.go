@@ -74,6 +74,13 @@ func newHarness(t *testing.T, section string) *harness {
 // Handing the same file to two harnesses is what a restart looks like, and it is
 // the only way to check that a hold survives one.
 func newHarnessWithStore(t *testing.T, section, databasePath string) *harness {
+	return newHarnessWithOnline(t, section, databasePath, nil)
+}
+
+// newHarnessWithOnline also hands the feature an online verification service, so
+// a test can see what it asks the service for and answer however it likes.
+func newHarnessWithOnline(t *testing.T, section, databasePath string,
+	online feature.HumanVerify) *harness {
 	t.Helper()
 	h := &harness{t: t, members: []onebot.Member{
 		{UserID: 3884506253, Nickname: "btrfs", JoinTime: testJoinTime, Role: "member"},
@@ -105,6 +112,9 @@ func newHarnessWithStore(t *testing.T, section, databasePath string) *harness {
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Groups: config.Groups{{OpenID: testGroupOpenID, QQGroupID: testQQGroupID}},
 		BotQQ:  testBotQQ,
+	}
+	if online != nil {
+		deps.HumanVerify = online
 	}
 	if databasePath != "" {
 		opened, err := store.Open(context.Background(), store.Config{

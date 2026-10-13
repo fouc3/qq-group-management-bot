@@ -19,6 +19,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/command"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
+	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
 	"github.com/fouc3/qq-group-management-bot/internal/mutelog"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
@@ -87,6 +88,41 @@ type Deps struct {
 	// applies by command or as a punishment is this group's own decision about one of its
 	// members, which muteguard lifting is muteguard doing what it was asked.
 	Mutes *mutelog.Log
+	// HumanVerify is the online human verification service, or nil when the
+	// file configures none.
+	//
+	// One for the whole process rather than one per feature: the results arrive
+	// on a single long connection, and a feature is built again on every
+	// configuration change, so a connection owned by a feature would be down for
+	// the length of every rebuild -- which is exactly when a result must not
+	// land, because the service delivers each one once.
+	//
+	// Nil is a deployment and not a mistake: a bot that does not verify online
+	// has no use for the service, and the verification feature refuses a group
+	// that asks for it rather than holding members with no way out.
+	HumanVerify HumanVerify
+}
+
+// HumanVerify is the online human verification service, as the feature that
+// holds members for verification uses it.
+//
+// An interface rather than the client itself, for the same reason the data layer
+// is: a test builds one that answers, refuses or goes quiet on demand, and the
+// feature has no business knowing how a connection is kept alive.
+type HumanVerify interface {
+	// Issue asks the service for one verification link.
+	//
+	// One link is for one person and one use, so a caller asks per member rather
+	// than sharing one around.
+	Issue(ctx context.Context, request humanverify.Request) (humanverify.Link, error)
+	// OnVerified subscribes to the results, and returns how to stop listening.
+	OnVerified(handler func(humanverify.Event)) (cancel func())
+	// Connected reports whether a result could reach this process right now.
+	//
+	// It is asked before a link is issued: the service delivers a result once,
+	// to whatever is connected at that moment, so a link asked for while nothing
+	// is listening is a person who passes the check and is never released.
+	Connected() bool
 }
 
 // InGroup reports whether the feature should act on a group.

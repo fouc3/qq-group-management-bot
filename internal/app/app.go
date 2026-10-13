@@ -14,6 +14,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
 	"github.com/fouc3/qq-group-management-bot/internal/store"
 )
 
@@ -65,6 +66,24 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 		return err
 	}
 
+	// The online verification service, when one is configured. It is opened here
+	// rather than by the feature that uses it because the results arrive on one
+	// long connection, and a feature is built again on every configuration
+	// change: a connection that came and went with a feature would be down
+	// exactly when a result must not land.
+	humanVerify, err := buildHumanVerify(cfg.HumanVerification, logger)
+	if err != nil {
+		return err
+	}
+	if humanVerify != nil {
+		defer func() {
+			if err := humanVerify.Close(); err != nil {
+				logger.Warn("the verification service connection did not close cleanly",
+					"error", err)
+			}
+		}()
+	}
+
 	// The data layer is opened before the features, and a failure stops the bot.
 	// A bot that cannot record what it is holding would silence members and then
 	// forget them, which is the outcome the store exists to prevent.
@@ -87,7 +106,7 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 	// The features, and the lifetimes that a configuration change can restart. They
 	// are built, wired and registered in that order, so that nothing can arrive at
 	// a feature while what it drives still has nothing behind it.
-	live := newParts(registry, feature.Deps{
+	deps := feature.Deps{
 		Client: client,
 		OneBot: oneBot,
 		Logger: logger,
@@ -95,7 +114,14 @@ func Run(ctx context.Context, cfg *config.Config, configPath string,
 		BotQQ:  cfg.Bot.QQ,
 		Store:  database,
 		Redis:  cfg.RedisConfig(),
-	}, ctx, logger)
+	}
+	if humanVerify != nil {
+		// Assigned only when there is one: a nil client behind an interface is
+		// not a nil interface, and every feature asking whether it has a service
+		// would have to know that.
+		deps.HumanVerify = humanVerify
+	}
+	live := newParts(registry, deps, ctx, logger)
 	if err := live.startFromConfig(cfg); err != nil {
 		return err
 	}
@@ -193,5 +219,36 @@ func buildOneBot(cfg config.OneBot, logger *slog.Logger) (*onebot.Client, error)
 	// The access token is deliberately not logged.
 	logger.Info("onebot fallback is configured",
 		"url", cfg.URL, "join_time_tolerance_seconds", cfg.Tolerance())
+	return client, nil
+}
+
+// buildHumanVerify opens the online verification service, or returns nil when
+// the file configures none.
+//
+// The connection is opened here, at startup, rather than the first time a group
+// asks for a link: the service pushes each result once, to whatever it finds
+// connected, and the one outcome this must not produce is a member who passed
+// the check and is still being held because nobody was listening.
+func buildHumanVerify(cfg config.HumanVerification,
+	logger *slog.Logger) (*humanverify.Client, error) {
+	if !cfg.Configured() {
+		logger.Info("no online verification service is configured, so no group " +
+			"can verify with one")
+		return nil, nil
+	}
+	client, err := humanverify.New(humanverify.Config{
+		BaseURL:        cfg.BaseURL,
+		IssueToken:     cfg.IssueToken,
+		WSToken:        cfg.WSToken,
+		Cdata:          cfg.Cdata,
+		TTLSeconds:     cfg.TTLSeconds,
+		TimeoutSeconds: cfg.TimeoutSeconds,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("app: building the verification client: %w", err)
+	}
+	// The two tokens are deliberately not logged.
+	logger.Info("online verification is available",
+		"url", cfg.BaseURL, "ttl_seconds", cfg.TTLSeconds)
 	return client, nil
 }

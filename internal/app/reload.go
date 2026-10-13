@@ -16,6 +16,7 @@ import (
 	"github.com/fouc3/onebot-ext/onebot"
 	"github.com/fouc3/qq-group-management-bot/internal/config"
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
+	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
 )
 
 // reloadInterval is how often the file is looked at. Polling rather than watching
@@ -207,15 +208,49 @@ func (r *reloader) adoptWide(fresh *config.Config, why string) error {
 		oneBot = client
 	}
 
+	// The verification service moves with the features for the same reason the
+	// fallback client does: every feature holds the connection it was handed, and
+	// a feature that went on holding a client whose address or tokens had changed
+	// would be listening to a service nobody is issuing links from.
+	var humanVerify *humanverify.Client
+	if !reflect.DeepEqual(r.current.HumanVerification, fresh.HumanVerification) {
+		client, err := buildHumanVerify(fresh.HumanVerification, r.logger)
+		if err != nil {
+			return fmt.Errorf("building the verification client: %w", err)
+		}
+		humanVerify = client
+	}
+
 	was := r.parts.deps
+	var replaced *humanverify.Client
 	if oneBot != nil {
 		r.parts.setOneBot(oneBot)
+	}
+	if humanVerify != nil {
+		replaced = r.parts.setHumanVerify(humanVerify)
 	}
 	r.parts.setRedis(fresh)
 
 	if err := r.parts.restartEverything(fresh); err != nil {
 		r.parts.deps = was
+		// The new connection was opened for a rebuild that did not happen, so it
+		// is closed rather than left running beside the one still in force.
+		if humanVerify != nil {
+			if closeErr := humanVerify.Close(); closeErr != nil {
+				r.logger.Warn("the verification connection that was not adopted did "+
+					"not close cleanly", "error", closeErr)
+			}
+		}
 		return fmt.Errorf("building every feature again: %w", err)
+	}
+	// The old connection is closed only now, once every feature holds the new
+	// one: closing it earlier would take the results away from the features that
+	// are still running.
+	if replaced != nil {
+		if err := replaced.Close(); err != nil {
+			r.logger.Warn("the replaced verification connection did not close cleanly",
+				"error", err)
+		}
 	}
 	r.logger.Info("every feature was built again, because the change reaches all "+
 		"of them", "why", why)
@@ -312,14 +347,15 @@ func (r *reloader) enabled(name string, section yaml.Node, onUnreadable bool) bo
 // wideChange reports whether a change reaches every feature.
 //
 // It is about what a feature holds a copy of rather than what it reads: the group
-// list, the bot's own QQ number, the cache address and the fallback client are all
-// handed over when a feature is built, so one built before the change would keep
-// the old one.
+// list, the bot's own QQ number, the cache address, the fallback client and the
+// verification service are all handed over when a feature is built, so one built
+// before the change would keep the old one.
 func wideChange(before, fresh *config.Config) bool {
 	return !reflect.DeepEqual(before.Bot.Groups, fresh.Bot.Groups) ||
 		before.Bot.QQ != fresh.Bot.QQ ||
 		!reflect.DeepEqual(before.Redis, fresh.Redis) ||
-		!reflect.DeepEqual(before.OneBot, fresh.OneBot)
+		!reflect.DeepEqual(before.OneBot, fresh.OneBot) ||
+		!reflect.DeepEqual(before.HumanVerification, fresh.HumanVerification)
 }
 
 // connectionChanged reports whether the settings that build the connection differ.
@@ -343,6 +379,7 @@ func sameConfig(before, fresh *config.Config) bool {
 		!reflect.DeepEqual(before.OneBot, fresh.OneBot),
 		!reflect.DeepEqual(before.Database, fresh.Database),
 		!reflect.DeepEqual(before.Redis, fresh.Redis),
+		!reflect.DeepEqual(before.HumanVerification, fresh.HumanVerification),
 		!reflect.DeepEqual(before.Log, fresh.Log):
 		return false
 	}

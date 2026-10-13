@@ -16,6 +16,7 @@ import (
 	"github.com/fouc3/qq-group-management-bot/internal/feature"
 	"github.com/fouc3/qq-group-management-bot/internal/features/admincmd"
 	"github.com/fouc3/qq-group-management-bot/internal/features/joinrequest"
+	"github.com/fouc3/qq-group-management-bot/internal/humanverify"
 	"github.com/fouc3/qq-group-management-bot/internal/mutelog"
 )
 
@@ -391,4 +392,19 @@ func (p *parts) setOneBot(client *onebot.Client) {
 // setRedis replaces the cache settings every feature built from now on is handed.
 func (p *parts) setRedis(cfg *config.Config) {
 	p.deps.Redis = cfg.RedisConfig()
+}
+
+// setHumanVerify replaces the verification service every feature built from now
+// on is handed, and gives back the one it replaced so the caller can close it.
+//
+// A service that is not there is written as no interface at all rather than as a
+// nil pointer: the feature asks whether it has one, and a nil pointer behind an
+// interface answers yes.
+func (p *parts) setHumanVerify(client *humanverify.Client) *humanverify.Client {
+	previous, _ := p.deps.HumanVerify.(*humanverify.Client)
+	p.deps.HumanVerify = nil
+	if client != nil {
+		p.deps.HumanVerify = client
+	}
+	return previous
 }
